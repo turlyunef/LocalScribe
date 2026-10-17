@@ -1,0 +1,415 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "asr",
+      "repository": "argmaxinc/whisperkit-coreml",
+      "revision": "0f63a7800b00dd0226abd051b906c246e1907482",
+      "license": "MIT",
+      "files": [
+        {
+          "path": "openai_whisper-large-v3/AudioEncoder.mlmodelc/analytics/coremldata.bin",
+          "localPath": "AudioEncoder.mlmodelc/analytics/coremldata.bin",
+          "size": 243,
+          "sha256": "195e35e9fbaa218cd59eca69988a2165245e5bfccc4a5d9776847e8955d1625a"
+        },
+        {
+          "path": "openai_whisper-large-v3/AudioEncoder.mlmodelc/coremldata.bin",
+          "localPath": "AudioEncoder.mlmodelc/coremldata.bin",
+          "size": 348,
+          "sha256": "273d6cd004f95763e9d03e5d36622f11038819a81b9eafed64b1d95444e04f62"
+        },
+        {
+          "path": "openai_whisper-large-v3/AudioEncoder.mlmodelc/metadata.json",
+          "localPath": "AudioEncoder.mlmodelc/metadata.json",
+          "size": 1826,
+          "sha256": "db0d80a1046e03e211928cd2918d5e5924947f4ecbcee5232b125f0f59757fbc"
+        },
+        {
+          "path": "openai_whisper-large-v3/AudioEncoder.mlmodelc/model.mil",
+          "localPath": "AudioEncoder.mlmodelc/model.mil",
+          "size": 581035,
+          "sha256": "3e7737df445ef8fc13238970e3e518c0c6455bcadb6371df2ede1f22dcb8a8e0"
+        },
+        {
+          "path": "openai_whisper-large-v3/AudioEncoder.mlmodelc/model.mlmodel",
+          "localPath": "AudioEncoder.mlmodelc/model.mlmodel",
+          "size": 408667,
+          "sha256": "bf0987c0d8c3fe180877b12ba5b4ac1d890e011f2103926e53186089feced575"
+        },
+        {
+          "path": "openai_whisper-large-v3/AudioEncoder.mlmodelc/weights/weight.bin",
+          "localPath": "AudioEncoder.mlmodelc/weights/weight.bin",
+          "size": 1273974400,
+          "sha256": "eb07bab32dcd62ce653b5b288bd6c27bdc5a538be309f242e33ed05e1cb53457"
+        },
+        {
+          "path": "openai_whisper-large-v3/MelSpectrogram.mlmodelc/analytics/coremldata.bin",
+          "localPath": "MelSpectrogram.mlmodelc/analytics/coremldata.bin",
+          "size": 243,
+          "sha256": "091a361134891f94e613562771beea0d93a9aefbc6984ba86c60f856e07a508f"
+        },
+        {
+          "path": "openai_whisper-large-v3/MelSpectrogram.mlmodelc/coremldata.bin",
+          "localPath": "MelSpectrogram.mlmodelc/coremldata.bin",
+          "size": 329,
+          "sha256": "f3c5778c86d6fbc6a9817a56dbcac05a946a4d95c77f6db8355572f3be9e9a68"
+        },
+        {
+          "path": "openai_whisper-large-v3/MelSpectrogram.mlmodelc/metadata.json",
+          "localPath": "MelSpectrogram.mlmodelc/metadata.json",
+          "size": 1850,
+          "sha256": "1a94f4dfaec25549cbb386fe59b68c67a7a5af4a1c672a5998e5a84b9111135b"
+        },
+        {
+          "path": "openai_whisper-large-v3/MelSpectrogram.mlmodelc/model.mil",
+          "localPath": "MelSpectrogram.mlmodelc/model.mil",
+          "size": 10187,
+          "sha256": "17977ed2332430c6cc4c1da2516f2cd4deb662d65ae38d72725ab157f32d4949"
+        },
+        {
+          "path": "openai_whisper-large-v3/MelSpectrogram.mlmodelc/weights/weight.bin",
+          "localPath": "MelSpectrogram.mlmodelc/weights/weight.bin",
+          "size": 373376,
+          "sha256": "97a66b915cd3fc97dcba6806d92381e1a56024b8f68c1a1cd370d4c92505fe87"
+        },
+        {
+          "path": "openai_whisper-large-v3/TextDecoder.mlmodelc/analytics/coremldata.bin",
+          "localPath": "TextDecoder.mlmodelc/analytics/coremldata.bin",
+          "size": 243,
+          "sha256": "7c151c6259c279aa7922d60e82c7851bbad1df10018b1cebc566aa6c2aee5e0f"
+        },
+        {
+          "path": "openai_whisper-large-v3/TextDecoder.mlmodelc/coremldata.bin",
+          "localPath": "TextDecoder.mlmodelc/coremldata.bin",
+          "size": 637,
+          "sha256": "f41a7939b47f7cf127aa69dfd8c552a141dc773b936bf8621aeffcd201fb9e30"
+        },
+        {
+          "path": "openai_whisper-large-v3/TextDecoder.mlmodelc/metadata.json",
+          "localPath": "TextDecoder.mlmodelc/metadata.json",
+          "size": 4770,
+          "sha256": "de900a968f7640e9775c28268e348a0bc6559a4a92defae07d91e7effa838246"
+        },
+        {
+          "path": "openai_whisper-large-v3/TextDecoder.mlmodelc/model.mil",
+          "localPath": "TextDecoder.mlmodelc/model.mil",
+          "size": 1010477,
+          "sha256": "f8273cbf61aac4a43118a9090fc4d580678ea04abda473b4cb9dda2647d25c27"
+        },
+        {
+          "path": "openai_whisper-large-v3/TextDecoder.mlmodelc/model.mlmodel",
+          "localPath": "TextDecoder.mlmodelc/model.mlmodel",
+          "size": 745579,
+          "sha256": "680d8dfb7c7d8f1f852071ac7bdc96e55c696d0b822e70861045efb426b0a27b"
+        },
+        {
+          "path": "openai_whisper-large-v3/TextDecoder.mlmodelc/weights/weight.bin",
+          "localPath": "TextDecoder.mlmodelc/weights/weight.bin",
+          "size": 1813201716,
+          "sha256": "680f398925225a313c62da0221aa0a58c9f1bffac5c36f20c449a70a7c9b1e55"
+        },
+        {
+          "path": "openai_whisper-large-v3/config.json",
+          "localPath": "config.json",
+          "size": 1163,
+          "sha256": "798b69c08cf93b2b03d94bea6eb3eb25fd4712259712d8a62ed2483fdf818a9e"
+        },
+        {
+          "path": "openai_whisper-large-v3/generation_config.json",
+          "localPath": "generation_config.json",
+          "size": 2810,
+          "sha256": "d24f9cca0f448609a71ae044b736023706382f45e9700e0dffb2559d10cf1fea"
+        }
+      ]
+    },
+    {
+      "id": "diarization",
+      "repository": "argmaxinc/speakerkit-coreml",
+      "revision": "556fc52a13327837688f02289457cded017802e9",
+      "license": "CC-BY-4.0",
+      "files": [
+        {
+          "path": "README.md",
+          "localPath": "README.md",
+          "size": 679,
+          "sha256": "0bab9071b905d4af99fa2d7a7c73935d252b85b3af3b0dba39c8dbc8a4dc6125"
+        },
+        {
+          "path": "speaker_clusterer/pyannote-v4/README.txt",
+          "localPath": "speaker_clusterer/pyannote-v4/README.txt",
+          "size": 98,
+          "sha256": "1714fe351f449b3e0d54f9b5be5219d4168fa2a56e1ab2cae509d5c38a7af915"
+        },
+        {
+          "path": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/analytics/coremldata.bin",
+          "localPath": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/analytics/coremldata.bin",
+          "size": 243,
+          "sha256": "3e13c8f4df77ea27cbbcdd6d083c63f5e7b3f32566cc5bf223fab92d40b81b8b"
+        },
+        {
+          "path": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/coremldata.bin",
+          "localPath": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/coremldata.bin",
+          "size": 327,
+          "sha256": "6f6820ccf221d4cc7c107101d0ae4d716eb224e4fdffaf8f7ca36af70ae64c40"
+        },
+        {
+          "path": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/metadata.json",
+          "localPath": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/metadata.json",
+          "size": 1766,
+          "sha256": "acc86b4a4f542d8e7eaf84fc290fe72bd8629b0ffcc16e5b1a9e13d777abd9d8"
+        },
+        {
+          "path": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/model.mil",
+          "localPath": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/model.mil",
+          "size": 8128,
+          "sha256": "209e641bf4d9c3868c9dc43ab8705094997917eb2df5f5d8c8fda09fed54b1d4"
+        },
+        {
+          "path": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/weights/weight.bin",
+          "localPath": "speaker_clusterer/pyannote-v4/W32A32/PldaProjector.mlmodelc/weights/weight.bin",
+          "size": 199040,
+          "sha256": "a1dbbb651a0a67fcfe5334672f459df090fa960917a6ee3a5423245a7ab92ced"
+        },
+        {
+          "path": "speaker_clusterer/pyannote-v4/W32A32/README.txt",
+          "localPath": "speaker_clusterer/pyannote-v4/W32A32/README.txt",
+          "size": 98,
+          "sha256": "1714fe351f449b3e0d54f9b5be5219d4168fa2a56e1ab2cae509d5c38a7af915"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/README.txt",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/README.txt",
+          "size": 122,
+          "sha256": "c6ac9e9755ca881df5d0493e425a1841b398f7efdfa8c5a5175914587ee45310"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/analytics/coremldata.bin",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/analytics/coremldata.bin",
+          "size": 243,
+          "sha256": "ba8405dfc9b9348ade705e052888b4bdc7fb8d079ef3ff71108a5f692d0209f2"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/coremldata.bin",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/coremldata.bin",
+          "size": 370,
+          "sha256": "1597d6c037ac52436b5c2e1abc47e6c68483c19eeac75267dfb8795a78ec07c5"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/metadata.json",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/metadata.json",
+          "size": 2367,
+          "sha256": "29ea3421161c8344f6ea95db9b472217638a869f686f2494d10e5d11f11f4cda"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/model.mil",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/model.mil",
+          "size": 451487,
+          "sha256": "5eee9f6aa380aef88fee604d75c5deaa23adc83c9480cb8f6dedc72803973e77"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/weights/weight.bin",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedder.mlmodelc/weights/weight.bin",
+          "size": 6661888,
+          "sha256": "a02861969f47cf3a67e3b0d276e54b3c8bc3a6e43d40d77d1cccbd57da0e5795"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/analytics/coremldata.bin",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/analytics/coremldata.bin",
+          "size": 243,
+          "sha256": "ce9bef9fb3125a5401300b5c5998c5d8f211094692cae780645d3e2757410f2c"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/coremldata.bin",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/coremldata.bin",
+          "size": 330,
+          "sha256": "b4ebd0b9ce5a84768672663aff426eb19f9648d4b9f74286f0e19fc753ad76ba"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/metadata.json",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/metadata.json",
+          "size": 1979,
+          "sha256": "789f81c17dc04d469611d253684e534565fb4a008e54c722b925f1608bf87fce"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/model.mil",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/model.mil",
+          "size": 14224,
+          "sha256": "42e552ebd7efb12ea813eceb474018dd0f46168e84ad3a1c54945bfc47be7a82"
+        },
+        {
+          "path": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/weights/weight.bin",
+          "localPath": "speaker_embedder/pyannote-v3/W8A16/SpeakerEmbedderPreprocessor.mlmodelc/weights/weight.bin",
+          "size": 2181696,
+          "sha256": "5f2c284bd22f1f7ab76901c1c6e57f82d4ebbf057fa0b924aad057f124f77a89"
+        },
+        {
+          "path": "speaker_segmenter/pyannote-v3/W8A16/README.txt",
+          "localPath": "speaker_segmenter/pyannote-v3/W8A16/README.txt",
+          "size": 105,
+          "sha256": "b84da4b3cdd7619435f45833d88cad15530a93fb99ef56ee6c4786d7f4664016"
+        },
+        {
+          "path": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/analytics/coremldata.bin",
+          "localPath": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/analytics/coremldata.bin",
+          "size": 243,
+          "sha256": "40637aa0cb2a073bc303c7ca9ee79da35fa81d2cad1ead180e93b134005b95de"
+        },
+        {
+          "path": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/coremldata.bin",
+          "localPath": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/coremldata.bin",
+          "size": 497,
+          "sha256": "6c356ed983b2a3332ce51299ca0f9747a35cb6c2a67b0ac24c69dbef3f989634"
+        },
+        {
+          "path": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/metadata.json",
+          "localPath": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/metadata.json",
+          "size": 3757,
+          "sha256": "2fd6aaf6beb17b3758f5d0c5b2cf5feeacb0cc0c9267dbcd7536b247b1a5860e"
+        },
+        {
+          "path": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/model.mil",
+          "localPath": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/model.mil",
+          "size": 193092,
+          "sha256": "423c358915acab0d440c99f5162c17456936c2c02f7394b05ab226b9a34c122a"
+        },
+        {
+          "path": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/weights/weight.bin",
+          "localPath": "speaker_segmenter/pyannote-v3/W8A16/SpeakerSegmenter.mlmodelc/weights/weight.bin",
+          "size": 1520986,
+          "sha256": "75ff1725ef4e58dacf9176466ec274a8a13a6132c296d6b571fb78ddad5455c4"
+        }
+      ]
+    },
+    {
+      "id": "summary",
+      "repository": "mlx-community/Qwen3.5-9B-4bit",
+      "revision": "8b2b98c00a6b4d291155e4890773ca8f769aee53",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "README.md",
+          "localPath": "README.md",
+          "size": 666,
+          "sha256": "1407e3e3337063c280b2fe1a63724908a5051cfbf26cd8b98f247432b0382537"
+        },
+        {
+          "path": "chat_template.jinja",
+          "localPath": "chat_template.jinja",
+          "size": 7756,
+          "sha256": "a4aee8afcf2e0711942cf848899be66016f8d14a889ff9ede07bca099c28f715"
+        },
+        {
+          "path": "config.json",
+          "localPath": "config.json",
+          "size": 3331,
+          "sha256": "a96942cb6a8a1d3f1d17514d81a1925d04362a6a3233b389d13012211baaa9f8"
+        },
+        {
+          "path": "model-00001-of-00002.safetensors",
+          "localPath": "model-00001-of-00002.safetensors",
+          "size": 5349771222,
+          "sha256": "a68b87558c6ef43f74c2bd63ce7e9092ceddc3101f3def0030774bae5f42aadd"
+        },
+        {
+          "path": "model-00002-of-00002.safetensors",
+          "localPath": "model-00002-of-00002.safetensors",
+          "size": 600449850,
+          "sha256": "b0a770bf8469c7f3f18756a0e0283f1c1174344a83e059a4e483f6af4907352d"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "localPath": "model.safetensors.index.json",
+          "size": 123592,
+          "sha256": "dd023913fb87cfdae27fb11dcf695117c925833796ccac3c64117d6652d8ff1e"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "localPath": "preprocessor_config.json",
+          "size": 390,
+          "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"
+        },
+        {
+          "path": "processor_config.json",
+          "localPath": "processor_config.json",
+          "size": 1300,
+          "sha256": "14932921ca485d458a04dafd8069fbb0a4505622a48208d19ed247115801385b"
+        },
+        {
+          "path": "tokenizer.json",
+          "localPath": "tokenizer.json",
+          "size": 19989343,
+          "sha256": "87a7830d63fcf43bf241c3c5242e96e62dd3fdc29224ca26fed8ea333db72de4"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "localPath": "tokenizer_config.json",
+          "size": 1139,
+          "sha256": "e98f1901ac6f0adff67b1d540bfa0c36ac1a0cf59eb72ed78146ef89aafa1182"
+        },
+        {
+          "path": "video_preprocessor_config.json",
+          "localPath": "video_preprocessor_config.json",
+          "size": 385,
+          "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"
+        },
+        {
+          "path": "vocab.json",
+          "localPath": "vocab.json",
+          "size": 6722759,
+          "sha256": "ce99b4cb2983d118806ce0a8b777a35b093e2000a503ebde25853284c9dfa003"
+        }
+      ]
+    },
+    {
+      "id": "tokenizer",
+      "repository": "openai/whisper-large-v3",
+      "revision": "06f233fe06e710322aca913c1bc4249a0d71fce1",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "added_tokens.json",
+          "localPath": "added_tokens.json",
+          "size": 34648,
+          "sha256": "3c51f66c4c21f9e126970078f11ae77a78c74aee8df606ee9daba86e467108e0"
+        },
+        {
+          "path": "merges.txt",
+          "localPath": "merges.txt",
+          "size": 493869,
+          "sha256": "2df2990a395e35e8dfbc7511e08c12d56018d8d04691e0133e5d63b21e154dc6"
+        },
+        {
+          "path": "normalizer.json",
+          "localPath": "normalizer.json",
+          "size": 52666,
+          "sha256": "bf1c507dc8724ca9cf9903640dacfb69dae2f00edee4f21ceba106a7392f26dd"
+        },
+        {
+          "path": "special_tokens_map.json",
+          "localPath": "special_tokens_map.json",
+          "size": 2072,
+          "sha256": "1c70773c078cb2ca96e0fcff113102f1d3e2b1504272c3bb63b035d4a6700d87"
+        },
+        {
+          "path": "tokenizer.json",
+          "localPath": "tokenizer.json",
+          "size": 2480617,
+          "sha256": "6d8cbd7cd0d8d5815e478dac67b85a26bbe77c1f5e0c6d76d1ce2abc0e5f21ca"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "localPath": "tokenizer_config.json",
+          "size": 282843,
+          "sha256": "844b642c73a91359722f47b35705f7174686df33d252695d8572cf9ac03a6389"
+        },
+        {
+          "path": "vocab.json",
+          "localPath": "vocab.json",
+          "size": 1036558,
+          "sha256": "e2aa043ef015641d363d8288e7c241c85e36a5c761fb303598e0710233344387"
+        }
+      ]
+    }
+  ]
+}

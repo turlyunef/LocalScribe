@@ -1,0 +1,29 @@
+{
+  "normal": {
+    "audio": "deleted; no archive or models",
+    "completedParts": "2",
+    "configurationEvents": "1",
+    "engineRestarts": "0",
+    "frames": "576000",
+    "injectedEvents": "false",
+    "meterSeconds": "12.0",
+    "sampleRate": "48000.0",
+    "seconds": "12.0",
+    "status": "passed",
+    "version": "0.1.1"
+  },
+  "injectedConfigurationAndStop": {
+    "audio": "deleted; no archive or models",
+    "completedParts": "2",
+    "configurationEvents": "3",
+    "engineRestarts": "1",
+    "frames": "571200",
+    "injectedEvents": "true",
+    "meterSeconds": "11.9",
+    "sampleRate": "48000.0",
+    "seconds": "11.9",
+    "status": "passed",
+    "version": "0.1.1"
+  },
+  "scope": "short real hardware capture; not long recording or physical route-change acceptance"
+}

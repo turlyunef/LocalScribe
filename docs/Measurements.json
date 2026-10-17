@@ -1,0 +1,328 @@
+{
+  "generatedAt": "2026-10-17T02:10:38.166434+00:00",
+  "acceptance": "PRELIMINARY — full v1 acceptance not passed",
+  "machine": {
+    "model": "MacBookAir10,1",
+    "chip": "Apple M1",
+    "memoryBytes": 17179869184,
+    "macOSActuallyTested": "27.0.1",
+    "macOSBuild": "26A434",
+    "targetMacOS": "26.0; runtime on 26 not tested",
+    "xcode": "Xcode 27.0\nBuild version 27A266a"
+  },
+  "packageResolvedSHA256": "edac7d6ef4bb2f16fbf131b5ce1d22494ae0308c9ecfc2278c1cb02cbca0714d",
+  "modelCatalogSHA256": "04f96ba8ddfa63146ab3f9f6d1926756930573717537b505c3219fdc7367cf9b",
+  "modelTotalBytes": 9083018913,
+  "modelProfiles": [
+    {
+      "id": "asr",
+      "repository": "argmaxinc/whisperkit-coreml",
+      "revision": "0f63a7800b00dd0226abd051b906c246e1907482",
+      "bytes": 3090319899
+    },
+    {
+      "id": "diarization",
+      "repository": "argmaxinc/speakerkit-coreml",
+      "revision": "556fc52a13327837688f02289457cded017802e9",
+      "bytes": 11244008
+    },
+    {
+      "id": "summary",
+      "repository": "mlx-community/Qwen3.5-9B-4bit",
+      "revision": "8b2b98c00a6b4d291155e4890773ca8f769aee53",
+      "bytes": 5977071733
+    },
+    {
+      "id": "tokenizer",
+      "repository": "openai/whisper-large-v3",
+      "revision": "06f233fe06e710322aca913c1bc4249a0d71fce1",
+      "bytes": 4383273
+    }
+  ],
+  "executables": {
+    "MacOS/LocalScribe": {
+      "sha256": "03d721c63dec2eb3d83822905dd3bc41782e1a0eb9fd9a78d963579426502a15",
+      "minimumMacOS": "26.0"
+    },
+    "Helpers/LocalScribeWorker": {
+      "sha256": "3417f9e20aa249d9960468bc7bc0f84056b7ee7351dd5c01ae8dbb22c2429429",
+      "minimumMacOS": "26.0"
+    },
+    "XPCServices/LocalScribeModelService.xpc/Contents/MacOS/LocalScribeModelService": {
+      "sha256": "d47e44278b3af118be5cc8ed606c0e777d09c4820db035c245f16034e99483bd",
+      "minimumMacOS": "26.0"
+    },
+    "Resources/tools/ffmpeg": {
+      "sha256": "1fd3e7eb7e7042e34a5c1ce06ab16b780e998d0beb98ffa0a51bb3f6204f557b",
+      "minimumMacOS": "26.0"
+    },
+    "Resources/tools/ffprobe": {
+      "sha256": "774f5e5c337c3b318be592ac807addb6fd10e2bf9d6ac6638998cd12a4a9a6c3",
+      "minimumMacOS": "26.0"
+    }
+  },
+  "strictCodeSignatureVerified": true,
+  "signing": "ad-hoc; no Developer ID/notarization",
+  "unitTests": {
+    "executed": 13,
+    "failures": 0
+  },
+  "signedSyntheticPipeline": {
+    "status": "all APIs completed in signed network-denied sandbox",
+    "pipelineVersion": "1.0.0-audio2-asr3-summary10",
+    "audioSeconds": 22.2435625,
+    "source": "local macOS TTS, RU/EN/RU; not a WER/DER benchmark",
+    "stages": {
+      "preparingAudio": {
+        "maxResidentBytes": 17137664,
+        "seconds": 0.1159740686416626
+      },
+      "summarizing": {
+        "maxResidentBytes": 3049259008,
+        "seconds": 245.77961099147797
+      },
+      "transcribing": {
+        "maxResidentBytes": 3830792192,
+        "seconds": 44.064532995224
+      },
+      "diarizing": {
+        "maxResidentBytes": 162398208,
+        "seconds": 10.472388982772827
+      }
+    },
+    "llmAudit": {
+      "contextLimit": 8192,
+      "inputTokens": 996,
+      "reservedOutputTokens": 2000,
+      "stoppedAtEOS": true,
+      "thinkingDisabled": true
+    },
+    "segmentCount": 4,
+    "speakerCount": 2,
+    "summaryLanguage": "ru",
+    "tasks": [
+      {
+        "evidenceSegmentIds": [
+          "seg-000000",
+          "seg-000003"
+        ],
+        "id": "task-0",
+        "ownerSpeakerId": "speaker-1",
+        "text": "Проверить импорт файлов.",
+        "uncertain": false
+      },
+      {
+        "evidenceSegmentIds": [
+          "seg-000002"
+        ],
+        "id": "task-1",
+        "ownerSpeakerId": "speaker-2",
+        "text": "Проверить микрофон.",
+        "uncertain": false
+      }
+    ],
+    "decisions": [
+      {
+        "dueText": "завтра",
+        "evidenceSegmentIds": [
+          "seg-000000",
+          "seg-000003"
+        ],
+        "id": "decision-0",
+        "text": "Проверить релиз завтра.",
+        "uncertain": false
+      }
+    ],
+    "scopeNote": "Full model test from 0.1.0; model adapters unchanged in 0.1.1. Heavy models not rerun for this capture fix."
+  },
+  "noTasksSyntheticControl": {
+    "tasks": 0,
+    "decisions": 0,
+    "overviewItems": 1,
+    "source": "local macOS TTS"
+  },
+  "digitalSilenceControl": {
+    "seconds": 10.0,
+    "segments": 0,
+    "tasks": 0,
+    "decisions": 0,
+    "scope": "exact digital zeros; not quiet-room noise"
+  },
+  "codecPreparation": [
+    {
+      "file": "mixed.wav",
+      "exitCode": 0
+    },
+    {
+      "file": "aac.m4a",
+      "exitCode": 0
+    },
+    {
+      "file": "alac.m4a",
+      "exitCode": 0
+    },
+    {
+      "file": "audio.flac",
+      "exitCode": 0
+    },
+    {
+      "file": "sample.mp3",
+      "exitCode": 0
+    },
+    {
+      "file": "sample-vorbis.ogg",
+      "exitCode": 0
+    },
+    {
+      "file": "sample-opus.ogg",
+      "exitCode": 0
+    },
+    {
+      "file": "sample.opus",
+      "exitCode": 0
+    },
+    {
+      "file": "three-hours.wav",
+      "exitCode": 0
+    }
+  ],
+  "publicCodecProvenance": [
+    {
+      "file": "sample.mp3",
+      "url": "https://samples.ffmpeg.org/A-codecs/MP3/ascii.mp3",
+      "sha256": "7c72e328ad3fe508ba244d8a20bac3d2c646ceca42341dcb7dc4fbf7bb3badeb",
+      "probeExit": 0,
+      "decodeExit": 0,
+      "codec": "mp3",
+      "duration": "15.835000",
+      "decodedDuration": 15.8563125
+    },
+    {
+      "file": "sample-vorbis.ogg",
+      "url": "https://samples.ffmpeg.org/A-codecs/vorbis/Lumme-Badloop.ogg",
+      "sha256": "ebecc57582463db3346625c1da4a51c594b6a3ec2dbebf9d94c2b9b5f1e72f44",
+      "probeExit": 0,
+      "decodeExit": 0,
+      "codec": "vorbis",
+      "duration": "405.054694",
+      "decodedDuration": 405.0546875
+    },
+    {
+      "file": "sample-opus.ogg",
+      "url": "https://samples.ffmpeg.org/A-codecs/opus/testvector12.ogg",
+      "sha256": "411f7a6108c72d32116143903e4042a3ea836a8e2b40a753c2ddcb836c9083fc",
+      "probeExit": 0,
+      "decodeExit": 0,
+      "codec": "opus",
+      "duration": "26.640000",
+      "decodedDuration": 26.64
+    },
+    {
+      "file": "sample.opus",
+      "url": "https://samples.ffmpeg.org/A-codecs/opus/testvector12.ogg",
+      "sha256": "411f7a6108c72d32116143903e4042a3ea836a8e2b40a753c2ddcb836c9083fc",
+      "probeExit": 0,
+      "decodeExit": 0,
+      "codec": "opus",
+      "duration": "26.640000",
+      "decodedDuration": 26.64
+    }
+  ],
+  "mediaFailuresAndPhase": [
+    {
+      "case": "damaged",
+      "exitCode": 1,
+      "failedEvent": true,
+      "noPublishedWave": true,
+      "originalUnchanged": true
+    },
+    {
+      "case": "over-three-hours",
+      "exitCode": 1,
+      "failedEvent": true,
+      "noPublishedWave": true,
+      "originalUnchanged": true
+    },
+    {
+      "case": "antiphase",
+      "exitCode": 0,
+      "warning": true,
+      "decodedPeak": 12000,
+      "originalUnchanged": true
+    }
+  ],
+  "globalDiarization3Hours": {
+    "maxResidentBytes": 2421866496,
+    "intervals": 1460,
+    "audioSeconds": 10800,
+    "seconds": 108.89079403877258,
+    "speakers": 2,
+    "source": "repeated synthetic speech; not a real meeting or DER/hour-absence test"
+  },
+  "workerFaults": {
+    "cancel": {
+      "seconds": 0.0013582090032286942,
+      "exitCode": 72,
+      "checkpointsUnchanged": true
+    },
+    "diarizing": {
+      "exitCode": 1,
+      "failedEvent": true,
+      "priorResultsUnchanged": true
+    },
+    "summarizing": {
+      "exitCode": 1,
+      "failedEvent": true,
+      "priorResultsUnchanged": true
+    }
+  },
+  "parentSIGKILL": {
+    "parentSIGKILL": true,
+    "workerNoLongerRunning": true,
+    "seconds": 0.006465874961577356,
+    "scope": "real standalone worker, parent control pipe closed by SIGKILL; GUI not tested"
+  },
+  "notVerified": [
+    "installed macOS 26",
+    "visual GUI and file dialogs",
+    "real speech WER/DER and large-v3 versus Turbo",
+    "full 3-hour ASR and LLM meeting coverage",
+    "speaker returning after an hour",
+    "cold reboot with physical network disconnected",
+    "combined unified memory, swap delta, controlled thermal/power performance",
+    "disk-full and memory pressure",
+    "clean Mac without developer tools",
+    "Developer ID/notarization",
+    "long microphone capture, physical input disconnect, sleep/kill during capture"
+  ],
+  "applicationVersion": "0.1.1",
+  "microphoneRegression": {
+    "normal": {
+      "audio": "deleted; no archive or models",
+      "completedParts": "2",
+      "configurationEvents": "1",
+      "engineRestarts": "0",
+      "frames": "576000",
+      "injectedEvents": "false",
+      "meterSeconds": "12.0",
+      "sampleRate": "48000.0",
+      "seconds": "12.0",
+      "status": "passed",
+      "version": "0.1.1"
+    },
+    "injectedConfigurationAndStop": {
+      "audio": "deleted; no archive or models",
+      "completedParts": "2",
+      "configurationEvents": "3",
+      "engineRestarts": "1",
+      "frames": "571200",
+      "injectedEvents": "true",
+      "meterSeconds": "11.9",
+      "sampleRate": "48000.0",
+      "seconds": "11.9",
+      "status": "passed",
+      "version": "0.1.1"
+    },
+    "scope": "short real hardware capture; not long recording or physical route-change acceptance"
+  }
+}
