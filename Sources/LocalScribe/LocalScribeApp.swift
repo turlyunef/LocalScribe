@@ -25,7 +25,7 @@ import LocalScribeCore
             ContentView(model: model).frame(minWidth: 850, minHeight: 560)
                 .onAppear { delegate.model = model }
         }.defaultSize(width: 1100, height: 740)
-        Settings { ModelSettings(model: model).frame(width: 570, height: 470) }
+        Settings { ModelSettings(model: model).frame(width: 760, height: 760) }
         MenuBarExtra("LocalScribe", systemImage: model.recordingID == nil ? "waveform" : "record.circle.fill") {
             if model.recordingID != nil {
                 Text(model.finalizingRecording ? "Сохраняем аудио…" : "Идёт запись · \(timecode(Int(model.elapsed*1000)))")

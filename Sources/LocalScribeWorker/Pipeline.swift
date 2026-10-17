@@ -10,6 +10,7 @@ actor Pipeline {
     let recording: URL; let run: URL; let models: URL; let tools: URL
     let manifest: Manifest; let info: RunInfo
     var wave: URL { run.appendingPathComponent("work/audio.wav") }
+    private func modelFolder(_ role: ModelRole) throws -> URL { models.appendingPathComponent(try info.modelID(for: role)) }
     init(command: WorkerCommand, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
         self.command = command; self.emit = emit
         recording = URL(fileURLWithPath: command.recordingPath); run = recording.appendingPathComponent("runs/\(command.runId)")
@@ -33,12 +34,12 @@ actor Pipeline {
             if transcript.segments.isEmpty {
                 try Disk.write(Summary(language: info.summaryLanguage ?? "ru"), to: run.appendingPathComponent("summary.json")); return "summary.json"
             }
-            try await SummaryEngine(modelFolder: models.appendingPathComponent("summary"), run: run, emit: emit).summarize(transcript, language: info.summaryLanguage ?? transcript.primaryLanguage)
+            try await SummaryEngine(modelFolder: modelFolder(.summary), run: run, emit: emit).summarize(transcript, language: info.summaryLanguage ?? transcript.primaryLanguage)
             return "summary.json"
         }
     }
     func transcribe() async throws -> String {
-        let folder = models.appendingPathComponent("asr"), tokenizer = models.appendingPathComponent("tokenizer")
+        let folder = try modelFolder(.asr), tokenizer = try modelFolder(.tokenizer)
         guard FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer.json").path), FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer_config.json").path) else { throw ScribeError.message("Отсутствует локальный токенизатор Whisper") }
         let kit = try await WhisperKit(WhisperKitConfig(modelFolder: folder.path, tokenizerFolder: tokenizer, verbose: false, logLevel: .none, prewarm: true, load: true, download: false))
         let count = max(1, Int(ceil(Double(manifest.durationMs) / 300_000)))
@@ -96,7 +97,7 @@ actor Pipeline {
         if transcript.segments.isEmpty {
             try Disk.write(Transcript(fingerprint: info.fingerprint, diarized: true, segments: []), to: run.appendingPathComponent("transcript.json")); return "transcript.json"
         }
-        let config = PyannoteConfig(modelFolder: models.appendingPathComponent("diarization").path, download: false, load: true, verbose: false, logLevel: .none, concurrentSegmenterWorkers: 1, concurrentEmbedderWorkers: 1)
+        let config = try PyannoteConfig(modelFolder: modelFolder(.diarization).path, download: false, load: true, verbose: false, logLevel: .none, concurrentSegmenterWorkers: 1, concurrentEmbedderWorkers: 1)
         let kit = try await SpeakerKit(config)
         let samples = try Media.samples(wave)
         let result = try await kit.diarize(audioArray: samples)

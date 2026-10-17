@@ -82,11 +82,18 @@ public struct RunInfo: Codable, Sendable {
     public var profileHash: String
     public var pipelineVersion = "1.0.0-audio2-asr3-summary10"
     public var summaryLanguage: String?
+    public var modelIDs: [String: String]?
+    public var transcriptSourceRunID: String?
     public var createdAt = Date()
     public init(id: String = UUID().uuidString, sourceHash: String, profileHash: String, summaryLanguage: String? = nil) {
         self.id = id; self.sourceHash = sourceHash; self.profileHash = profileHash; self.summaryLanguage = summaryLanguage
     }
     public var fingerprint: String { Disk.fingerprint(sourceHash + profileHash + pipelineVersion) }
+    public func modelID(for role: ModelRole) throws -> String {
+        let id = modelIDs?[role.rawValue] ?? role.rawValue
+        guard ModelProfile.safeComponent(id) else { throw ScribeError.message("Недопустимый идентификатор модели") }
+        return id
+    }
 }
 public struct Word: Codable, Sendable, Equatable {
     public var text: String; public var startMs: Int; public var endMs: Int

@@ -53,11 +53,11 @@ struct ContentView: View {
                         }
                         Menu {
                             Button("Показать аудио в Finder", action: model.showAudio)
-                            Button("Обработать заново") { model.repeatAnalysis(summaryOnly: false) }.disabled(model.busy || model.recordingID != nil || !selected.sourceComplete)
+                            Button("Обработать заново") { model.repeatAnalysis(summaryOnly: false) }.disabled(model.busy || model.recordingID != nil || !selected.sourceComplete || !model.modelsReady || model.installing)
                             Menu("Пересоздать итоги") {
                                 Button("Русский") { model.repeatAnalysis(summaryOnly: true, language: "ru") }
                                 Button("English") { model.repeatAnalysis(summaryOnly: true, language: "en") }
-                            }.disabled(model.transcript?.diarized != true || model.busy || model.recordingID != nil)
+                            }.disabled(model.transcript?.diarized != true || model.busy || model.recordingID != nil || !model.modelsReady || model.installing)
                             Divider()
                             Button("Удалить запись…", role: .destructive) { Task { await model.deleteSelected() } }.disabled(model.recordingID == selected.id)
                         } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).frame(width: 28)
@@ -151,20 +151,63 @@ struct ResultTextView: NSViewRepresentable {
 
 struct ModelSettings: View {
     @ObservedObject var model: AppModel
+    @State private var asrID = "asr"
+    @State private var summaryID = "summary"
+    @State private var showFiles = false
+    private var profiles: [ModelProfile] { model.catalog?.models ?? [] }
+    private var downloads: [ModelProfile] { model.profilesToInstall(asrID: asrID, summaryID: summaryID) }
     var body: some View {
         Form {
             Section("Модели для автономной работы") {
                 Text(model.modelsStatus)
-                Text("Первоначальная загрузка — около 9,1 ГБ. Рекомендуется 25 ГБ свободного места.").font(.caption).foregroundStyle(.secondary)
+                Text("Выбранные модели применяются к новым заданиям. Сохранённые записи меняются только по команде «Продолжить», «Обработать заново» или «Пересоздать итоги».")
+                    .font(.caption).foregroundStyle(.secondary)
+                if model.installing { downloadStatus }
+                else {
+                    Button("Проверить установленные модели") { Task { await model.verifyModels() } }.disabled(!model.canManageModels)
+                    if model.verifyingModels { ProgressView().controlSize(.small) }
+                }
+            }
+            Section("Загрузить модели") {
+                Picker("Распознавание", selection: $asrID) {
+                    ForEach(profiles.filter { $0.purpose == .asr }) { profile in
+                        Text("\(profile.displayName) · \(size(profile.bytes))").tag(profile.id)
+                    }
+                }
+                Picker("Итоги", selection: $summaryID) {
+                    ForEach(profiles.filter { $0.purpose == .summary }) { profile in
+                        Text("\(profile.displayName) · \(size(profile.bytes))").tag(profile.id)
+                    }
+                }
+                ForEach(profiles.filter { $0.id == asrID || $0.id == summaryID }) { profile in
+                    if let warning = model.hardware.warning(for: profile) {
+                        Label(warning, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    }
+                }
                 HStack {
-                    Button("Загрузить модели", action: model.installModels).disabled(model.installing || model.busy || model.recordingID != nil)
-                    if model.installing { ProgressView().controlSize(.small); Button("Отменить", action: model.cancelInstall) }
-                    else { Button("Проверить") { Task { await model.verifyModels() } } }
+                    Button("Загрузить выбранные") { model.installModels(downloads) }.buttonStyle(.borderedProminent).disabled(downloads.isEmpty)
+                    Text(downloads.isEmpty ? "Уже установлены" : "Всего: \(size(downloads.reduce(0) { $0 + $1.bytes }))").font(.caption).foregroundStyle(.secondary)
                 }
-                ForEach(model.catalog?.models ?? []) { profile in
-                    HStack { Text(profile.id == "asr" ? "Распознавание · large-v3" : profile.id == "diarization" ? "Участники · SpeakerKit" : profile.id == "summary" ? "Итоги · Qwen3.5-9B" : "Токенизатор речи"); Spacer(); Text(ByteCountFormatter.string(fromByteCount: profile.bytes,countStyle:.file)).foregroundStyle(.secondary); Button("Из папки…") { model.importModel(profile) }.disabled(model.installing || model.busy || model.recordingID != nil) }
+                Text("Нужные токенизатор и модель участников загрузятся автоматически. После успешной установки новая модель станет выбранной; ранее загруженные останутся на диске.")
+                    .font(.caption).foregroundStyle(.secondary)
+                Menu("Импортировать из папки…") {
+                    ForEach(profiles) { profile in Button(profile.displayName) { model.importModel(profile) } }
                 }
-                Button("Удалить модели…", role: .destructive, action: model.removeModels).disabled(model.busy || model.installing || model.recordingID != nil)
+            }.disabled(!model.canManageModels)
+            Section("Загруженные модели") {
+                if model.modelLibrary.installedAt.isEmpty { Text("Пока нет загруженных моделей").foregroundStyle(.secondary) }
+                ForEach(ModelRole.allCases, id: \.self) { role in
+                    let installed = profiles.filter { $0.purpose == role && model.modelLibrary.isInstalled($0) }
+                    if !installed.isEmpty {
+                        Text(role.title).font(.caption).foregroundStyle(.secondary)
+                        ForEach(installed) { profile in installedRow(profile) }
+                    }
+                }
+            }
+            Section("Этот Mac") {
+                Text("\(model.hardware.chip) · \(model.hardware.cpuCores) ядер CPU · \(model.hardware.memoryBytes / 1_073_741_824) ГБ RAM")
+                Text("Бюджет GPU (Metal): \(String(format: "%.1f ГБ", Double(model.hardware.gpuWorkingSetBytes) / 1_073_741_824)). Модели запускаются по очереди; оценка памяти относится к одному этапу, а не к сумме всех скачанных моделей.")
+                    .font(.caption).foregroundStyle(.secondary)
             }
             Section("Локальные данные") {
                 Button("Показать папку данных") { if let root = model.repository?.root { NSWorkspace.shared.open(root) } }
@@ -172,5 +215,57 @@ struct ModelSettings: View {
                 Text("LocalScribe " + (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0.1") + " · локальная предварительная сборка").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
+        .alert("LocalScribe", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
+            Button("OK") { model.error = nil }
+        } message: { Text(model.error ?? "") }
+    }
+    private func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+    @ViewBuilder private func installedRow(_ profile: ModelProfile) -> some View {
+        HStack(alignment: .top) {
+            if profile.purpose == .asr || profile.purpose == .summary {
+                Toggle(profile.displayName, isOn: Binding(get: { model.modelLibrary.isSelected(profile) }, set: { checked in if checked { model.selectModel(profile) } }))
+                    .toggleStyle(.checkbox).disabled(!model.canManageModels)
+            } else {
+                Label(profile.displayName, systemImage: model.modelLibrary.isSelected(profile) ? "checkmark.circle.fill" : "circle")
+            }
+            Spacer()
+            if model.hardware.warning(for: profile) != nil {
+                Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).help(model.hardware.warning(for: profile) ?? "")
+            }
+            Text(size(profile.bytes)).font(.caption).foregroundStyle(.secondary)
+            Button(role: .destructive) { model.removeModel(profile) } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                .buttonStyle(.borderless).help("Удалить \(profile.displayName)").accessibilityLabel("Удалить \(profile.displayName)").disabled(!model.canManageModels)
+        }
+    }
+    @ViewBuilder private var downloadStatus: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(model.downloadBatch).fontWeight(.medium)
+            if let progress = model.downloadProgress, let profile = profiles.first(where: { $0.id == progress.profileID }) {
+                ProgressView(value: progress.fraction).accessibilityLabel("Общий прогресс загрузки модели")
+                HStack {
+                    Text("\(Int(progress.fraction * 100))% · \(size(progress.downloadedBytes)) / \(size(progress.totalBytes))").monospacedDigit()
+                    Spacer()
+                    Text("Проверено файлов: \(progress.completedFiles) / \(profile.files.count)")
+                }.font(.caption)
+                if profile.files.indices.contains(progress.fileIndex) {
+                    Text(profile.files[progress.fileIndex].localPath).font(.caption).lineLimit(2).textSelection(.enabled)
+                }
+                DisclosureGroup("Все файлы модели", isExpanded: $showFiles) {
+                    ForEach(Array(profile.files.enumerated()), id: \.offset) { index, file in
+                        HStack {
+                            Image(systemName: index < progress.completedFiles ? "checkmark.circle.fill" : "doc")
+                                .foregroundStyle(index < progress.completedFiles ? .green : .secondary)
+                            Text(file.localPath).lineLimit(2).help(file.localPath)
+                            Spacer()
+                            if index == progress.fileIndex {
+                                ProgressView(value: file.size > 0 ? Double(progress.fileBytes) / Double(file.size) : 0).frame(width: 70)
+                            }
+                            Text(size(file.size)).foregroundStyle(.secondary)
+                        }.font(.caption)
+                    }
+                }
+            }
+            Button("Отменить загрузку", action: model.cancelInstall)
+        }
     }
 }

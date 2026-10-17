@@ -1,6 +1,7 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import Metal
 import LocalScribeCore
 
 @MainActor final class AppModel: ObservableObject {
@@ -18,6 +19,27 @@ import LocalScribeCore
     @Published var modelsStatus = "Проверяем модели…"
     @Published var modelsReady = false
     @Published var installing = false
+    @Published var verifyingModels = false
+    @Published var modelLibrary = ModelLibrary()
+    @Published var downloadProgress: ModelInstallProgress?
+    @Published var downloadBatch = ""
+    let hardware: ModelHardware = {
+        let gpu = MTLCreateSystemDefaultDevice()
+        var size = 0
+        sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
+        var name = [CChar](repeating: 0, count: max(1, size))
+        sysctlbyname("machdep.cpu.brand_string", &name, &size, nil, 0)
+        #if arch(arm64)
+        let appleSilicon = true
+        #else
+        let appleSilicon = false
+        #endif
+        return ModelHardware(chip: String(cString: name), memoryBytes: ProcessInfo.processInfo.physicalMemory,
+                             cpuCores: ProcessInfo.processInfo.processorCount, gpuWorkingSetBytes: gpu?.recommendedMaxWorkingSetSize ?? 0,
+                             appleSilicon: appleSilicon, supportsMetal: gpu != nil)
+    }()
+    var canManageModels: Bool { !installing && !verifyingModels && !busy && !startingRecording && recordingID == nil && !shuttingDown }
+    var activeCatalog: ModelCatalog? { catalog.flatMap { modelLibrary.activeCatalog(from: $0) } }
     @Published var recordingID: String?
     @Published var startingRecording = false
     @Published var finalizingRecording = false
@@ -77,55 +99,120 @@ import LocalScribeCore
         }
     }
     func verifyModels() async {
-        guard let catalog, let repository else { modelsStatus = "Каталог моделей недоступен"; return }
-        let root = repository.models
-        modelsStatus = "Проверяем целостность моделей…"
+        guard let catalog, let repository, canManageModels else { return }
+        verifyingModels = true; modelsStatus = "Проверяем целостность моделей…"
+        defer { verifyingModels = false; if !queued.isEmpty { Task { await processQueue() } } }
         do {
-            try await Task.detached(priority: .utility) { try catalog.validate(at: root) }.value
-            modelsReady = true; modelsStatus = "Модели готовы · обработка без интернета"
-            try? Disk.write(catalog, to: root.appendingPathComponent("catalog.json"))
-        } catch { modelsReady = false; modelsStatus = "Модели не установлены или не прошли проверку" }
+            modelLibrary = try await Task.detached(priority: .utility) { try ModelLibrary.load(at: repository.models, catalog: catalog) }.value
+            updateModelsStatus()
+        } catch { modelsReady = false; modelsStatus = "Не удалось проверить модели"; self.error = error.localizedDescription }
     }
-    func installModels() {
-        guard let repository, let catalog, !installing, !busy, recordingID == nil else { return }
-        installing = true; modelsReady = false
+    private func updateModelsStatus() {
+        modelsReady = activeCatalog != nil
+        modelsStatus = modelsReady ? "Модели готовы · обработка без интернета" : "Загрузите модели для всех этапов обработки"
+    }
+    func profilesToInstall(asrID: String, summaryID: String) -> [ModelProfile] {
+        guard let catalog else { return [] }
+        let asr = catalog.models.first { $0.id == asrID && $0.purpose == .asr }
+        let ids = [asr?.tokenizerID ?? "tokenizer", asrID, "diarization", summaryID]
+        return ids.compactMap { id in catalog.models.first { $0.id == id && !modelLibrary.isInstalled($0) } }
+    }
+    private func confirmHardware(_ profiles: [ModelProfile], action: String) -> Bool {
+        let warnings = profiles.compactMap { hardware.warning(for: $0) }
+        guard !warnings.isEmpty else { return true }
+        let alert = NSAlert(); alert.alertStyle = .warning
+        alert.messageText = "Модель может быть слишком тяжёлой для этого Mac"
+        alert.informativeText = hardware.chip + " · \(hardware.cpuCores) ядер CPU\n\n" + warnings.joined(separator: "\n\n")
+        alert.addButton(withTitle: action); alert.addButton(withTitle: "Отмена")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+    func installModels(_ profiles: [ModelProfile]) {
+        guard let repository, let catalog, canManageModels, !profiles.isEmpty,
+              confirmHardware(profiles, action: "Всё равно загрузить") else { return }
+        installing = true; downloadProgress = nil
         installTask = Task {
-            defer { installing = false; downloader.close() }
+            defer {
+                installing = false; installTask = nil; downloadProgress = nil; downloadBatch = ""; downloader.close()
+                Task { await processQueue() }
+            }
             do {
-                for profile in catalog.models {
-                    downloader.progress = { self.modelsStatus = $0 }
-                    try await installer.install(profile,root:repository.models,fetch:{ index in try await self.downloader.fetch(profileID:profile.id,index:index) }) { message in Task { @MainActor in self.modelsStatus = message } }
+                for (index, profile) in profiles.enumerated() {
+                    try Task.checkCancellation()
+                    downloadBatch = "Модель \(index + 1) из \(profiles.count) · \(profile.displayName)"
+                    downloadProgress = ModelInstallProgress(profile: profile)
+                    try await installer.install(profile, root: repository.models, fetch: { index, progress in
+                        try await self.downloader.fetch(profileID: profile.id, index: index, progress: progress)
+                    }) { progress in Task { @MainActor in self.receiveProgress(progress) } }
                     downloader.releaseDownload()
+                    // Publish only after every file passed its size and SHA-256 checks.
+                    var updated = modelLibrary
+                    updated.installed(profile, catalog: catalog)
+                    try updated.save(at: repository.models); modelLibrary = updated
                 }
-                await verifyModels()
-                for m in recordings where m.state == .waitingForModels { enqueue(m.id) }
-            } catch { self.error = error.localizedDescription; modelsStatus = "Загрузка не завершена. Проверенные файлы сохранены." }
+                updateModelsStatus()
+            } catch {
+                updateModelsStatus()
+                if Task.isCancelled { modelsStatus += " · загрузка отменена" }
+                else { self.error = error.localizedDescription; modelsStatus += " · загрузка не завершена" }
+            }
+        }
+    }
+    private func receiveProgress(_ progress: ModelInstallProgress) {
+        guard installing, downloadProgress?.profileID == progress.profileID else { return }
+        if let current = downloadProgress {
+            guard progress.completedFiles >= current.completedFiles,
+                  progress.completedFiles != current.completedFiles || progress.downloadedBytes >= current.downloadedBytes else { return }
+            if progress.fileIndex == current.fileIndex && progress.phase.rawValue < current.phase.rawValue { return }
+        }
+        downloadProgress = progress
+        switch progress.phase {
+        case .checking: modelsStatus = "Проверяем файлы модели…"
+        case .downloading: modelsStatus = "Загружаем файлы модели…"
+        case .verifying: modelsStatus = "Проверяем размер и SHA-256…"
+        case .complete: modelsStatus = "Модель загружена и проверена"
         }
     }
     func cancelInstall() { installTask?.cancel(); downloader.cancel() }
     func importModel(_ profile: ModelProfile) {
-        guard let repository, !installing, !busy, recordingID == nil else { return }
-        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false; panel.message = "Выберите папку модели \(profile.id) из закреплённого каталога"
+        guard let repository, let catalog, canManageModels, confirmHardware([profile], action: "Всё равно импортировать") else { return }
+        let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.message = "Выберите папку модели \(profile.displayName) из закреплённого каталога"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let access = url.startAccessingSecurityScopedResource()
-        installing = true; modelsReady = false
-        Task {
-            defer { installing = false; if access { url.stopAccessingSecurityScopedResource() } }
-            do {
-                try await installer.install(profile, root: repository.models, localSource: url) { message in Task { @MainActor in self.modelsStatus = message } }
-                await verifyModels()
-                if modelsReady { for m in recordings where m.state == .waitingForModels { enqueue(m.id) } }
+        installing = true; downloadProgress = ModelInstallProgress(profile: profile); downloadBatch = profile.displayName
+        installTask = Task {
+            defer {
+                installing = false; installTask = nil; downloadProgress = nil; downloadBatch = ""
+                if access { url.stopAccessingSecurityScopedResource() }
+                Task { await processQueue() }
             }
-            catch { self.error = error.localizedDescription }
+            do {
+                try await installer.install(profile, root: repository.models, localSource: url) { progress in Task { @MainActor in self.receiveProgress(progress) } }
+                var updated = modelLibrary; updated.installed(profile, catalog: catalog)
+                try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
+            } catch {
+                updateModelsStatus()
+                if !Task.isCancelled { self.error = error.localizedDescription }
+                else { modelsStatus += " · импорт отменён" }
+            }
         }
     }
-    func removeModels() {
-        guard let repository, let catalog, !busy, !installing, recordingID == nil else { return }
-        let alert = NSAlert(); alert.messageText = "Удалить модели?"; alert.informativeText = "Готовые тексты и аудио останутся в архиве. Для новой обработки понадобится установить модели снова."
-        alert.addButton(withTitle: "Удалить модели"); alert.addButton(withTitle: "Отмена")
+    func selectModel(_ profile: ModelProfile) {
+        guard let repository, let catalog, canManageModels, !modelLibrary.isSelected(profile),
+              confirmHardware([profile], action: "Всё равно выбрать") else { return }
+        do {
+            var updated = modelLibrary; try updated.select(profile, catalog: catalog)
+            try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
+        } catch { self.error = error.localizedDescription }
+    }
+    func removeModel(_ profile: ModelProfile) {
+        guard let repository, let catalog, canManageModels else { return }
+        let alert = NSAlert(); alert.messageText = "Удалить \(profile.displayName)?"
+        alert.informativeText = "Будут удалены только файлы этой модели. Аудио, расшифровки и итоги сохранятся. Если модель выбрана, будет использована последняя установленная из оставшихся моделей того же назначения."
+        alert.addButton(withTitle: "Удалить модель"); alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { for profile in catalog.models { for name in [profile.id,profile.id+".partial"] { let url = repository.models.appendingPathComponent(name); if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) } } }; modelsReady = false; modelsStatus = "Модели удалены" }
-        catch { self.error = error.localizedDescription }
+        do { try modelLibrary.remove(profile, at: repository.models, catalog: catalog); updateModelsStatus() }
+        catch { self.error = error.localizedDescription; Task { await verifyModels() } }
     }
     func chooseImport() {
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
@@ -231,7 +318,7 @@ import LocalScribeCore
         }
     }
     func repeatAnalysis(summaryOnly: Bool, language: String? = nil) {
-        guard let repository, let catalog, var m = selected, !busy, recordingID == nil else { return }
+        guard let repository, let catalog = activeCatalog, var m = selected, canManageModels, modelsReady else { return }
         do { _ = try repository.beginRun(&m, catalog: catalog, summaryLanguage: language, summaryOnly: summaryOnly); reload(); enqueue(m.id) }
         catch { self.error = error.localizedDescription }
     }
@@ -243,7 +330,7 @@ import LocalScribeCore
         reload(); if !busy, recordingID == nil { Task { await processQueue() } }
     }
     private func processQueue() async {
-        guard !busy, !installing, !startingRecording, !shuttingDown, recordingID == nil, modelsReady, let repository, let catalog else { return }
+        guard !busy, !installing, !verifyingModels, !startingRecording, !shuttingDown, recordingID == nil, modelsReady, let repository, let catalog = activeCatalog else { return }
         busy = true; defer { busy = false; activeID = nil; status = ""; reload() }
         while !queued.isEmpty && recordingID == nil && modelsReady {
             if ProcessInfo.processInfo.thermalState == .critical { error = "Mac перегрет. Обработку можно продолжить после охлаждения."; break }
@@ -410,7 +497,7 @@ import LocalScribeCore
                 let bundledModels = resources.appendingPathComponent("ProbeModels")
                 // A separate developer probe bundle supplies read-only public weights. The
                 // shipping app never embeds them or gains access to arbitrary external paths.
-                for profile in catalog.models { try await installer.install(profile,root:modelRoot,localSource:bundledModels.appendingPathComponent(profile.id)) { _ in } }
+                for profile in catalog.models where ModelRole(rawValue: profile.id) != nil { try await installer.install(profile,root:modelRoot,localSource:bundledModels.appendingPathComponent(profile.id)) { _ in } }
                 try FileManager.default.copyItem(at:resources.appendingPathComponent("probe.wav"),to:source)
                 let audio = try Media.probe(source,tools:tools)
                 manifest.durationMs = Int((audio.duration*1000).rounded()); manifest.sampleRate = audio.sampleRate; manifest.channels = audio.channels
@@ -446,11 +533,14 @@ import LocalScribeCore
             let checkData = try checkFile.readToEnd() ?? Data(); try checkFile.close(); downloader.close()
             guard String(data:checkData,encoding:.utf8) == "LocalScribe model service" else { throw ScribeError.message("Неверный ответ XPC-загрузчика") }
             if CommandLine.arguments.contains("--self-check-download"), let profile = catalog.models.first(where:{$0.id == "tokenizer"}), let index = profile.files.indices.min(by:{profile.files[$0].size < profile.files[$1].size}) {
-                let file = try await downloader.fetch(profileID:profile.id,index:index)
+                let progress = Progress(totalUnitCount: profile.files[index].size)
+                let file = try await downloader.fetch(profileID:profile.id,index:index) { progress.completedUnitCount = $0 }
                 let bytes = try file.readToEnd() ?? Data(); try file.close(); downloader.close()
                 let output = diagnostics.appendingPathComponent("download-probe.json")
                 try bytes.write(to:output,options:.atomic)
                 guard try Disk.hash(output) == profile.files[index].sha256 else { throw ScribeError.message("XPC-загрузка не прошла SHA-256") }
+                guard progress.completedUnitCount > 0 else { throw ScribeError.message("XPC-загрузчик не передал прогресс в байтах") }
+                try Disk.write(["status":"passed", "bytes":String(bytes.count), "progressBytes":String(progress.completedUnitCount)], to: diagnostics.appendingPathComponent("model-download-probe-result.json"))
             }
             try Disk.write(["status":"passed","events":events.joined(separator:","),"version":"0.1.0","check":"signed parent -> inherited network-denied worker -> bundled ffmpeg; XPC downloader file descriptor"], to: diagnostics.appendingPathComponent("sandbox-probe-result.json"))
         } catch {

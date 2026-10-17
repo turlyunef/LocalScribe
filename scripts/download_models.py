@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """Developer/bootstrap downloader; the installed app has its own Swift manager."""
-import concurrent.futures, hashlib, json, pathlib, sys, urllib.request, time
+import argparse, concurrent.futures, hashlib, json, pathlib, urllib.request, time
 root = pathlib.Path(__file__).resolve().parents[1]
-dest = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else root / 'Assets/models'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('destination', nargs='?', type=pathlib.Path, default=root / 'Assets/models')
+parser.add_argument('--model', action='append', help='Profile ID; repeat to download several. Default: original four profiles.')
+args = parser.parse_args()
+dest = args.destination
 catalog = json.loads((root / 'Resources/models.lock.json').read_text())
+ids = set(args.model or ['asr', 'diarization', 'summary', 'tokenizer'])
+unknown = ids - {m['id'] for m in catalog['models']}
+if unknown: parser.error('Unknown models: ' + ', '.join(sorted(unknown)))
+ids.update(m['tokenizerID'] for m in catalog['models'] if m['id'] in ids and m.get('tokenizerID'))
+catalog['models'] = [m for m in catalog['models'] if m['id'] in ids]
 def digest(path):
     h = hashlib.sha256()
     with path.open('rb') as fp:

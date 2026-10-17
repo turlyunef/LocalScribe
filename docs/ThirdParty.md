@@ -8,9 +8,9 @@
 | MLX Swift LM 2.31.3 | MIT, https://github.com/ml-explore/mlx-swift-lm/tree/2.31.3 |
 | MLX Swift / MLX | MIT, точная ревизия в Package.resolved |
 | Whisper Core ML / OpenAI Whisper | MIT, https://huggingface.co/argmaxinc/whisperkit-coreml ; https://github.com/openai/whisper |
-| Токенизатор openai/whisper-large-v3 | Apache-2.0 согласно карточке HF, закреплённые JSON только |
+| Токенизаторы openai/whisper-large-v3 и openai/whisper-small | Apache-2.0 согласно карточкам HF, закреплённые JSON только |
 | SpeakerKit Core ML | CC BY 4.0. Атрибуция: Argmax, Inc., SpeakerKit Core ML, https://huggingface.co/argmaxinc/speakerkit-coreml . Веса не изменены; используются варианты W8A16 и W32A32. https://creativecommons.org/licenses/by/4.0/ |
-| Qwen3.5-9B / MLX-конвертация | Apache-2.0. Qwen Team и mlx-community, https://huggingface.co/Qwen/Qwen3.5-9B ; https://huggingface.co/mlx-community/Qwen3.5-9B-4bit . Веса не изменены. |
+| Qwen3.5 4B / 9B / 27B, MLX-конвертации | Apache-2.0. Qwen Team и mlx-community: https://huggingface.co/mlx-community/Qwen3.5-4B-4bit ; https://huggingface.co/mlx-community/Qwen3.5-9B-4bit ; https://huggingface.co/mlx-community/Qwen3.5-27B-4bit . Веса не изменены. |
 | FFmpeg 8.0.1 | LGPL 2.1 or later; сборка без GPL/nonfree/внешних кодеков. https://ffmpeg.org/releases/ffmpeg-8.0.1.tar.xz ; SHA-256 05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41 |
 
 FFmpeg поставляется отдельными исполняемыми файлами, не статически слинкован с приложением. Соответствующий исходный архив сохраняется в Vendor и включается в исходный дистрибутив скриптом package_source.sh вместе с конфигурацией и скриптом сборки. Можно заменить исполняемые файлы своей совместимой сборкой и переподписать личный app bundle. Уведомления FFmpeg отображаются командами ffmpeg -L и -buildconf.

@@ -11,7 +11,7 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
         try? file?.close(); file = nil
         if let temporary { try? FileManager.default.removeItem(at:temporary) }; temporary = nil
     }
-    func download(_ profileID: String, fileIndex: Int, withReply reply: @escaping (FileHandle?, String?) -> Void) {
+    func download(_ profileID: String, fileIndex: Int, requestID: String, withReply reply: @escaping (FileHandle?, String?) -> Void) {
         DispatchQueue.main.async {
             guard self.task == nil else { reply(nil,"Другая загрузка ещё работает"); return }
             self.task = Task { @MainActor in
@@ -22,12 +22,16 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
                     guard let profile = catalog.models.first(where: { $0.id == profileID }), profile.files.indices.contains(fileIndex) else { throw ScribeError.message("Файл не входит в закреплённый каталог") }
                     let file = profile.files[fileIndex]
                     let url = URL(string:"https://huggingface.co/\(profile.repository)/resolve/\(profile.revision)/\(file.path)")!
-                    let session = URLSession(configuration:.ephemeral); defer { session.invalidateAndCancel() }
-                    let (temporary,response) = try await session.download(from:url)
+                    let transfer = ModelFileDownload { bytes in
+                        (self.connection.remoteObjectProxy as? ModelDownloadProgressProtocol)?.update(requestID, bytesWritten: bytes)
+                    }
+                    let (temporary,response) = try await transfer.download(from:url)
+                    self.temporary = temporary
+                    try Task.checkCancellation()
                     guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ScribeError.message("Источник модели недоступен") }
-                    self.temporary = temporary; self.file = try FileHandle(forReadingFrom:temporary)
+                    self.file = try FileHandle(forReadingFrom:temporary)
                     reply(self.file,nil)
-                } catch { reply(nil,error is CancellationError ? "Загрузка отменена" : error.localizedDescription) }
+                } catch { self.clean(); reply(nil,error is CancellationError ? "Загрузка отменена" : error.localizedDescription) }
             }
         }
     }
@@ -42,7 +46,7 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
         }
     }
     func releaseDownload() { DispatchQueue.main.async { self.clean() } }
-    func cancel() { DispatchQueue.main.async { self.task?.cancel(); self.clean() } }
+    func cancel() { DispatchQueue.main.async { self.task?.cancel(); if self.task == nil { self.clean() } } }
 }
 final class ServiceDelegate: NSObject, NSXPCListenerDelegate {
     func listener(_ listener: NSXPCListener, shouldAcceptNewConnection connection: NSXPCConnection) -> Bool {

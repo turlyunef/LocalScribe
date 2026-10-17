@@ -44,13 +44,28 @@ public struct RecordingRepository: Sendable {
         return manifest
     }
     public func beginRun(_ manifest: inout Manifest, catalog: ModelCatalog, summaryLanguage: String? = nil, summaryOnly: Bool = false) throws -> RunInfo {
-        let info = RunInfo(sourceHash: manifest.sha256, profileHash: catalog.fingerprint, summaryLanguage: summaryLanguage)
+        var info = RunInfo(sourceHash: manifest.sha256, profileHash: catalog.fingerprint, summaryLanguage: summaryLanguage)
+        var modelIDs: [String: String] = [:]
+        for profile in catalog.models {
+            guard let role = profile.purpose else { continue }
+            guard modelIDs[role.rawValue] == nil else { throw ScribeError.message("Выберите одну модель для каждого этапа обработки") }
+            modelIDs[role.rawValue] = profile.id
+        }
+        info.modelIDs = modelIDs
+        info.transcriptSourceRunID = summaryOnly ? manifest.activeRunId : nil
         let path = run(manifest.id, info.id); try Disk.directory(path)
         try Disk.write(info, to: path.appendingPathComponent("run.json"))
         if summaryOnly, let active = manifest.activeRunId {
             for name in ["asr-transcript.json", "transcript.json", "diarization.json"] {
                 let source = run(manifest.id, active).appendingPathComponent(name)
-                if FileManager.default.fileExists(atPath: source.path) { try FileManager.default.copyItem(at: source, to: path.appendingPathComponent(name)) }
+                if FileManager.default.fileExists(atPath: source.path) {
+                    if name != "diarization.json" {
+                        var transcript = try Disk.read(Transcript.self, at: source)
+                        try transcript.validate(durationMs: manifest.durationMs)
+                        transcript.fingerprint = info.fingerprint
+                        try Disk.write(transcript, to: path.appendingPathComponent(name))
+                    } else { try FileManager.default.copyItem(at: source, to: path.appendingPathComponent(name)) }
+                }
             }
         }
         manifest.pendingRunId = info.id; manifest.state = .queued; manifest.lastError = nil; try save(manifest)
