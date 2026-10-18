@@ -80,7 +80,7 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public var pipelineVersion = "1.0.0-audio2-asr3-summary10"
+    public var pipelineVersion = "1.0.0-audio2-asr3-summary11"
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
     public var transcriptSourceRunID: String?

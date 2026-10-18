@@ -38,7 +38,7 @@ else:
     run = folder/'runs'/runid; run.mkdir(parents=True)
     catalog = json.loads(pathlib.Path('Resources/models.lock.json').read_text())
     profile = hashlib.sha256(':'.join(m['revision'] for m in catalog['models']).encode()).hexdigest()
-    (run/'run.json').write_text(json.dumps(dict(schemaVersion=1,id=runid,sourceHash=digest,profileHash=profile,pipelineVersion='1.0.0-audio2-asr3-summary10',createdAt=now)))
+    (run/'run.json').write_text(json.dumps(dict(schemaVersion=1,id=runid,sourceHash=digest,profileHash=profile,pipelineVersion='1.0.0-audio2-asr3-summary11',createdAt=now)))
 results = []
 for stage in args.stages.split(','):
     command = dict(version=1, jobId=recording, runId=runid, stage=stage, recordingPath=str(folder), modelsPath=str(args.models.resolve()), toolsPath=str(tools))
