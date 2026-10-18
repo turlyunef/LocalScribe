@@ -11,11 +11,8 @@ final class MicrophoneRecorder {
     private let poolLock = NSLock()
     private var pool: [AVAudioPCMBuffer] = []
     private var stopped = false
-    private var writer: AVAudioFile?
-    private var partFrames: Int64 = 0, totalFrames: Int64 = 0
-    private var partIndex = 0
+    private var captureWriter: MicrophoneCaptureWriter?
     private var format: AVAudioFormat!
-    private var folder: URL!
     private var activity: NSObjectProtocol?
     private var changeObserver: NSObjectProtocol?
     @MainActor private var configurationTask: Task<Void, Never>?
@@ -52,7 +49,7 @@ final class MicrophoneRecorder {
         throw ScribeError.message("Встроенный микрофон не найден. Внешние устройства автоматически не используются.")
     }
     @MainActor func start(folder: URL) throws {
-        self.folder = folder; try Disk.directory(folder)
+        try Disk.directory(folder)
         try Disk.requireSpace(5_000_000_000, at: folder)
         deviceID = try builtInInput()
         let input = engine.inputNode
@@ -61,8 +58,8 @@ final class MicrophoneRecorder {
         guard native.sampleRate > 0, native.channelCount > 0 else { throw ScribeError.message("Микрофон недоступен") }
         expectedInput = configuration(device:deviceID,format:native)
         format = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: native.sampleRate, channels: 1, interleaved: false)!
-        pool = (0..<32).map { _ in AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192)! }
-        try openPart()
+        pool = (0..<32).map { _ in AVAudioPCMBuffer(pcmFormat: format, frameCapacity: MicrophoneCaptureWriter.bufferCapacity)! }
+        captureWriter = try MicrophoneCaptureWriter(folder: folder, format: format)
         input.installTap(onBus: 0, bufferSize: 1024, format: native) { [weak self] buffer, _ in self?.enqueue(buffer) }
         tapInstalled = true
         changeObserver = NotificationCenter.default.addObserver(forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil) { [weak self] _ in
@@ -76,7 +73,7 @@ final class MicrophoneRecorder {
             poolLock.withLock { stopped = true }
             if let changeObserver { NotificationCenter.default.removeObserver(changeObserver) }; changeObserver = nil
             engine.inputNode.removeTap(onBus:0); tapInstalled = false; engine.stop()
-            writerQueue.sync { try? closePart() }
+            writerQueue.sync { try? captureWriter?.close() }
             throw error
         }
     }
@@ -144,45 +141,19 @@ final class MicrophoneRecorder {
         }
     }
     private func consume(_ input: AVAudioPCMBuffer) throws {
-        guard !requestedStop else { return }
-        var position = 0
-        let maxFrames = Int64(format.sampleRate * 10_800), tenSeconds = Int64(format.sampleRate * 10)
-        while position < Int(input.frameLength) && totalFrames < maxFrames {
-            let count = min(Int(input.frameLength) - position, Int(tenSeconds-partFrames), Int(maxFrames-totalFrames))
-            let slice = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(count))!
-            slice.frameLength = AVAudioFrameCount(count)
-            memcpy(slice.floatChannelData![0], input.floatChannelData![0] + position, count * MemoryLayout<Float>.size)
-            try writer?.write(from: slice)
-            partFrames += Int64(count); totalFrames += Int64(count); position += count
-            if partFrames == tenSeconds {
-                try closePart(); partIndex += 1
-                try Disk.requireSpace(totalFrames * 4 + 500_000_000, at: folder)
-                try openPart()
-            }
-        }
+        guard !requestedStop, let captureWriter else { return }
+        try captureWriter.append(input)
+        let totalFrames = captureWriter.totalFrames
         if totalFrames - lastMeter >= Int64(format.sampleRate/10) {
             let meterFrames = totalFrames - lastMeter
             lastMeter = totalFrames
-            let samples = UnsafeBufferPointer(start: input.floatChannelData![0], count: Int(input.frameLength))
-            let peak = samples.map { abs($0) }.max() ?? 0
+            let peak = MicrophoneCaptureWriter.peak(in: input)
             quietFrames = peak < 0.001 ? quietFrames + meterFrames : 0
             let level = min(1, max(0, (20*log10(Double(max(peak, 1e-6))) + 60)/60))
             let message = peak >= 0.99 ? "Слишком громкий звук" : quietFrames >= Int64(format.sampleRate*15) ? "Звук почти не поступает" : nil
             onMeter?(level, Double(totalFrames)/format.sampleRate, message)
         }
-        if totalFrames == maxFrames { requestStop("Достигнут предел 3 часа. Запись сохранена.") }
-    }
-    private func openPart() throws {
-        partFrames = 0
-        writer = try AVAudioFile(forWriting: folder.appendingPathComponent(String(format: "part-%06d.partial.caf", partIndex)), settings: format.settings)
-    }
-    private func closePart() throws {
-        writer = nil
-        let partial = folder.appendingPathComponent(String(format: "part-%06d.partial.caf", partIndex))
-        if partFrames > 0 {
-            let handle = try FileHandle(forWritingTo: partial); try handle.synchronize(); try handle.close()
-            try FileManager.default.moveItem(at: partial, to: folder.appendingPathComponent(String(format: "part-%06d.caf", partIndex)))
-        } else { try? FileManager.default.removeItem(at: partial) }
+        if totalFrames == captureWriter.totalFrameLimit { requestStop("Достигнут предел 3 часа. Запись сохранена.") }
     }
     private func requestStop(_ reason: String) {
         poolLock.lock(); let first = !stopped; stopped = true; poolLock.unlock()
@@ -196,7 +167,10 @@ final class MicrophoneRecorder {
         if let activity { ProcessInfo.processInfo.endActivity(activity) }; activity = nil
         return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Int64, Error>) in
             writerQueue.async {
-                do { try self.closePart(); self.requestedStop = true; continuation.resume(returning:self.totalFrames) }
+                do {
+                    try self.captureWriter?.close(); self.requestedStop = true
+                    continuation.resume(returning: self.captureWriter?.totalFrames ?? 0)
+                }
                 catch { continuation.resume(throwing: error) }
             }
         }
