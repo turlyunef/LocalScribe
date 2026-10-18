@@ -54,12 +54,15 @@ bash scripts/build_app.sh
 
 ```sh
 swift test -c release -j 4
+python3 -m unittest discover -s scripts/tests -v  # bootstrap: локальные mock-источники без весов и сети
 python3 scripts/download_models.py       # только bootstrap разработчика, те же SHA-256
 python3 scripts/download_models.py --model asr-small --model summary-4b --model diarization
 python3 scripts/smoke.py /path/to/audio.wav --worker .build/out/Products/Release/LocalScribeWorker
 python3 scripts/fault_checks.py TestResults/smoke/RECORDING_UUID --worker .build/out/Products/Release/LocalScribeWorker
 bash scripts/package_source.sh
 ```
+
+Bootstrap проверяет размеры и SHA-256 файлов даже в существующих папках моделей. Повреждённый комплект восстанавливается через `.partial` и заменяется только после проверки всего набора; корректные файлы `.partial` используются повторно. `catalog.json` публикуется после успешной установки всех выбранных профилей; при ошибке скрипт завершается с ненулевым кодом.
 
 Воспроизводится состав и процедура сборки; побайтовая идентичность бинарников между разными toolchain/подписями не заявляется.
 
