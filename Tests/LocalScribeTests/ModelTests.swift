@@ -1,3 +1,4 @@
+import Darwin
 import XCTest
 @testable import LocalScribeCore
 
@@ -133,6 +134,89 @@ final class ModelTests: XCTestCase {
         try FileManager.default.removeItem(at: source.appendingPathComponent("file-0.bin"))
         try await ModelInstaller().install(profile, root: models, localSource: source) { _ in }
         try profile.validate(at: models)
+    }
+    func testOversizedLocalAndFetchedRegularFilesAreRejectedBeforeReading() async throws {
+        for fetched in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let models = root.appendingPathComponent("models")
+            let (old, oldSource) = try fixture("asr", role: .asr, root: root, contents: ["old weights"])
+            try await ModelInstaller().install(old, root: models, localSource: oldSource) { _ in }
+            let (profile, source) = try fixture("asr", role: .asr, root: root, contents: ["verified", "new weights"])
+            let partial = models.appendingPathComponent("asr.partial")
+            try Disk.directory(partial)
+            try FileManager.default.copyItem(at: source.appendingPathComponent("file-0.bin"), to: partial.appendingPathComponent("file-0.bin"))
+            // Reuse is required: the verified partial's source is unavailable.
+            try FileManager.default.removeItem(at: source.appendingPathComponent("file-0.bin"))
+            let oversized = source.appendingPathComponent("file-1.bin")
+            let writer = try FileHandle(forWritingTo: oversized)
+            try writer.truncate(atOffset: 64 * 1024 * 1024); try writer.close()
+            let input = try FileHandle(forReadingFrom: oversized)
+            let observer = FileHandle(fileDescriptor: dup(input.fileDescriptor), closeOnDealloc: true)
+            defer { try? input.close(); try? observer.close() }
+            // An earlier incomplete attempt must be removed on failure too.
+            try Data("incomplete".utf8).write(to: partial.appendingPathComponent("file-1.bin"))
+            let log = ProgressLog()
+            do {
+                if fetched {
+                    try await ModelInstaller().install(profile, root: models, fetch: { index, _ in
+                        XCTAssertEqual(index, 1)
+                        return input
+                    }) { log.append($0) }
+                } else {
+                    try await ModelInstaller().install(profile, root: models, localSource: source) { log.append($0) }
+                }
+                XCTFail("Oversized regular file was installed")
+            } catch { XCTAssertTrue(error.localizedDescription.contains("Размер исходного файла")) }
+            if fetched {
+                XCTAssertEqual(try observer.offset(), 0, "Reject a regular FD before reading any data")
+            } else {
+                XCTAssertFalse(log.values.contains { $0.fileIndex == 1 && $0.fileBytes > 0 })
+            }
+            try old.validate(at: models)
+            XCTAssertEqual(try Disk.hash(partial.appendingPathComponent("file-0.bin")), profile.files[0].sha256)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: partial.appendingPathComponent("file-1.bin").path))
+        }
+    }
+    func testFetchedStreamReadsAtMostOneByteBeyondCatalogSize() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (profile, _) = try fixture("asr", role: .asr, root: root)
+        let pipe = Pipe(), body = Data(repeating: 120, count: 1024)
+        defer { try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close() }
+        try pipe.fileHandleForWriting.write(contentsOf: body)
+        try pipe.fileHandleForWriting.close()
+        let observer = FileHandle(fileDescriptor: dup(pipe.fileHandleForReading.fileDescriptor), closeOnDealloc: true)
+        defer { try? observer.close() }
+        let models = root.appendingPathComponent("models")
+        do {
+            try await ModelInstaller().install(profile, root: models, fetch: { _, _ in pipe.fileHandleForReading }) { _ in }
+            XCTFail("Oversized stream was installed")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("превышает размер в каталоге")) }
+        let unread = try observer.readToEnd() ?? Data()
+        XCTAssertEqual(unread.count, body.count - Int(profile.files[0].size) - 1)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: models.appendingPathComponent("asr.partial/file-0.bin").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: models.appendingPathComponent("asr").path))
+    }
+    func testGrowingLocalFileCannotWriteBeyondCatalogSize() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (profile, source) = try fixture("asr", role: .asr, root: root, contents: [String(repeating: "x", count: 5 * 1024 * 1024)])
+        let models = root.appendingPathComponent("models"), log = ProgressLog()
+        let writer = try FileHandle(forWritingTo: source.appendingPathComponent("file-0.bin"))
+        defer { try? writer.close() }
+        try writer.seekToEnd()
+        do {
+            try await ModelInstaller().install(profile, root: models, localSource: source) { event in
+                log.append(event)
+                if event.phase == .downloading && event.fileBytes == 4 * 1024 * 1024 {
+                    try? writer.write(contentsOf: Data(repeating: 120, count: 2 * 1024 * 1024))
+                }
+            }
+            XCTFail("Growing file was installed")
+        } catch { XCTAssertTrue(error.localizedDescription.contains("превышает размер в каталоге")) }
+        XCTAssertEqual(log.values.map(\.fileBytes).max(), 4 * 1024 * 1024)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: models.appendingPathComponent("asr.partial/file-0.bin").path))
     }
     func testSelectedProfilesAndTokenizerAreBoundToNewRunOnly() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

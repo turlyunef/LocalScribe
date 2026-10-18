@@ -31,7 +31,7 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
                     guard let profile = catalog.models.first(where: { $0.id == profileID }), profile.files.indices.contains(fileIndex) else { throw ScribeError.message("Файл не входит в закреплённый каталог") }
                     let file = profile.files[fileIndex]
                     let url = URL(string:"https://huggingface.co/\(profile.repository)/resolve/\(profile.revision)/\(file.path)")!
-                    let transfer = ModelFileDownload { bytes in
+                    let transfer = ModelFileDownload(expectedSize: file.size) { bytes in
                         (self.connection?.remoteObjectProxy as? ModelDownloadProgressProtocol)?.update(requestID, bytesWritten: bytes)
                     }
                     let (temporary,response) = try await transfer.download(from:url)

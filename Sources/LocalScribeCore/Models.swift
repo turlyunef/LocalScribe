@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 
 public enum ModelRole: String, Codable, CaseIterable, Sendable {
@@ -100,6 +101,7 @@ public struct ModelInstallProgress: Sendable {
 /// not deliver download progress to its per-task delegate. Delegate callbacks are
 /// serial; the lock protects start/cancel/completion from task-cancellation races.
 public final class ModelFileDownload: NSObject, URLSessionDownloadDelegate, @unchecked Sendable {
+    private let expectedSize: Int64
     private let progress: @Sendable (Int64) -> Void
     private let lock = NSLock()
     private var session: URLSession?
@@ -109,9 +111,12 @@ public final class ModelFileDownload: NSObject, URLSessionDownloadDelegate, @unc
     private var downloaded: URL?
     private var fileError: Error?
     private var lastReport = Date.distantPast
-    public init(progress: @escaping @Sendable (Int64) -> Void) { self.progress = progress }
+    public init(expectedSize: Int64, progress: @escaping @Sendable (Int64) -> Void) {
+        self.expectedSize = expectedSize; self.progress = progress
+    }
     public func download(from url: URL) async throws -> (URL, URLResponse) {
-        try await withTaskCancellationHandler {
+        guard expectedSize >= 0 else { throw ScribeError.message("Недопустимый размер файла модели") }
+        return try await withTaskCancellationHandler {
             try Task.checkCancellation()
             return try await withCheckedThrowingContinuation { start(url, continuation: $0) }
         } onCancel: { self.cancel() }
@@ -133,10 +138,24 @@ public final class ModelFileDownload: NSObject, URLSessionDownloadDelegate, @unc
         // URLSession deletes its file when this callback returns. Keep our own
         // temporary file until the installer or XPC client has consumed it.
         let saved = FileManager.default.temporaryDirectory.appendingPathComponent("localscribe-model-" + UUID().uuidString)
-        do { try FileManager.default.moveItem(at: location, to: saved); downloaded = saved }
+        do {
+            guard fileError == nil else { return }
+            guard (try location.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == expectedSize else {
+                throw ScribeError.message("Размер загруженного файла модели не совпал с каталогом")
+            }
+            try FileManager.default.moveItem(at: location, to: saved); downloaded = saved
+        }
         catch { fileError = error }
     }
     public func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask, didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
+        // Check every callback, before throttling UI progress. Content-Length may
+        // be missing or false; URLSession has written this chunk to its temp file.
+        guard fileError == nil else { return }
+        guard totalBytesWritten <= expectedSize else {
+            fileError = ScribeError.message("Размер загружаемого файла модели превышает размер в каталоге")
+            downloadTask.cancel()
+            return
+        }
         let now = Date()
         if now.timeIntervalSince(lastReport) >= 0.1 || totalBytesWritten == totalBytesExpectedToWrite {
             lastReport = now; progress(totalBytesWritten)
@@ -152,7 +171,7 @@ public final class ModelFileDownload: NSObject, URLSessionDownloadDelegate, @unc
             continuation?.resume(returning: (downloaded, response))
         } else {
             if let downloaded { try? FileManager.default.removeItem(at: downloaded) }
-            continuation?.resume(throwing: cancelled ? CancellationError() : error ?? fileError ?? ScribeError.message("Загрузчик не сохранил файл"))
+            continuation?.resume(throwing: cancelled ? CancellationError() : fileError ?? error ?? ScribeError.message("Загрузчик не сохранил файл"))
         }
     }
 }
@@ -201,16 +220,16 @@ public actor ModelInstaller {
             if let localSource {
                 let source = localSource.appendingPathComponent(f.localPath)
                 let input = try FileHandle(forReadingFrom: source); defer { try? input.close() }
-                try copy(input, to: destination) { report($0, .downloading) }
+                try copy(input, to: destination, expectedSize: f.size) { report($0, .downloading) }
             } else if let fetch {
                 let source = try await fetch(index) { report($0, .downloading) }
                 defer { try? source.close() }
                 report(f.size, .verifying)
-                try copy(source, to: destination) { _ in }
+                try copy(source, to: destination, expectedSize: f.size) { _ in }
             } else {
                 let encoded = f.path.split(separator: "/").map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)! }.joined(separator: "/")
                 let url = URL(string: "https://huggingface.co/\(profile.repository)/resolve/\(profile.revision)/\(encoded)")!
-                let transfer = ModelFileDownload { report($0, .downloading) }
+                let transfer = ModelFileDownload(expectedSize: f.size) { report($0, .downloading) }
                 let (temp, response) = try await transfer.download(from: url)
                 defer { try? fm.removeItem(at: temp) }
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ScribeError.message("Источник модели недоступен") }
@@ -229,11 +248,25 @@ public actor ModelInstaller {
         try fm.moveItem(at: partial, to: final)
         progress(ModelInstallProgress(profile: profile, fileIndex: profile.files.count, completedFiles: profile.files.count, completedBytes: profile.bytes, phase: .complete))
     }
-    private func copy(_ input: FileHandle, to destination: URL, progress: (Int64) -> Void) throws {
+    private func copy(_ input: FileHandle, to destination: URL, expectedSize: Int64, progress: (Int64) -> Void) throws {
+        var status = stat()
+        guard fstat(input.fileDescriptor, &status) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+        if status.st_mode & S_IFMT == S_IFREG, status.st_size != expectedSize {
+            throw ScribeError.message("Размер исходного файла модели не совпал с каталогом")
+        }
         guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw ScribeError.message("Не удалось создать файл модели") }
         let output = try FileHandle(forWritingTo: destination); defer { try? output.close() }
         var count: Int64 = 0
-        while let bytes = try input.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty {
+        while true {
+            try Task.checkCancellation()
+            // Also bound streams and files that grow after fstat. Probe at most
+            // one byte beyond the catalog size, and never write that byte.
+            let remaining = expectedSize - count
+            let limit = remaining >= 4 * 1024 * 1024 ? 4 * 1024 * 1024 : Int(remaining) + 1
+            guard let bytes = try input.read(upToCount: limit), !bytes.isEmpty else { break }
+            guard Int64(bytes.count) <= remaining else {
+                throw ScribeError.message("Размер исходного файла модели превышает размер в каталоге")
+            }
             try Task.checkCancellation(); try output.write(contentsOf: bytes)
             count += Int64(bytes.count); progress(count)
         }
