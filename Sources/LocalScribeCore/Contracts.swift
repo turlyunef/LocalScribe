@@ -16,13 +16,17 @@ public enum Disk {
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(type, from: Data(contentsOf: url))
     }
-    public static func hash(_ url: URL) throws -> String {
+    public static func hash(_ url: URL, checkCancellation: Bool = false) throws -> String {
         let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
-        return try hash(file)
+        return try hash(file, checkCancellation: checkCancellation)
     }
-    static func hash(_ file: FileHandle) throws -> String {
+    static func hash(_ file: FileHandle, checkCancellation: Bool = false) throws -> String {
         var hash = SHA256()
-        while let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty { hash.update(data: bytes) }
+        while true {
+            if checkCancellation { try Task.checkCancellation() }
+            guard let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty else { break }
+            hash.update(data: bytes)
+        }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
     public static func fingerprint(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }

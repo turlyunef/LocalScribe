@@ -84,21 +84,32 @@ import LocalScribeCore
     private var sleepObserver: NSObjectProtocol?
     private var installTask: Task<Void, Never>?
     private var warningTasks: [UUID: Task<Void, Never>] = [:]
-    private var importTasks: [UUID: Task<Void, Never>] = [:]
+    let importQueue = ImportQueue()
+    enum DuplicateImportAction { case openExisting, importAgain, cancel }
+    var resolveDuplicateImport: (DuplicateRecording) -> DuplicateImportAction = { _ in
+        let alert = NSAlert(); alert.messageText = "Такой файл уже есть в архиве"
+        alert.addButton(withTitle: "Открыть существующую"); alert.addButton(withTitle: "Импортировать ещё раз"); alert.addButton(withTitle: "Отмена")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return .openExisting
+        case .alertSecondButtonReturn: return .importAgain
+        default: return .cancel
+        }
+    }
     private var resultSignature = ""
     private var resultLoadID = UUID()
     var selected: Manifest? { recordings.first { $0.id == selection } }
     var tools: URL { resources.appendingPathComponent("tools") }
     var worker: URL { workerOverride ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
     init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
-         userDefaults: UserDefaults = .standard, catalog providedCatalog: ModelCatalog? = nil) {
+         userDefaults: UserDefaults = .standard, catalog providedCatalog: ModelCatalog? = nil,
+         importProbe: @escaping @Sendable (URL, URL) throws -> AudioInfo = { try Media.probe($0, tools: $1, cancellable: true) }) {
         self.userDefaults = userDefaults
         backgroundRecognition = userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true
         workerOverride = workerExecutable
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
         catalog = providedCatalog ?? (try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json")))
-        do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; archive = RecordingCoordinator(repository: repo) }
+        do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; archive = RecordingCoordinator(repository: repo, importProbe: importProbe) }
         catch { repository = nil; archive = nil; errorHandler.report(message: "Не удалось открыть локальное хранилище: \(error.localizedDescription)") }
         if !startServices { preparingStorage = false; Task { await reload() }; return }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical, .normal], queue: .main)
@@ -322,30 +333,35 @@ import LocalScribeCore
         guard panel.runModal() == .OK else { return }; importURLs(panel.urls)
     }
     func importURLs(_ urls: [URL]) {
+        for url in urls { enqueueImport { url } }
+    }
+    func importProviders(_ providers: [NSItemProvider]) {
+        for provider in providers { enqueueImport { try await DroppedFileURL.load(provider) } }
+    }
+    private func enqueueImport(_ loadURL: @escaping @MainActor () async throws -> URL?) {
         guard !preparingStorage, !shuttingDown, let archive else { return }
-        let taskID = UUID()
-        importTasks[taskID] = Task {
-            defer { importTasks.removeValue(forKey: taskID) }
-            for url in urls {
-                guard !shuttingDown else { return }
+        importQueue.enqueue { [self] in
+            do {
+                guard let url = try await loadURL() else { return }
+                try Task.checkCancellation()
                 let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
                 let tools = self.tools
                 do {
                     let manifest = try await archive.importFile(url, tools: tools)
                     await completeImport(manifest)
                 } catch let duplicate as DuplicateRecording {
+                    try Task.checkCancellation()
                     guard !shuttingDown else { return }
-                    let alert = NSAlert(); alert.messageText = "Такой файл уже есть в архиве"; alert.addButton(withTitle: "Открыть существующую"); alert.addButton(withTitle: "Импортировать ещё раз"); alert.addButton(withTitle: "Отмена")
-                    let answer = alert.runModal()
-                    if answer == .alertFirstButtonReturn { selection = duplicate.id }
-                    if answer == .alertSecondButtonReturn {
-                        do {
-                            let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true)
-                            await completeImport(manifest)
-                        } catch { errorHandler.report(error) }
+                    switch resolveDuplicateImport(duplicate) {
+                    case .openExisting: selection = duplicate.id
+                    case .importAgain:
+                        try Task.checkCancellation()
+                        let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true)
+                        await completeImport(manifest)
+                    case .cancel: break
                     }
-                } catch { errorHandler.report(error) }
-            }
+                }
+            } catch { errorHandler.report(error) }
         }
     }
     func completeImport(_ manifest: Manifest) async {
@@ -748,6 +764,7 @@ import LocalScribeCore
     }
     func shutdown() async {
         shuttingDown = true
+        importQueue.cancel()
         memorySource?.cancel(); memorySource = nil
         if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }; sleepObserver = nil
         installTask?.cancel(); downloader.close()
@@ -757,7 +774,7 @@ import LocalScribeCore
         while finalizingRecording { try? await Task.sleep(for:.milliseconds(50)) }
         await pause(reason:"Приложение закрыто. Можно продолжить обработку."); supervisor.terminateNow()
         await installTask?.value
-        for task in Array(importTasks.values) { await task.value }
+        await importQueue.waitUntilIdle()
         for task in Array(warningTasks.values) { await task.value }
         await archive?.flushIndex()
     }

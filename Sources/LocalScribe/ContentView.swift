@@ -119,7 +119,7 @@ struct ContentView: View {
             }
         }
         .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-            for provider in providers { _ = provider.loadObject(ofClass: URL.self) { url, _ in if let url { Task { @MainActor in model.importURLs([url]) } } } }; return true
+            model.importProviders(providers); return true
         }
         .sheet(isPresented: $recordingSheet) {
             VStack(alignment: .leading, spacing: 18) {

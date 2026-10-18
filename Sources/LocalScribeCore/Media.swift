@@ -6,9 +6,10 @@ public struct AudioInfo: Codable, Sendable {
     public var duration: Double; public var sampleRate: Double; public var channels: Int; public var codec: String
 }
 public enum Media {
-    public static func execute(_ executable: URL, _ arguments: [String]) throws -> Data {
-        // Foundation Process creates a separate process group on macOS. Spawn
-        // without SETPGROUP so media tools inherit the worker's cancellation group.
+    public static func execute(_ executable: URL, _ arguments: [String], cancellable: Bool = false) throws -> Data {
+        if cancellable { try Task.checkCancellation() }
+        // Foundation Process creates a separate process group on macOS. By
+        // default, spawn without SETPGROUP to inherit the worker's group.
         let output = Pipe()
         defer { try? output.fileHandleForReading.close(); try? output.fileHandleForWriting.close() }
         for handle in [output.fileHandleForReading, output.fileHandleForWriting] {
@@ -25,9 +26,13 @@ public enum Media {
         var mask = sigset_t(), defaults = sigset_t()
         sigemptyset(&mask); sigemptyset(&defaults)
         for signal in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGPIPE] { sigaddset(&defaults, signal) }
+        // GUI import probes own a group so cancellation also stops descendants.
+        // Worker tools retain the inherited supervisor group by default.
+        if cancellable, posix_spawnattr_setpgroup(&attributes, 0) != 0 { throw ScribeError.message("Не удалось настроить группу аудиоинструмента") }
+        let flags = POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | (cancellable ? POSIX_SPAWN_SETPGROUP : 0)
         guard posix_spawnattr_setsigmask(&attributes, &mask) == 0,
               posix_spawnattr_setsigdefault(&attributes, &defaults) == 0,
-              posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)) == 0 else { throw ScribeError.message("Не удалось настроить сигналы аудиоинструмента") }
+              posix_spawnattr_setflags(&attributes, Int16(flags)) == 0 else { throw ScribeError.message("Не удалось настроить сигналы аудиоинструмента") }
         // Never persist diagnostic media text or leave an unread stderr pipe.
         let setup = [posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0),
                      posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0),
@@ -47,6 +52,7 @@ public enum Media {
         }
         guard launch == 0 else { throw ScribeError.message("Не удалось запустить аудиоинструмент (код \(launch))") }
         try? output.fileHandleForWriting.close()
+        if cancellable { return try cancellableOutput(output.fileHandleForReading.fileDescriptor, pid: pid) }
         let data = output.fileHandleForReading.readDataToEndOfFile()
         var status: Int32 = 0, waited: pid_t
         repeat { waited = waitpid(pid, &status, 0) } while waited == -1 && errno == EINTR
@@ -55,8 +61,51 @@ public enum Media {
         guard code == 0 else { throw ScribeError.message("Не удалось прочитать аудио (код \(code)). Файл повреждён или кодек не поддерживается.") }
         return data
     }
-    public static func probe(_ source: URL, tools: URL) throws -> AudioInfo {
-        let data = try execute(tools.appendingPathComponent("ffprobe"), ["-v", "error", "-protocol_whitelist", "file,pipe", "-show_streams", "-show_format", "-of", "json", source.path])
+    private static func cancellableOutput(_ descriptor: Int32, pid: pid_t) throws -> Data {
+        var reaped = false
+        defer {
+            if !reaped {
+                // The leader is not reaped until the pipe reaches EOF, preserving
+                // group identity even when a descendant still holds stdout open.
+                kill(-pid, SIGKILL)
+                var status: Int32 = 0
+                while waitpid(pid, &status, 0) == -1 && errno == EINTR { }
+            }
+        }
+        guard fcntl(descriptor, F_SETFL, O_NONBLOCK) == 0 else { throw POSIXError(.EIO) }
+        var data = Data(), buffer = [UInt8](repeating: 0, count: 64 * 1024)
+        while true {
+            try Task.checkCancellation()
+            var item = pollfd(fd: descriptor, events: Int16(POLLIN | POLLHUP), revents: 0)
+            let ready = poll(&item, 1, 50)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw POSIXError(.EIO)
+            }
+            guard ready > 0 else { continue }
+            let count = read(descriptor, &buffer, buffer.count)
+            if count == 0 { break }
+            if count < 0 {
+                if errno == EINTR || errno == EAGAIN { continue }
+                throw POSIXError(.EIO)
+            }
+            data.append(contentsOf: buffer.prefix(count))
+        }
+        // EOF may precede process exit; don't block cancellation in waitpid.
+        var status: Int32 = 0
+        while true {
+            try Task.checkCancellation()
+            let waited = waitpid(pid, &status, WNOHANG)
+            if waited == pid { reaped = true; break }
+            if waited < 0, errno != EINTR { throw POSIXError(.ECHILD) }
+            _ = poll(nil, 0, 50)
+        }
+        let code = (status & 0x7f) == 0 ? (status >> 8) & 0xff : status & 0x7f
+        guard code == 0 else { throw ScribeError.message("Не удалось прочитать аудио (код \(code)). Файл повреждён или кодек не поддерживается.") }
+        return data
+    }
+    public static func probe(_ source: URL, tools: URL, cancellable: Bool = false) throws -> AudioInfo {
+        let data = try execute(tools.appendingPathComponent("ffprobe"), ["-v", "error", "-protocol_whitelist", "file,pipe", "-show_streams", "-show_format", "-of", "json", source.path], cancellable: cancellable)
         guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any], let streams = json["streams"] as? [[String: Any]],
               let audio = streams.first(where: { ($0["codec_type"] as? String) == "audio" }),
               !streams.contains(where: { ($0["codec_type"] as? String) == "video" && (($0["disposition"] as? [String:Any])?["attached_pic"] as? Int) != 1 }),

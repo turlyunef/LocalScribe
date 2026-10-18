@@ -44,8 +44,10 @@ public struct RecordingRepository: Sendable {
         try save(manifest)
     }
     public func importFile(_ source: URL, info: AudioInfo, allowDuplicate: Bool = false) throws -> Manifest {
+        try Task.checkCancellation()
         let fm = FileManager.default
         let input = try ImportSource(source)
+        defer { input.close() }
         let digest = try input.hash()
         if !allowDuplicate, let duplicate = list().first(where: { $0.sha256 == digest }) { throw DuplicateRecording(id: duplicate.id) }
         try Disk.requireSpace(input.size + Int64(info.duration * 32_000) + 500_000_000, at: root)
@@ -57,6 +59,7 @@ public struct RecordingRepository: Sendable {
         let original = folder.appendingPathComponent(manifest.originalRelativePath)
         let partial = original.appendingPathExtension("partial")
         try input.copy(to: partial, verifying: digest)
+        try Task.checkCancellation()
         try fm.moveItem(at: partial, to: original)
         manifest.sha256 = digest; manifest.durationMs = Int((info.duration * 1000).rounded()); manifest.sampleRate = info.sampleRate; manifest.channels = info.channels; manifest.sourceComplete = true; manifest.state = .queued
         try save(manifest)

@@ -27,8 +27,10 @@ final class ImportSource {
 
     func hash() throws -> String {
         try file.seek(toOffset: 0)
-        return try Disk.hash(file)
+        return try Disk.hash(file, checkCancellation: true)
     }
+
+    func close() { try? file.close() }
 
     func copy(to destination: URL, verifying digest: String) throws {
         // Always create a fresh regular file, never follow an existing destination.
@@ -43,12 +45,14 @@ final class ImportSource {
             if !verified { try? FileManager.default.removeItem(at: destination) }
         }
         try file.seek(toOffset: 0)
-        while let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty {
+        while true {
+            try Task.checkCancellation()
+            guard let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty else { break }
             try output.write(contentsOf: bytes)
         }
         try output.synchronize()
         try output.close()
-        guard try Disk.hash(destination) == digest else {
+        guard try Disk.hash(destination, checkCancellation: true) == digest else {
             throw ScribeError.message("Не удалось проверить сохранённый оригинал")
         }
         verified = true

@@ -16,9 +16,12 @@ public actor RecordingCoordinator {
     private var indexTask: Task<Void, Never>?
     private var indexGeneration: UInt64 = 0
     private let indexDelay: Duration
+    private let importProbe: @Sendable (URL, URL) throws -> AudioInfo
 
-    public init(repository: RecordingRepository, indexDelay: Duration = .milliseconds(250)) {
+    public init(repository: RecordingRepository, indexDelay: Duration = .milliseconds(250),
+                importProbe: @escaping @Sendable (URL, URL) throws -> AudioInfo = { try Media.probe($0, tools: $1, cancellable: true) }) {
         self.repository = repository; self.indexDelay = indexDelay
+        self.importProbe = importProbe
     }
 
     public func snapshot() -> Snapshot {
@@ -119,8 +122,9 @@ public actor RecordingCoordinator {
         publish(try repository.saveResultEdits(draft))
     }
     public func importFile(_ source: URL, tools: URL, allowDuplicate: Bool = false) throws -> Manifest {
+        try Task.checkCancellation()
         initialize()
-        let info = try Media.probe(source, tools: tools)
+        let info = try importProbe(source, tools)
         let manifest = try repository.importFile(source, info: info, allowDuplicate: allowDuplicate)
         publish(manifest)
         return manifest
