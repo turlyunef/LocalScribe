@@ -40,8 +40,12 @@ import LocalScribeCore
                              cpuCores: ProcessInfo.processInfo.processorCount, gpuWorkingSetBytes: gpu?.recommendedMaxWorkingSetSize ?? 0,
                              appleSilicon: appleSilicon, supportsMetal: gpu != nil)
     }()
-    var canManageModels: Bool { !savingResult && resultEdit == nil && !preparingStorage && !installing && !verifyingModels && !busy && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
+    var canManageModels: Bool { !savingResult && resultEdit == nil && !preparingStorage && !installing && !verifyingModels && !busy && queued.isEmpty && !resourcesPaused && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
     var activeCatalog: ModelCatalog? { catalog.flatMap { modelLibrary.activeCatalog(from: $0) } }
+    @Published var backgroundRecognition: Bool {
+        didSet { userDefaults.set(backgroundRecognition, forKey: "backgroundRecognition") }
+    }
+    private let userDefaults: UserDefaults
     @Published var recordingID: String?
     @Published var startingRecording = false
     @Published var finalizingRecording = false
@@ -56,6 +60,7 @@ import LocalScribeCore
     let repository: RecordingRepository?
     let catalog: ModelCatalog?
     let resources: URL
+    private let workerOverride: URL?
     let supervisor = WorkerSupervisor()
     private let installer = ModelInstaller()
     private let downloader = ModelDownloadClient()
@@ -63,6 +68,11 @@ import LocalScribeCore
     private var queued: [String] = []
     private var activeID: String?
     private var stopping = false
+    private var resourcesPaused = false
+    private var memoryLimited = false
+    private var captureLimited = false
+    private var suspendingQueue = false
+    private var resourcePauseTask: Task<Void, Never>?
     private var memorySource: DispatchSourceMemoryPressure?
     private var sleepObserver: NSObjectProtocol?
     private var installTask: Task<Void, Never>?
@@ -71,16 +81,27 @@ import LocalScribeCore
     private var resultLoadID = UUID()
     var selected: Manifest? { recordings.first { $0.id == selection } }
     var tools: URL { resources.appendingPathComponent("tools") }
-    var worker: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
-    init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true) {
+    var worker: URL { workerOverride ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
+    init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
+         userDefaults: UserDefaults = .standard) {
+        self.userDefaults = userDefaults
+        backgroundRecognition = userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true
+        workerOverride = workerExecutable
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
         catalog = try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json"))
         do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; recordings = repo.list() }
         catch { repository = nil; errorHandler.report(message: "Не удалось открыть локальное хранилище: \(error.localizedDescription)") }
         if !startServices { preparingStorage = false; return }
-        memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.critical], queue: .main)
-        memorySource?.setEventHandler { [weak self] in Task { @MainActor in await self?.pause(reason: "Обработка приостановлена из-за нехватки памяти. Можно продолжить с контрольной точки.") } }
+        memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical, .normal], queue: .main)
+        memorySource?.setEventHandler { [weak self] in
+            guard let self else { return }
+            if self.memorySource?.data.intersection([.warning, .critical]).isEmpty == true {
+                self.resumeAfterMemoryPressure()
+            } else {
+                self.pauseForCaptureResources(memoryPressure: true)
+            }
+        }
         memorySource?.resume()
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
@@ -308,8 +329,7 @@ import LocalScribeCore
     func startRecording() async {
         guard resultEdit == nil, !savingResult, recordingID == nil, let repository, !preparingStorage, !stopping, !shuttingDown, !startingRecording, !finalizingRecording, !installing else { return }
         startingRecording = true
-        defer { startingRecording = false }
-        await pause(reason: "Обработка приостановлена на время записи. Нажмите «Продолжить», когда будет удобно.")
+        defer { startingRecording = false; Task { await processQueue() } }
         guard await AVCaptureDevice.requestAccess(for: .audio) else { errorHandler.report(message: "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS."); return }
         guard !shuttingDown else { return }
         var m = Manifest(sourceType: "microphone", title: "Запись \(Date().formatted(date: .abbreviated, time: .shortened))", filename: "original.caf")
@@ -324,27 +344,51 @@ import LocalScribeCore
                 if !m.warnings.contains(warning) { m.warnings.append(warning); try? repository.save(m); self.reload() }
             }
             try capture.start(folder: repository.folder(m.id).appendingPathComponent("capture"))
-            recorder = capture; recordingID = m.id; selection = m.id; elapsed = 0; reload()
+            capture.onResourcePressure = { [weak self] in Task { @MainActor in self?.pauseForCaptureResources() } }
+            recorder = capture; recordingID = m.id; selection = m.id; elapsed = 0; soundNotice = nil
+            supervisor.recordingActive = true
+            // Model selection is frozen now, even if this job waits behind older work.
+            if backgroundRecognition, modelsReady, let catalog = activeCatalog {
+                do {
+                    _ = try repository.beginRun(&m, catalog: catalog, liveCapture: true)
+                    enqueueCapture(m.id)
+                } catch {
+                    m = (try? repository.load(m.id)) ?? m; m.captureProcessing = .failed
+                    m.lastError = "Фоновое распознавание не запущено. Звук продолжает сохраняться."
+                    try? repository.save(m)
+                }
+            }
+            reload()
         } catch { m.state = .failed; m.lastError = error.localizedDescription; try? repository.save(m); errorHandler.report(error); reload() }
     }
     func stopRecording(warning: String? = nil) async {
         guard let id = recordingID, let repository, !stopping else { return }
         stopping = true; finalizingRecording = true; status = "Сохраняем аудио…"
-        defer { stopping = false; finalizingRecording = false; if status == "Сохраняем аудио…" { status = "" } }
+        defer {
+            stopping = false; finalizingRecording = false; supervisor.recordingActive = false
+            captureLimited = false; resourcesPaused = memoryLimited
+            if status == "Сохраняем аудио…" { status = "" }
+            Task { await processQueue() }
+        }
         do {
             let frames = try await recorder?.stop() ?? 0; recorder = nil
             if frames == 0 {
                 var m = try repository.load(id); m.state = .failed
                 m.lastError = warning ?? "Микрофон ещё не передал звук. Начните новую запись."
-                try repository.save(m); recordingID = nil; errorHandler.report(message: m.lastError); reload(); return
+                try repository.save(m); recordingID = nil
+                queued.removeAll { $0 == id }
+                if activeID == id { activeID = nil; await supervisor.cancel() }
+                errorHandler.report(message: m.lastError); reload(); return
             }
             if let warning {
                 var m = try repository.load(id); m.warnings.append(warning); try repository.save(m)
                 errorHandler.report(message: warning)
             }
-            try await finalizeCapture(id); recordingID = nil; enqueue(id)
+            try await finalizeCapture(id, expectedFrames: frames); recordingID = nil; enqueue(id)
         } catch {
             recordingID = nil; recorder = nil; errorHandler.report(error)
+            queued.removeAll { $0 == id }
+            if activeID == id { activeID = nil; await supervisor.cancel() }
             if var m = try? repository.load(id) {
                 let parts = (try? FileManager.default.contentsOfDirectory(at:repository.folder(id).appendingPathComponent("capture"),includingPropertiesForKeys:nil)) ?? []
                 let recoverable = parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }
@@ -355,7 +399,7 @@ import LocalScribeCore
         }
         reload()
     }
-    func finalizeCapture(_ id: String) async throws {
+    func finalizeCapture(_ id: String, expectedFrames: Int64? = nil) async throws {
         guard let repository, var m = try? repository.load(id) else { return }
         let folder = repository.folder(id), destination = folder.appendingPathComponent(m.originalRelativePath)
         try Disk.directory(destination.deletingLastPathComponent())
@@ -363,26 +407,51 @@ import LocalScribeCore
             let result = try Media.assembleCapture(folder.appendingPathComponent("capture"), destination: destination)
             return (result.0, result.1, try Disk.hash(destination))
         }.value
+        if let expectedFrames, frames != expectedFrames { throw ScribeError.message("Сохранены не все сэмплы микрофона. Фрагменты оставлены для восстановления.") }
         // The title may have changed while the audio was being assembled.
         m = try repository.load(id)
-        m.durationMs = Int(Double(frames)/rate*1000); m.sampleRate = rate; m.channels = 1; m.sha256 = hash; m.sourceComplete = true; m.state = .recorded
+        m.durationMs = Int(Double(frames)/rate*1000); m.sampleRate = rate; m.channels = 1; m.sha256 = hash; m.sourceComplete = true
+        // Saving the original does not stop the worker that is draining live ASR.
+        // enqueue deliberately ignores its owner, so preserve the running stage here.
+        m.state = activeID == id ? .transcribing : .recorded
         try repository.save(m)
-        // Finalized fragments are removed only after the original and manifest have been validated.
-        try? FileManager.default.removeItem(at: folder.appendingPathComponent("capture"))
+        let liveRun = m.pendingRunId.flatMap { pending -> URL? in
+            let run = repository.run(id, pending)
+            let info = try? Disk.read(RunInfo.self, at: run.appendingPathComponent("run.json"))
+            return info?.liveCapture == true || FileManager.default.fileExists(atPath: run.appendingPathComponent("capture-run.json").path) ? run : nil
+        }
+        if let run = liveRun {
+            let captureInfo = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
+            try await Task.detached(priority: .utility) {
+                let fragments = try CaptureIntegrity.fragments(at: folder.appendingPathComponent("capture"))
+                let seal = CaptureSeal(info: captureInfo, sourceHash: hash, fragments: fragments)
+                try CaptureIntegrity.verify(seal, info: captureInfo, folder: folder.appendingPathComponent("capture"), original: destination)
+                try Disk.write(seal, to: run.appendingPathComponent("capture-seal.json"))
+            }.value
+        } else {
+            try? FileManager.default.removeItem(at: folder.appendingPathComponent("capture"))
+        }
     }
     func resume(_ id: String) {
-        guard !preparingStorage, !shuttingDown, !finalizingRecording else { return }
+        guard !preparingStorage, !shuttingDown, !finalizingRecording, id != recordingID, id != activeID else { return }
         finalizingRecording = true
         Task {
             defer { finalizingRecording = false }
             do {
-                if let repository, var m = try? repository.load(id), !m.sourceComplete {
-                    let parts = (try? FileManager.default.contentsOfDirectory(at:repository.folder(id).appendingPathComponent("capture"),includingPropertiesForKeys:nil)) ?? []
-                    guard parts.contains(where:{ $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }) else {
-                        m.state = .failed; m.lastError = "В этой записи нет сохранённого звука. Начните новую запись."
-                        try repository.save(m); reload(); errorHandler.report(message: m.lastError); return
+                if let repository, var m = try? repository.load(id) {
+                    let needsSeal = m.pendingRunId.map {
+                        let run = repository.run(id, $0)
+                        return FileManager.default.fileExists(atPath: run.appendingPathComponent("capture-run.json").path)
+                            && !FileManager.default.fileExists(atPath: run.appendingPathComponent("capture-seal.json").path)
+                    } ?? false
+                    if !m.sourceComplete || needsSeal {
+                        let parts = (try? FileManager.default.contentsOfDirectory(at:repository.folder(id).appendingPathComponent("capture"),includingPropertiesForKeys:nil)) ?? []
+                        guard parts.contains(where:{ $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }) else {
+                            m.state = .failed; m.lastError = "В этой записи нет сохранённого звука. Начните новую запись."
+                            try repository.save(m); reload(); errorHandler.report(message: m.lastError); return
+                        }
+                        try await finalizeCapture(id)
                     }
-                    try await finalizeCapture(id)
                 }
                 enqueue(id)
             } catch { errorHandler.report(error) }
@@ -393,60 +462,126 @@ import LocalScribeCore
         do { _ = try repository.beginRun(&m, catalog: catalog, summaryLanguage: language, summaryOnly: summaryOnly); reload(); enqueue(m.id) }
         catch { errorHandler.report(error) }
     }
+    func enqueueCapture(_ id: String) {
+        guard let repository, let manifest = try? repository.load(id), manifest.state == .recording,
+              let pending = manifest.pendingRunId,
+              let info = try? Disk.read(RunInfo.self, at: repository.run(id, pending).appendingPathComponent("run.json")),
+              info.liveCapture == true, activeID != id else { return }
+        if !queued.contains(id) { queued.append(id) }
+        Task { await processQueue() }
+    }
     func enqueue(_ id: String) {
         guard let repository, var m = try? repository.load(id), m.sourceComplete, id != activeID else { return }
         if shuttingDown { m.state = .interrupted; m.lastError = "Приложение закрыто. Можно продолжить обработку."; try? repository.save(m); reload(); return }
         m.state = modelsReady ? .queued : .waitingForModels; m.lastError = nil; try? repository.save(m)
         if modelsReady, !queued.contains(id) { queued.append(id) }
-        reload(); if !busy, recordingID == nil { Task { await processQueue() } }
+        // Re-enqueuing a finished capture must keep its original FIFO position.
+        reload(); if !busy { Task { await processQueue() } }
     }
-    private func processQueue() async {
-        guard !preparingStorage, !busy, !installing, !verifyingModels, !startingRecording, !shuttingDown, recordingID == nil, modelsReady, let repository, let catalog = activeCatalog else { return }
+    func processQueue() async {
+        guard !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
+              modelsReady, let repository, let catalog = activeCatalog else { return }
         busy = true; defer { busy = false; activeID = nil; status = ""; reload() }
-        while !queued.isEmpty && recordingID == nil && modelsReady {
-            if ProcessInfo.processInfo.thermalState == .critical { errorHandler.report(message: "Mac перегрет. Обработку можно продолжить после охлаждения."); break }
+        while !queued.isEmpty && modelsReady && !resourcesPaused && !suspendingQueue && resourcePauseTask == nil && !shuttingDown {
+            if ProcessInfo.processInfo.thermalState == .critical {
+                status = "Обработка ожидает охлаждения Mac"
+                try? await Task.sleep(for: .seconds(2)); continue
+            }
             let id = queued.removeFirst(); activeID = id
             do {
                 var m = try repository.load(id)
                 var info: RunInfo?
                 if let pending = m.pendingRunId { info = try? Disk.read(RunInfo.self, at: repository.run(id,pending).appendingPathComponent("run.json")) }
-                if info?.sourceHash != m.sha256 || info?.profileHash != catalog.fingerprint || info?.pipelineVersion != RunInfo(sourceHash: "", profileHash: "").pipelineVersion {
+                let livePending = info?.liveCapture == true && info?.sourceHash == "capture:" + (info?.id ?? "")
+                if !livePending && (info?.sourceHash != m.sha256 || info?.liveCapture != true && info?.profileHash != catalog.fingerprint || info?.pipelineVersion != RunInfo(sourceHash: "", profileHash: "").pipelineVersion) {
                     info = try repository.beginRun(&m, catalog: catalog)
                 }
-                guard let info else { throw ScribeError.message("Не удалось создать задание") }
+                guard var info else { throw ScribeError.message("Не удалось создать задание") }
                 let run = repository.run(id,info.id)
+                if livePending {
+                    m.captureProcessing = .transcribing; try repository.save(m); reload()
+                    var command = WorkerCommand(jobId: id, runId: info.id, stage: .transcribing, recordingPath: repository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
+                    command.liveCapture = true
+                    try await runWorker(command)
+                    guard activeID == id else { throw CancellationError() }
+                    let captureInfo = info
+                    info = try await Task.detached(priority: .utility) {
+                        try repository.bindLiveTranscript(id, info: captureInfo)
+                    }.value
+                    m = try repository.load(id); m.captureProcessing = nil; try repository.save(m)
+                }
                 let stages: [Stage] = [.preparingAudio,.transcribing,.diarizing,.summarizing]
                 for stage in stages {
                     if activeID != id { throw CancellationError() }
+                    m = try repository.load(id)
                     if try stageComplete(stage, run: run, manifest: m, info: info) { continue }
-                    m = try repository.load(id); m.state = JobState(rawValue: stage.rawValue)!; try repository.save(m); reload()
+                    guard m.sourceComplete else { throw ScribeError.message("Исходник ещё записывается") }
+                    m.state = JobState(rawValue: stage.rawValue)!; try repository.save(m); reload()
                     let command = WorkerCommand(jobId: id, runId: info.id, stage: stage, recordingPath: repository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
-                    try await supervisor.run(command, executable: worker) { event in
-                        if event.type == "progress" { self.status = event.message }
-                        if event.type == "checkpoint", event.artifact?.hasPrefix("asr/") == true { self.resultSignature = ""; self.loadResult() }
-                        if event.type == "warning", var current = try? repository.load(id) { if !current.warnings.contains(event.message) { current.warnings.append(event.message) }; try? repository.save(current) }
-                    }
+                    try await runWorker(command)
+                    guard activeID == id else { throw CancellationError() }
                     guard try stageComplete(stage, run: run, manifest: m, info: info) else { throw ScribeError.message("Worker не создал проверяемый результат этапа") }
                     reload()
                 }
+                guard activeID == id else { throw CancellationError() }
                 m = try repository.load(id)
-                m.activeRunId = info.id; m.pendingRunId = nil; m.state = m.warnings.isEmpty ? .completed : .completedWithWarnings; m.lastError = nil
+                m.activeRunId = info.id; m.pendingRunId = nil; m.captureProcessing = nil
+                m.state = m.warnings.isEmpty ? .completed : .completedWithWarnings; m.lastError = nil
                 try repository.save(m)
             } catch {
                 let message = (error as? ScribeError)?.localizedDescription
                     ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."
-                // Cancel/pause clears activeID before stopping the worker.
-                if activeID == id, !(error is CancellationError) {
-                    errorHandler.report(message: message)
-                }
-                if var m = try? repository.load(id), m.state.processing {
-                    m.state = activeID == id ? .failed : .interrupted
-                    m.lastError = message
-                    try? repository.save(m)
+                if activeID == id, !(error is CancellationError) { errorHandler.report(message: message) }
+                if var m = try? repository.load(id), !(resourcesPaused && queued.contains(id)) {
+                    if recordingID == id || !m.sourceComplete && m.state == .recording {
+                        // Processing failure never changes microphone ownership/state.
+                        m.captureProcessing = activeID == id ? .failed : .interrupted
+                    } else if m.state.processing || m.state == .queued || m.state == .recorded {
+                        m.state = activeID == id ? .failed : .interrupted
+                    }
+                    m.lastError = message; try? repository.save(m)
                 }
             }
+            // Only the owning queue task clears activeID, after all readers exit.
             await Task.detached(priority: .utility) { try? repository.cleanupTemporaryFiles(id) }.value
             activeID = nil; reload()
+        }
+    }
+    private func runWorker(_ command: WorkerCommand) async throws {
+        try await supervisor.run(command, executable: worker) { event in
+            if event.type == "progress" { self.status = event.message }
+            if event.type == "checkpoint" {
+                self.resultSignature = ""; self.loadResult()
+            }
+            if event.type == "warning", let repository = self.repository, var current = try? repository.load(command.jobId) {
+                if !current.warnings.contains(event.message) { current.warnings.append(event.message) }
+                try? repository.save(current)
+            }
+        }
+    }
+    func resumeAfterMemoryPressure() {
+        memoryLimited = false; resourcesPaused = captureLimited
+        Task { await resourcePauseTask?.value; await processQueue() }
+    }
+    func pauseForCaptureResources(memoryPressure: Bool = false) {
+        if memoryPressure { memoryLimited = true } else { captureLimited = true }
+        resourcesPaused = true
+        guard resourcePauseTask == nil else { return }
+        resourcePauseTask = Task {
+            if let id = activeID {
+                activeID = nil
+                if !queued.contains(id) { queued.insert(id, at: 0) }
+                if let repository, var m = try? repository.load(id) {
+                    if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .queued }
+                    m.lastError = "Распознавание приостановлено, чтобы сохранить звук при нехватке ресурсов."
+                    try? repository.save(m)
+                }
+                await supervisor.cancel()
+                while busy { try? await Task.sleep(for: .milliseconds(50)) }
+            }
+            resourcePauseTask = nil
+            reload()
+            if !resourcesPaused { await processQueue() }
         }
     }
     func stageComplete(_ stage: Stage, run: URL, manifest: Manifest, info: RunInfo) throws -> Bool {
@@ -475,13 +610,19 @@ import LocalScribeCore
     func pause(reason: String) async {
         if let repository {
             for id in queued {
-                if var m = try? repository.load(id) { m.state = .interrupted; m.lastError = reason; try? repository.save(m) }
+                if var m = try? repository.load(id) {
+                    if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
+                    m.lastError = reason; try? repository.save(m)
+                }
             }
         }
         queued.removeAll()
         guard let id = activeID else { reload(); return }
         activeID = nil
-        if let repository, var m = try? repository.load(id) { m.state = .interrupted; m.lastError = reason; try? repository.save(m) }
+        if let repository, var m = try? repository.load(id) {
+            if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
+            m.lastError = reason; try? repository.save(m)
+        }
         await supervisor.cancel()
         while busy { try? await Task.sleep(for: .milliseconds(50)) }
         reload()
@@ -490,11 +631,16 @@ import LocalScribeCore
         guard let id = selection, let repository else { return }
         queued.removeAll { $0 == id }
         if activeID == id {
-            let waiting = queued
-            await pause(reason: "Обработка отменена пользователем")
-            for other in waiting { enqueue(other) }
+            suspendingQueue = true; activeID = nil
+            await supervisor.cancel()
+            while busy { try? await Task.sleep(for: .milliseconds(50)) }
+            suspendingQueue = false
+            Task { await processQueue() }
         }
-        if var m = try? repository.load(id) { m.state = .cancelled; try? repository.save(m) }; reload()
+        if var m = try? repository.load(id) {
+            if m.state == .recording { m.captureProcessing = .cancelled } else { m.state = .cancelled }
+            try? repository.save(m)
+        }; reload()
     }
     func deleteSelected() async {
         guard let selected, let repository, selected.id != recordingID, !finalizingRecording else { return }

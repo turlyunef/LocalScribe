@@ -12,14 +12,23 @@ let package = Package(
     targets: [
         .target(name: "CWorkerIsolation", linkerSettings: [.linkedLibrary("sandbox")]),
         .target(name: "LocalScribeCore"),
+        // Tracked SpeakerKit 1.1.1 snapshot with the tail-reflection fix.
+        // ArgmaxCore is supplied by the pinned WhisperKit product.
+        .target(name: "LocalScribeSpeakerKit", dependencies: [
+            .product(name: "WhisperKit", package: "argmax-oss-swift")
+        ], path: "ThirdParty/SpeakerKit/Sources/SpeakerKit", swiftSettings: [
+            .swiftLanguageMode(.v6),
+            .enableUpcomingFeature("InferIsolatedConformances"),
+            .enableUpcomingFeature("NonisolatedNonsendingByDefault")
+        ]),
         .executableTarget(name: "LocalScribeModelService", dependencies: ["LocalScribeCore"], swiftSettings: [.swiftLanguageMode(.v5)]),
         .executableTarget(name: "LocalScribe", dependencies: ["LocalScribeCore"], swiftSettings: [.swiftLanguageMode(.v5)]),
-        .executableTarget(name: "LocalScribeWorker", dependencies: ["LocalScribeCore", "CWorkerIsolation",
+        .executableTarget(name: "LocalScribeWorker", dependencies: ["LocalScribeCore", "CWorkerIsolation", "LocalScribeSpeakerKit",
             .product(name: "WhisperKit", package: "argmax-oss-swift"),
-            .product(name: "SpeakerKit", package: "argmax-oss-swift"),
             .product(name: "MLXLLM", package: "mlx-swift-lm"),
             .product(name: "MLXLMCommon", package: "mlx-swift-lm")], swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "LocalScribeTests", dependencies: ["LocalScribeCore"]),
+        .testTarget(name: "LocalScribeDiarizationTests", dependencies: ["LocalScribeSpeakerKit", "LocalScribeCore"]),
         .testTarget(name: "LocalScribeUITests", dependencies: ["LocalScribe", "LocalScribeModelService"])
     ]
 )

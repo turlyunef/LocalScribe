@@ -67,6 +67,7 @@ public struct Manifest: Codable, Identifiable, Sendable {
     public var state: JobState = .recorded
     public var activeRunId: String?
     public var pendingRunId: String?
+    public var captureProcessing: JobState?
     public var warnings: [String] = []
     public var lastError: String?
     public init(sourceType: String, title: String, filename: String) {
@@ -80,10 +81,11 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public var pipelineVersion = "1.0.0-audio2-asr3-summary11"
+    public var pipelineVersion = "1.0.0-audio2-asr5-live1-diarization2-summary11"
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
     public var transcriptSourceRunID: String?
+    public var liveCapture: Bool?
     public var createdAt = Date()
     public init(id: String = UUID().uuidString, sourceHash: String, profileHash: String, summaryLanguage: String? = nil) {
         self.id = id; self.sourceHash = sourceHash; self.profileHash = profileHash; self.summaryLanguage = summaryLanguage
@@ -208,6 +210,7 @@ public struct Summary: Codable, Sendable, Equatable {
 public struct WorkerCommand: Codable, Sendable {
     public var version = 1; public var jobId: String; public var runId: String; public var stage: Stage
     public var recordingPath: String; public var modelsPath: String; public var toolsPath: String
+    public var liveCapture: Bool?
     public init(jobId: String, runId: String, stage: Stage, recordingPath: String, modelsPath: String, toolsPath: String) { self.jobId = jobId; self.runId = runId; self.stage = stage; self.recordingPath = recordingPath; self.modelsPath = modelsPath; self.toolsPath = toolsPath }
 }
 public struct WorkerEvent: Codable, Sendable {

@@ -3,6 +3,15 @@ import Foundation
 public struct VoiceInterval: Codable, Sendable {
     public var startMs: Int; public var endMs: Int; public var speakerId: String
     public init(startMs: Int, endMs: Int, speakerId: String) { self.startMs = startMs; self.endMs = endMs; self.speakerId = speakerId }
+    /// Model padding is context, never part of the published recording timeline.
+    public static func clipped(startSeconds: Double, endSeconds: Double, speakerId: String, durationMs: Int) -> VoiceInterval? {
+        guard durationMs > 0, startSeconds.isFinite, endSeconds.isFinite else { return nil }
+        let duration = Double(durationMs) / 1000
+        let start = min(durationMs, Int(max(0, min(duration, startSeconds)) * 1000))
+        let end = min(durationMs, Int(max(0, min(duration, endSeconds)) * 1000))
+        guard start < end else { return nil }
+        return VoiceInterval(startMs: start, endMs: end, speakerId: speakerId)
+    }
 }
 public struct DiarizationArtifact: Codable, Sendable {
     public var schemaVersion = 1; public var fingerprint: String; public var intervals: [VoiceInterval]
@@ -14,6 +23,29 @@ public struct ASRPart: Codable, Sendable {
     public init(fingerprint: String, index: Int, startMs: Int, endMs: Int, segments: [Segment]) { self.fingerprint = fingerprint; self.index = index; self.startMs = startMs; self.endMs = endMs; self.segments = segments }
 }
 public enum Analysis {
+    // Leave room for a second of context on each side of Whisper's 30 s input.
+    public static let asrCoreWindowMs = 28_000
+
+    /// Energy is only a reason to retry, never evidence that decoded words exist.
+    /// Ignore a short alignment delay and require sustained sound, so leading
+    /// silence does not trigger retries or get moved to timestamp zero.
+    public static func missingASRPrefixEnd(segments: [Segment], samples: [Float], readStartMs: Int, coreStartMs: Int, coreEndMs: Int, rate: Int = 16000) -> Int? {
+        let end = min(coreEndMs, segments.map(\.startMs).min() ?? coreEndMs)
+        guard end - coreStartMs >= 1500 else { return nil }
+        let startFrame = max(0, (coreStartMs - readStartMs) * rate / 1000)
+        let endFrame = min(samples.count, (end - readStartMs - 500) * rate / 1000)
+        guard startFrame < endFrame else { return nil }
+        let block = max(1, rate / 50)
+        var audibleFrames = 0
+        for start in stride(from: startFrame, to: endFrame, by: block) {
+            let stop = min(endFrame, start + block)
+            var energy: Float = 0
+            for i in start..<stop { energy += samples[i] * samples[i] }
+            if energy / Float(stop - start) >= 1e-6 { audibleFrames += stop - start }
+        }
+        return audibleFrames >= rate * 3 / 5 ? end : nil
+    }
+
     /// Choose a pause boundary without deleting silence or moving the original timeline.
     /// Quietness controls splitting only; it never decides whether to discard speech.
     public static func nextASRWindowLength(_ samples: [Float], rate: Int = 16000) -> Int {

@@ -1,0 +1,38 @@
+--- a/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
++++ b/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
+@@ -176,7 +176,7 @@
+                         let waveformLength = Float(chunk.waveform.count) / sampleRateFloat
+                         do {
+                             guard let audioSamples = AudioProcessor.padOrTrimAudio(
+-                                fromArray: chunk.waveform,
++                                fromArray: Self.reflectTail(chunk.waveform, toLength: maxChunkLength),
+                                 startAt: 0,
+                                 toLength: maxChunkLength
+                             ) else {
+@@ -216,6 +216,26 @@
+         }
+     }
+ 
++    // LocalScribe: keep real-speech statistics in the embedder frontend instead
++    // of zero-padding a short final chunk. waveformLength above stays REAL;
++    // reflected samples are inference context only. See Argmax OSS issue #485.
++    static func reflectTail(_ waveform: [Float], toLength length: Int) -> [Float] {
++        guard !waveform.isEmpty, waveform.count < length else { return waveform }
++        var reflected = waveform
++        reflected.reserveCapacity(length)
++        var forward = false
++        while reflected.count < length {
++            let remaining = length - reflected.count
++            if forward {
++                reflected.append(contentsOf: waveform.prefix(remaining))
++            } else {
++                reflected.append(contentsOf: waveform.reversed().prefix(remaining))
++            }
++            forward.toggle()
++        }
++        return reflected
++    }
++
+     func maxChunks(for audioLength: Int) -> Int {
+         let chunkLength = Double(Self.chunkLengthInSeconds) * Double(sampleRate)
+         if useFullRedundancy {

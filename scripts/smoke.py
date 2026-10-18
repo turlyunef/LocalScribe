@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Real engine probe on a user-supplied file. Never inserts fixture results in the app."""
-import argparse, hashlib, json, pathlib, subprocess, time, uuid, datetime, os
+import argparse, hashlib, json, pathlib, subprocess, time, uuid, datetime, os, re
 p = argparse.ArgumentParser()
 p.add_argument('audio', type=pathlib.Path)
 p.add_argument('--worker', type=pathlib.Path, required=True)
@@ -38,7 +38,8 @@ else:
     run = folder/'runs'/runid; run.mkdir(parents=True)
     catalog = json.loads(pathlib.Path('Resources/models.lock.json').read_text())
     profile = hashlib.sha256(':'.join(m['revision'] for m in catalog['models']).encode()).hexdigest()
-    (run/'run.json').write_text(json.dumps(dict(schemaVersion=1,id=runid,sourceHash=digest,profileHash=profile,pipelineVersion='1.0.0-audio2-asr3-summary11',createdAt=now)))
+    pipeline_version = re.search(r'public var pipelineVersion = "([^"]+)"', pathlib.Path('Sources/LocalScribeCore/Contracts.swift').read_text()).group(1)
+    (run/'run.json').write_text(json.dumps(dict(schemaVersion=1,id=runid,sourceHash=digest,profileHash=profile,pipelineVersion=pipeline_version,createdAt=now)))
 results = []
 for stage in args.stages.split(','):
     command = dict(version=1, jobId=recording, runId=runid, stage=stage, recordingPath=str(folder), modelsPath=str(args.models.resolve()), toolsPath=str(tools))

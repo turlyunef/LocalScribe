@@ -5,6 +5,13 @@ import Darwin
 @MainActor final class WorkerSupervisor {
     private var process: Process?
     private var control: Pipe?
+    var recordingActive = false {
+        didSet { applyCapturePriority() }
+    }
+    private func applyCapturePriority() {
+        guard let process, process.isRunning else { return }
+        _ = setpriority(PRIO_DARWIN_PROCESS, UInt32(process.processIdentifier), recordingActive ? PRIO_DARWIN_BG : 0)
+    }
     var running: Bool { process?.isRunning == true }
     func run(_ command: WorkerCommand, executable: URL, diagnosticURL: URL? = nil, onEvent: @escaping @MainActor (WorkerEvent) -> Void) async throws {
         guard process == nil else { throw ScribeError.message("Другой этап ещё работает") }
@@ -14,9 +21,10 @@ import Darwin
                 try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close()
             }
         }
+        p.qualityOfService = .utility
         p.executableURL = executable; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         p.environment = ProcessInfo.processInfo.environment.merging(["HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1", "TOKENIZERS_PARALLELISM": "false"]) { _, value in value }
-        try p.run(); process = p; control = input
+        try p.run(); process = p; control = input; applyCapturePriority()
         defer { try? input.fileHandleForWriting.close(); process = nil; control = nil }
         // Discard SDK stderr continuously: it may include decoded text. It never enters persistent logs.
         let drain = Task.detached { () -> Data in

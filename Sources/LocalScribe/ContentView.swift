@@ -14,6 +14,10 @@ struct ContentView: View {
                         Text(recording.displayTitle).lineLimit(2).fontWeight(.medium)
                         Text("\(timecode(recording.durationMs)) · \(recording.createdAt.formatted(date: .abbreviated, time: .omitted))").font(.caption).foregroundStyle(.secondary)
                         Label(recording.state.title, systemImage: recording.state == .recording ? "record.circle.fill" : recording.state == .completed ? "checkmark.circle" : "waveform").font(.caption).foregroundStyle(recording.state == .recording ? .red : .secondary)
+                        if let processing = recording.captureProcessing, recording.state == .recording {
+                            Label(processing == .transcribing ? "Речь распознаётся в фоне" : processing == .queued ? "Распознавание в очереди" : "Распознавание приостановлено; запись идёт", systemImage: "waveform")
+                                .font(.caption2).foregroundStyle(.secondary)
+                        }
                     }.padding(.vertical, 5).tag(recording.id)
                 }
             }
@@ -51,7 +55,7 @@ struct ContentView: View {
                             ProgressView().controlSize(.small)
                             Button("Отменить") { Task { await model.cancelSelected() } }.help("Отменить обработку выбранной записи")
                         } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
-                            Button("Продолжить") { model.resume(selected.id) }.disabled(model.finalizingRecording || model.recordingID != nil || selected.state == .waitingForModels && !model.modelsReady).help("Продолжить обработку выбранной записи с контрольной точки")
+                            Button("Продолжить") { model.resume(selected.id) }.disabled(model.finalizingRecording || model.recordingID == selected.id || selected.state == .waitingForModels && !model.modelsReady).help("Продолжить обработку выбранной записи с контрольной точки")
                         }
                         RecordingActionsView(
                             canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
@@ -104,7 +108,7 @@ struct ContentView: View {
                 } else {
                     ContentUnavailableView {
                         Label("Разговор останется на вашем Mac", systemImage: "waveform")
-                    } description: { Text("Запишите встроенный микрофон или импортируйте аудио.\nРасшифровка, участники и итоги — после сохранения звука.") } actions: {
+                    } description: { Text("Запишите встроенный микрофон или импортируйте аудио.\nРаспознавание можно начать вместе с записью.\nУчастники и итоги — после сохранения звука.") } actions: {
                         Button("Новая запись") { recordingSheet = true }.buttonStyle(.borderedProminent).disabled(model.startingRecording || model.finalizingRecording || model.installing).help("Настроить и начать запись встроенного микрофона")
                         Button("Импортировать аудио", action: model.chooseImport).help("Выбрать аудиофайлы для расшифровки")
                     }
@@ -277,8 +281,21 @@ struct ModelSettings: View {
                     }
                 }
             }
+            Section {
+                Toggle("Распознавать во время записи", isOn: $model.backgroundRecognition)
+                    .toggleStyle(.checkbox)
+                    .disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording)
+                    .accessibilityIdentifier("settings.backgroundRecognition")
+                    .help("Применяется с начала следующей записи. Обработка ждёт завершения старых заданий; участники и итоги — после остановки.")
+                if model.backgroundRecognition && !model.modelsReady {
+                    Text("Для фонового распознавания сначала установите модели")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("settings.backgroundRecognition.modelsRequired")
+                }
+            }
             Section("Этот Mac") {
                 Text("\(model.hardware.chip) · \(model.hardware.cpuCores) ядер CPU · \(model.hardware.memoryBytes / 1_073_741_824) ГБ RAM")
+                    .accessibilityIdentifier("settings.hardware")
                 Text("Бюджет GPU (Metal): \(String(format: "%.1f ГБ", Double(model.hardware.gpuWorkingSetBytes) / 1_073_741_824)). Модели запускаются по очереди; оценка памяти относится к одному этапу, а не к сумме всех скачанных моделей.")
                     .font(.caption).foregroundStyle(.secondary)
             }

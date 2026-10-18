@@ -2,6 +2,11 @@
 
 Исходные зависимости полностью закреплены в Package.resolved. Их лицензионные тексты копируются из checkout в Resources/Licenses при сборке.
 
+SpeakerKit собирается из отслеживаемого снимка Argmax OSS 1.1.1 с локальным
+исправлением дополнения хвоста, как модуль `LocalScribeSpeakerKit`.
+Ревизия, исходные SHA-256, diff и порядок обновления — [ThirdParty/SpeakerKit](../ThirdParty/SpeakerKit/README.md).
+Его `LICENSE` и `NOTICES` также копируются в `.app` из репозитория.
+
 | Компонент | Лицензия / источник |
 |---|---|
 | Argmax OSS 1.1.1 (WhisperKit, SpeakerKit, встроенные производные swift-transformers) | MIT и уведомления NOTICES в исходном пакете; https://github.com/argmaxinc/argmax-oss-swift/tree/v1.1.1 |

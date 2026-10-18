@@ -50,6 +50,79 @@ final class ContentLayoutTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
     }
 
+    func testBackgroundRecognitionIsStandardCheckboxAboveHardwareInSettings() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(repository: try RecordingRepository(root: root), startServices: false,
+                             userDefaults: defaults)
+        let (hosting, window) = host(ModelSettings(model: model), width: 760, height: 1300)
+        defer { window.close() }
+        try await settle(hosting)
+        let checkbox = try element("settings.backgroundRecognition", in: hosting)
+        XCTAssertEqual(checkbox.accessibilityRole?(), .checkBox)
+        XCTAssertEqual(checkbox.accessibilityLabel?(), "Распознавать во время записи")
+        let object = try XCTUnwrap(checkbox as? NSObject)
+        let value = object.perform(NSSelectorFromString("accessibilityValue"))?.takeUnretainedValue() as? NSNumber
+        XCTAssertEqual(value?.boolValue, true)
+        XCTAssertTrue(checkbox.isAccessibilityEnabled?() ?? false)
+        let frame = try XCTUnwrap(checkbox.accessibilityFrame?())
+        let hardware = try XCTUnwrap(element("settings.hardware", in: hosting).accessibilityFrame?())
+        XCTAssertGreaterThan(frame.width, 0)
+        XCTAssertGreaterThanOrEqual(frame.minY, hardware.maxY)
+        XCTAssertNotNil(try element("settings.backgroundRecognition.modelsRequired", in: hosting))
+
+        XCTAssertTrue(checkbox.accessibilityPerformPress?() ?? false)
+        try await settle(hosting)
+        XCTAssertFalse(model.backgroundRecognition)
+        XCTAssertEqual(defaults.object(forKey: "backgroundRecognition") as? Bool, false)
+        XCTAssertFalse(descendants(hosting).contains {
+            $0.accessibilityIdentifier?() == "settings.backgroundRecognition.modelsRequired"
+        })
+        model.backgroundRecognition = true
+        model.modelsReady = true
+        try await settle(hosting)
+        XCTAssertFalse(descendants(hosting).contains {
+            $0.accessibilityIdentifier?() == "settings.backgroundRecognition.modelsRequired"
+        })
+
+        for state in 0..<4 {
+            model.recordingID = state == 0 ? UUID().uuidString : nil
+            model.startingRecording = state == 1
+            model.finalizingRecording = state == 2
+            try await settle(hosting)
+            XCTAssertEqual(try element("settings.backgroundRecognition", in: hosting).isAccessibilityEnabled?(), state == 3)
+        }
+    }
+
+    func testMainWindowAndResultEditorHaveNoBackgroundRecognitionControl() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        try repo.save(manifest)
+        let model = AppModel(repository: repo, startServices: false)
+        let (hosting, window) = host(ContentView(model: model), width: 1200)
+        defer { window.close() }
+        for selection in [nil, manifest.id] {
+            model.selection = selection
+            try await settle(hosting)
+            XCTAssertFalse(descendants(hosting).contains {
+                text($0) == "Распознавать во время записи"
+                    || $0.accessibilityIdentifier?() == "recording.backgroundRecognition"
+                    || $0.accessibilityIdentifier?() == "settings.backgroundRecognition"
+            })
+        }
+        let draft = ResultEditDraft(recordingID: manifest.id, runID: UUID().uuidString,
+            transcript: Transcript(fingerprint: "f", diarized: true, segments: []), summary: nil)
+        let (editor, editorWindow) = host(ResultEditorView(initial: draft, save: { _ in }, cancel: {}, reportError: { _ in }), width: 800)
+        defer { editorWindow.close() }
+        try await settle(editor)
+        XCTAssertFalse(descendants(editor).contains { text($0) == "Распознавать во время записи" })
+    }
+
     func testSidebarStatusIsCenteredAboveModelsForBothStates() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

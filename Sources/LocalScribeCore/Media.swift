@@ -109,6 +109,9 @@ public enum Media {
     }
     public static func assembleCapture(_ folder: URL, destination: URL) throws -> (Int64, Double) {
         let parts = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).filter { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        return try assembleCaptureParts(parts, destination: destination)
+    }
+    public static func assembleCaptureParts(_ parts: [URL], destination: URL) throws -> (Int64, Double) {
         guard let first = parts.first else { throw ScribeError.message("Нет завершённых фрагментов записи") }
         let format = try AVAudioFile(forReading: first).processingFormat
         let temp = destination.appendingPathExtension("assembling.caf")

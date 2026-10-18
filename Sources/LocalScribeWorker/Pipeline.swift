@@ -1,7 +1,7 @@
 import Foundation
 import LocalScribeCore
 import WhisperKit
-import SpeakerKit
+import LocalScribeSpeakerKit
 import ArgmaxCore
 
 actor Pipeline {
@@ -12,15 +12,30 @@ actor Pipeline {
     var wave: URL { run.appendingPathComponent("work/audio.wav") }
     private func modelFolder(_ role: ModelRole) throws -> URL { models.appendingPathComponent(try info.modelID(for: role)) }
     init(command: WorkerCommand, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
+        guard UUID(uuidString: command.jobId) != nil, UUID(uuidString: command.runId) != nil else { throw ScribeError.message("Некорректный идентификатор задания") }
         self.command = command; self.emit = emit
         recording = URL(fileURLWithPath: command.recordingPath); run = recording.appendingPathComponent("runs/\(command.runId)")
         models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: command.toolsPath)
         manifest = try Disk.read(Manifest.self, at: recording.appendingPathComponent("manifest.json"))
         info = try Disk.read(RunInfo.self, at: run.appendingPathComponent("run.json"))
-        guard command.jobId == manifest.id, command.runId == info.id, info.sourceHash == manifest.sha256,
-              manifest.sourceComplete, try Disk.hash(recording.appendingPathComponent(manifest.originalRelativePath)) == info.sourceHash else { throw ScribeError.message("Исходник изменился или не завершён") }
+        guard manifest.schemaVersion == 1, info.schemaVersion == 1, UUID(uuidString: command.jobId) != nil,
+              recording.lastPathComponent == command.jobId, command.jobId == manifest.id, command.runId == info.id else {
+            throw ScribeError.message("Некорректное задание обработки")
+        }
+        if command.liveCapture == true {
+            let capture = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
+            guard command.stage == .transcribing, info.liveCapture == true, info.sourceHash == "capture:" + info.id,
+                  manifest.pendingRunId == info.id, capture.id == info.id, capture.fingerprint == info.fingerprint,
+                  capture.modelIDs == info.modelIDs, info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else { throw ScribeError.message("Некорректное задание фонового распознавания") }
+        } else {
+            guard info.sourceHash == manifest.sha256, manifest.sourceComplete,
+                  try Disk.hash(recording.appendingPathComponent(manifest.originalRelativePath)) == info.sourceHash else { throw ScribeError.message("Исходник изменился или не завершён") }
+        }
     }
     func perform() async throws -> String {
+        if command.liveCapture == true {
+            return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit).perform()
+        }
         switch command.stage {
         case .preparingAudio:
             try Disk.requireSpace(Int64(manifest.durationMs) * 32 + 500_000_000, at: run)
@@ -39,9 +54,7 @@ actor Pipeline {
         }
     }
     func transcribe() async throws -> String {
-        let folder = try modelFolder(.asr), tokenizer = try modelFolder(.tokenizer)
-        guard FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer.json").path), FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer_config.json").path) else { throw ScribeError.message("Отсутствует локальный токенизатор Whisper") }
-        let kit = try await WhisperKit(WhisperKitConfig(modelFolder: folder.path, tokenizerFolder: tokenizer, verbose: false, logLevel: .none, prewarm: true, load: true, download: false))
+        let recognizer = try await SpeechRecognizer(info: info, models: models, warning: { [emit] in emit("warning", $0, nil) })
         let count = max(1, Int(ceil(Double(manifest.durationMs) / 300_000)))
         var parts: [ASRPart] = []
         for index in 0..<count {
@@ -52,37 +65,7 @@ actor Pipeline {
                 parts.append(saved); continue
             }
             emit("progress", "Распознаём речь — часть \(index + 1) из \(count)", nil)
-            var segments: [Segment] = []
-            var offset = coreStart
-            while offset < coreEnd {
-                let planning = try Media.samples(wave, start: Double(offset)/1000, duration: Double(min(coreEnd-offset,30_000))/1000)
-                let length = max(1, Analysis.nextASRWindowLength(planning) / 16)
-                let end = min(coreEnd, offset + length)
-                let readStart = max(0, offset - 1000), readEnd = min(manifest.durationMs, end + 1000)
-                let samples = try Media.samples(wave, start: Double(readStart)/1000, duration: Double(readEnd-readStart)/1000)
-                let energy = samples.reduce(0.0) { $0 + Double($1 * $1) } / Double(max(1, samples.count))
-                if energy > 1e-12 {
-                    let options = DecodingOptions(verbose: false, task: .transcribe, language: nil, temperatureFallbackCount: 2, detectLanguage: true, skipSpecialTokens: true, wordTimestamps: true, concurrentWorkerCount: 1)
-                    let results = try await kit.transcribe(audioArray: samples, decodeOptions: options)
-                    for result in results {
-                        for s in result.segments {
-                            if s.noSpeechProb > 0.6 && s.avgLogprob < -1 { continue }
-                            let uncertain = s.avgLogprob < -1 || s.compressionRatio > 2.4 || s.noSpeechProb > 0.6
-                            let hadWords = !(s.words ?? []).isEmpty
-                            var words = (s.words ?? []).map { Word(text: $0.word, startMs: max(0, min(manifest.durationMs, readStart + Int($0.start * 1000))), endMs: max(0, min(manifest.durationMs, readStart + Int($0.end * 1000)))) }
-                            words = words.filter { let mid = ($0.startMs + $0.endMs) / 2; return mid >= offset && mid < end }
-                            if hadWords && words.isEmpty { continue }
-                            let start = words.first?.startMs ?? max(offset, readStart + Int(s.start * 1000))
-                            let segmentEnd = words.last?.endMs ?? min(end, readStart + Int(s.end * 1000))
-                            let text = words.isEmpty ? s.text : words.map(\.text).joined()
-                            guard start < coreEnd, segmentEnd >= start, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { continue }
-                            if s.compressionRatio > 3.5 { segments.append(Segment(id: "tmp", startMs: start, endMs: segmentEnd, text: "[неразборчиво]", language: result.language, uncertain: true)); continue }
-                            segments.append(Segment(id: "tmp", startMs: start, endMs: segmentEnd, text: text, language: Analysis.language(text, fallback: result.language), uncertain: uncertain, words: words))
-                        }
-                    }
-                }
-                offset = end
-            }
+            var segments = try await recognizer.recognize(wave: wave, coreStart: coreStart, coreEnd: coreEnd, durationMs: manifest.durationMs)
             for i in segments.indices { segments[i].id = "part-\(index)-seg-\(i)" }
             let part = ASRPart(fingerprint: info.fingerprint, index: index, startMs: coreStart, endMs: coreEnd, segments: segments)
             try Disk.write(part, to: path); parts.append(part); emit("checkpoint", "", "asr/part-\(index).json")
@@ -103,7 +86,8 @@ actor Pipeline {
         let result = try await kit.diarize(audioArray: samples)
         let intervals = result.segments.compactMap { s -> VoiceInterval? in
             guard let id = s.speaker.speakerId else { return nil }
-            return VoiceInterval(startMs: max(0, Int(s.startTime * 1000)), endMs: min(manifest.durationMs, Int(s.endTime * 1000)), speakerId: "raw-\(id)")
+            return VoiceInterval.clipped(startSeconds: Double(s.startTime), endSeconds: Double(s.endTime),
+                                         speakerId: "raw-\(id)", durationMs: manifest.durationMs)
         }
         guard !intervals.isEmpty else { throw ScribeError.message("Участники не определены. Расшифровка сохранена; можно повторить диаризацию.") }
         try Disk.write(DiarizationArtifact(fingerprint: info.fingerprint, intervals: intervals), to: run.appendingPathComponent("diarization.json"))

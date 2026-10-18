@@ -1,0 +1,25 @@
+{
+  "repository": "https://github.com/argmaxinc/argmax-oss-swift.git",
+  "version": "1.1.1",
+  "revision": "1bbc57cb7fe6410248a685b1c5a3c6d56adc2ed4",
+  "files": {
+    "Sources/SpeakerKit/DiarizationResult.swift": "868bacdef633baa9dbd3f77784a8efe82f594438770817c8a58c9adbf8f11d5f",
+    "Sources/SpeakerKit/Diarizer.swift": "64272ec5c1335209068942be576601339112ba32aed3d65bd3880f146eaea002",
+    "Sources/SpeakerKit/Pyannote/ClusteringAlgorithms.swift": "b64d571c88ebee710fe7452e9c0a701428e337f085e7b9983b37679c1bcbfb4f",
+    "Sources/SpeakerKit/Pyannote/MathOps.swift": "7cecbe733d64a603c86ee4219531c07ceef62cfed60989776d9fc5c609dc520b",
+    "Sources/SpeakerKit/Pyannote/PyannoteConfig.swift": "91127471768018b64398409a3f7529575d0e18e310270ddbe4f5c0343d1ab384",
+    "Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift": "589b143adc576d29d3498df7e1de31d2570c1ef3c530b2560510a56089c6d725",
+    "Sources/SpeakerKit/Pyannote/PyannoteModelManager.swift": "f346baec52cd8f567eaede7d97240f9735ea4db1cf9e3eb8c95b5c24caf0d80f",
+    "Sources/SpeakerKit/Pyannote/SpeakerClustering.swift": "66a7ae770edb13ad0d5d1d4a7712713dfbbbc016b46eaf0854bcdba2c13c82c5",
+    "Sources/SpeakerKit/Pyannote/SpeakerEmbedderModel.swift": "32b66d4d79b4bea8d13d7d013a426cecee7a0aaaaa25a7e0a6429f3decb12259",
+    "Sources/SpeakerKit/Pyannote/SpeakerPreEmbedderModel.swift": "ee2ed6962bc3aaee37fadd30edbe6b30f30930a89fd4a77eb0c30bb78001819a",
+    "Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift": "69bcf25ad4951b37506d0fa1cc29f22493a2814a1d0ff475cfa3db8d6e548b84",
+    "Sources/SpeakerKit/Pyannote/VBxClustering.swift": "68ad85fc8f8004568502ca6d79760e17655c71db89c58ed0029fe2c54aef4715",
+    "Sources/SpeakerKit/RTTMLine.swift": "8193c275a1ba4b64b1d72ea5d9aded51b0321ae0c57fd99a36eb542fe2d4e216",
+    "Sources/SpeakerKit/SpeakerInfo.swift": "ed94eca6ec271fd257940428c829536d85e80487599b79f3c570ae9851d6380f",
+    "Sources/SpeakerKit/SpeakerKit.swift": "30610322a96383332e1ffde0abd3d0daa42a3ad15a90315fc0c66361cc13f917",
+    "Sources/SpeakerKit/SpeakerKitConfig.swift": "94d4db910f09fe4d03164f1b51c6e0e54f8d2ef1c3a48bffb91a378f44c1c5af",
+    "Sources/SpeakerKit/SpeakerKitDiarizer.swift": "966632e6402ba62158fe7624ff4acd49970f8c950dece2c3450213b7154f2311",
+    "Sources/SpeakerKit/SpeakerSegment.swift": "67316685cc62db6ce456daef68275077f0aaa9f672115ac39fa0c9bb9047f1c6"
+  }
+}

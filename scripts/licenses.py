@@ -11,5 +11,7 @@ ff = root/'Vendor/ffmpeg-8.0.1'
 for name in ['COPYING.LGPLv2.1','COPYING.LGPLv3','LICENSE.md']:
     if (ff/name).exists(): shutil.copyfile(ff/name, dest/('ffmpeg-'+name))
 shutil.copyfile(root/'docs/ThirdParty.md', dest/'ThirdParty.md')
+for name in ['LICENSE', 'NOTICES']:
+    shutil.copyfile(root/'ThirdParty/SpeakerKit'/name, dest/('LocalScribeSpeakerKit-'+name))
 for source in (root/'Resources/Licenses').glob('*'):
     if source.is_file(): shutil.copyfile(source, dest/source.name)

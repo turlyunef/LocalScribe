@@ -7,6 +7,7 @@ struct ResultEditorView: View {
     let cancel: () -> Void
     @State private var draft: ResultEditDraft
     @State private var part: ExportPart
+    @State private var presentedPart: ExportPart? = .transcript
     @State private var saving = false
     @State private var pendingDeletion: Segment?
     let reportError: (Error) -> Void
@@ -28,42 +29,25 @@ struct ResultEditorView: View {
                 Text("Расшифровка").tag(ExportPart.transcript)
                 Text("Итоги").tag(ExportPart.summary)
             }.pickerStyle(.segmented).labelsHidden()
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    if part == .transcript {
-                        ForEach($draft.transcript.segments) { $segment in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack {
-                                    Text("\(timecode(segment.startMs)) · \(speakerName(segment.speakerId))")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                    Spacer()
-                                    Button("Удалить реплику", systemImage: "trash", role: .destructive) {
-                                        if !draft.deleteSegment(segment.id) { pendingDeletion = segment }
-                                    }
-                                    .labelStyle(.iconOnly).help("Удалить реплику")
-                                    .accessibilityLabel("Удалить реплику \(timecode(segment.startMs))")
-                                    .accessibilityIdentifier("edit.deleteSegment.\(segment.id)")
-                                }
-                                TextEditor(text: $segment.text).font(.body)
-                                    .frame(minHeight: 80).border(.quaternary)
-                                    .accessibilityLabel("Текст реплики \(timecode(segment.startMs))")
-                                    .accessibilityIdentifier("edit.segment.\(segment.id)")
-                            }
-                        }
-                    } else if draft.summary != nil {
-                        Text("Основания необязательны. Если они выбраны, ответственный и срок должны встречаться в этих репликах.")
-                            .font(.caption).foregroundStyle(.secondary)
-                        summarySection("Обзор", keyPath: \.overview)
-                        summarySection("Решения", keyPath: \.decisions)
-                        summarySection("Задачи", keyPath: \.tasks)
-                        summarySection("Открытые вопросы", keyPath: \.openQuestions)
-                    } else {
-                        Text("Итоги ещё не созданы.").foregroundStyle(.secondary)
-                        Button("Добавить итоги") { draft.summary = Summary(language: draft.transcript.primaryLanguage) }
-                    }
-                }.padding(4)
+            ZStack {
+                if presentedPart == part {
+                    editorContent
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                        .accessibilityLabel("Загрузка раздела результата")
+                        .accessibilityIdentifier("edit.loading")
+                }
             }
-            .contentMargins(.trailing, 20, for: .scrollContent)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .task(id: part) {
+                let requestedPart = part
+                guard presentedPart != requestedPart else { return }
+                // Let the loading view appear before constructing the new editor controls.
+                await Task.yield()
+                guard !Task.isCancelled, part == requestedPart else { return }
+                presentedPart = requestedPart
+            }
             HStack {
                 Spacer()
                 if saving { ProgressView().controlSize(.small) }
@@ -98,6 +82,44 @@ struct ResultEditorView: View {
         } message: { _ in
             Text("Реплика используется в Итогах как обоснование. Удалить связь и реплику? Пункты итогов сохранятся.")
         }
+    }
+
+    private var editorContent: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 16) {
+                if part == .transcript {
+                    ForEach($draft.transcript.segments) { $segment in
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack {
+                                Text("\(timecode(segment.startMs)) · \(speakerName(segment.speakerId))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                Spacer()
+                                Button("Удалить реплику", systemImage: "trash", role: .destructive) {
+                                    if !draft.deleteSegment(segment.id) { pendingDeletion = segment }
+                                }
+                                .labelStyle(.iconOnly).help("Удалить реплику")
+                                .accessibilityLabel("Удалить реплику \(timecode(segment.startMs))")
+                                .accessibilityIdentifier("edit.deleteSegment.\(segment.id)")
+                            }
+                            TextEditor(text: $segment.text).font(.body)
+                                .frame(minHeight: 80).border(.quaternary)
+                                .accessibilityLabel("Текст реплики \(timecode(segment.startMs))")
+                                .accessibilityIdentifier("edit.segment.\(segment.id)")
+                        }
+                    }
+                } else if draft.summary != nil {
+                    summarySection("Обзор", keyPath: \.overview)
+                    summarySection("Решения", keyPath: \.decisions)
+                    summarySection("Задачи", keyPath: \.tasks)
+                    summarySection("Открытые вопросы", keyPath: \.openQuestions)
+                } else {
+                    Text("Итоги ещё не созданы.").foregroundStyle(.secondary)
+                    Button("Добавить итоги") { draft.summary = Summary(language: draft.transcript.primaryLanguage) }
+                }
+            }.padding(4)
+        }
+        .contentMargins(.trailing, 20, for: .scrollContent)
+        .id(part)
     }
 
     private func findings(_ keyPath: WritableKeyPath<Summary, [Finding]>) -> Binding<[Finding]> {

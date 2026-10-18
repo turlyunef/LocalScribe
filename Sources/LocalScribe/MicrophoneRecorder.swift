@@ -30,6 +30,8 @@ final class MicrophoneRecorder {
     var onMeter: ((Double, Double, String?) -> Void)?
     var onStopNeeded: ((String) -> Void)?
     var onWarning: ((String) -> Void)?
+    var onResourcePressure: (() -> Void)?
+    private var resourcePressureReported = false
     private var requestedStop = false
     private var deviceID = AudioDeviceID(0)
 
@@ -123,7 +125,11 @@ final class MicrophoneRecorder {
         guard source.format.sampleRate == format.sampleRate else { requestStop("Частота микрофона изменилась. Запись остановлена."); return }
         poolLock.lock()
         if stopped { poolLock.unlock(); return }
-        let buffer = pool.popLast(); poolLock.unlock()
+        let buffer = pool.popLast()
+        let underPressure = pool.count < 24 && !resourcePressureReported
+        if underPressure { resourcePressureReported = true }
+        poolLock.unlock()
+        if underPressure { onResourcePressure?() }
         guard let buffer, source.frameLength <= buffer.frameCapacity, let input = source.floatChannelData, let out = buffer.floatChannelData?[0] else { requestStop("Очередь микрофона переполнена. Сохранённая часть будет восстановлена."); return }
         buffer.frameLength = source.frameLength
         for i in 0..<Int(source.frameLength) {
