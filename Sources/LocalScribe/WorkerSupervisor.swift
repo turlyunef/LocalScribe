@@ -5,6 +5,9 @@ import Darwin
 @MainActor final class WorkerSupervisor {
     private var process: Process?
     private var control: Pipe?
+    private var processGroup: pid_t?
+    private var cancellation: Task<Void, Never>?
+    private var stopReaders: (() async -> Void)?
     var recordingActive = false {
         didSet { applyCapturePriority() }
     }
@@ -25,14 +28,21 @@ import Darwin
         p.executableURL = executable; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         p.environment = ProcessInfo.processInfo.environment.merging(["HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1", "TOKENIZERS_PARALLELISM": "false"]) { _, value in value }
         try p.run(); process = p; control = input; applyCapturePriority()
-        defer { try? input.fileHandleForWriting.close(); process = nil; control = nil }
+        // Foundation launches Process in its own group. Never signal a group
+        // inherited from the app, or derive a new target after the leader exits.
+        let pid = p.processIdentifier
+        processGroup = pid > 1 && getpgid(pid) == pid && pid != getpgrp() ? pid : nil
+        defer {
+            try? input.fileHandleForWriting.close()
+            process = nil; control = nil; processGroup = nil; cancellation = nil; stopReaders = nil
+        }
         // Discard SDK stderr continuously: it may include decoded text. It never enters persistent logs.
         let drain = Task.detached { () -> Data in
             var diagnostic = Data()
-            while true {
-                let chunk = errors.fileHandleForReading.readData(ofLength:16384)
-                if chunk.isEmpty { break }
-                if diagnosticURL != nil && diagnostic.count < 65536 { diagnostic.append(chunk.prefix(65536-diagnostic.count)) }
+            var bytes = [UInt8](repeating: 0, count: 16_384)
+            while let count = try? Self.readPipe(errors.fileHandleForReading.fileDescriptor, into: &bytes), count > 0 {
+                let chunk = bytes.prefix(count)
+                if diagnosticURL != nil && diagnostic.count < 65536 { diagnostic.append(contentsOf: chunk.prefix(65536-diagnostic.count)) }
             }
             return diagnostic
         }
@@ -40,11 +50,8 @@ import Darwin
             var buffer = Data(), last: WorkerEvent?, failure: WorkerEvent?
             var bytes = [UInt8](repeating:0,count:16_384)
             while true {
-                // One POSIX read returns currently available pipe bytes. Foundation's
-                // count-based reads may wait for the requested count and delay progress.
-                let count = bytes.withUnsafeMutableBytes { Darwin.read(output.fileHandleForReading.fileDescriptor,$0.baseAddress,$0.count) }
+                let count = try Self.readPipe(output.fileHandleForReading.fileDescriptor, into: &bytes)
                 if count == 0 { break }
-                if count < 0 { if errno == EINTR { continue }; throw ScribeError.message("Канал worker закрыт с ошибкой") }
                 buffer.append(contentsOf:bytes.prefix(count))
                 guard buffer.count < 1_000_000 else { throw ScribeError.message("Нарушен протокол worker: слишком длинное сообщение") }
                 while let end = buffer.firstIndex(of: 10) {
@@ -58,6 +65,11 @@ import Darwin
             guard buffer.isEmpty else { throw ScribeError.message("Незавершённое сообщение worker") }
             return (last, failure)
         }
+        stopReaders = {
+            read.cancel(); drain.cancel()
+            _ = try? await read.value
+            _ = await drain.value
+        }
         try await withTaskCancellationHandler {
             do {
                 try Task.checkCancellation()
@@ -65,6 +77,9 @@ import Darwin
                 let events = try await read.value
                 await Task.detached { p.waitUntilExit() }.value
                 let diagnostic = await drain.value
+                // A concurrent cancel owns this run until escalation and readers
+                // finish, even when the leader and its pipes close sooner.
+                if let cancellation { await cancellation.value }
                 if let diagnosticURL { try? diagnostic.write(to:diagnosticURL,options:.atomic) }
                 try Task.checkCancellation()
                 if let failure = events.failure { throw ScribeError.message(failure.message) }
@@ -81,17 +96,49 @@ import Darwin
             Task { @MainActor in if self.process === p { await self.cancel() } }
         }
     }
+    nonisolated private static func readPipe(_ descriptor: Int32, into bytes: inout [UInt8]) throws -> Int {
+        while true {
+            try Task.checkCancellation()
+            var channel = pollfd(fd: descriptor, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&channel, 1, 100)
+            if ready == 0 { continue }
+            if ready < 0 { if errno == EINTR { continue }; break }
+            // One POSIX read returns available bytes, including POLLHUP's tail.
+            // Only this task reads the descriptor; its owner closes it after join.
+            let count = bytes.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+            if count >= 0 { return count }
+            if errno != EINTR { break }
+        }
+        throw ScribeError.message("Канал worker закрыт с ошибкой")
+    }
     func cancel() async {
         guard let p = process else { return }
-        try? control?.fileHandleForWriting.close()
-        for _ in 0..<30 {
-            if !p.isRunning { kill(-p.processIdentifier,SIGTERM); return }
-            try? await Task.sleep(for: .milliseconds(100))
+        if let cancellation { await cancellation.value; return }
+        let input = control, group = processGroup, stop = stopReaders
+        // Share one cleanup across UI cancellation, task cancellation and run's
+        // error path. It must not inherit the caller's cancelled sleep deadlines.
+        let cleanup = Task { @MainActor in
+            try? input?.fileHandleForWriting.close()
+            for _ in 0..<30 {
+                if !p.isRunning { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            // Group lifetime is independent of the leader: an orphan may retain
+            // both pipes and ignore TERM. Stop targeting a group once it is gone.
+            let signalledGroup = group.map { kill(-$0, SIGTERM) == 0 } ?? false
+            if p.isRunning { p.terminate() }
+            try? await Task.sleep(for: .milliseconds(300))
+            if signalledGroup, let group { kill(-group, SIGKILL) }
+            if p.isRunning { kill(p.processIdentifier, SIGKILL) }
+            await stop?()
+            await Task.detached { p.waitUntilExit() }.value
         }
-        if p.isRunning { kill(-p.processIdentifier,SIGTERM); p.terminate() }
-        try? await Task.sleep(for: .milliseconds(300))
-        if p.isRunning { kill(-p.processIdentifier,SIGKILL); kill(p.processIdentifier, SIGKILL) }
-        await Task.detached { p.waitUntilExit() }.value
+        cancellation = cleanup
+        await cleanup.value
     }
-    func terminateNow() { try? control?.fileHandleForWriting.close(); if let p = process, p.isRunning { kill(-p.processIdentifier,SIGTERM); p.terminate() } }
+    func terminateNow() {
+        try? control?.fileHandleForWriting.close()
+        if let group = processGroup { kill(-group, SIGTERM) }
+        if let p = process, p.isRunning { p.terminate() }
+    }
 }
