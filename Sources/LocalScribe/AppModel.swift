@@ -83,13 +83,13 @@ import LocalScribeCore
     var tools: URL { resources.appendingPathComponent("tools") }
     var worker: URL { workerOverride ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
     init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
-         userDefaults: UserDefaults = .standard) {
+         userDefaults: UserDefaults = .standard, catalog providedCatalog: ModelCatalog? = nil) {
         self.userDefaults = userDefaults
         backgroundRecognition = userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true
         workerOverride = workerExecutable
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
-        catalog = try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json"))
+        catalog = providedCatalog ?? (try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json")))
         do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; recordings = repo.list() }
         catch { repository = nil; errorHandler.report(message: "Не удалось открыть локальное хранилище: \(error.localizedDescription)") }
         if !startServices { preparingStorage = false; return }
@@ -478,16 +478,17 @@ import LocalScribeCore
     func enqueue(_ id: String) {
         guard let repository, var m = try? repository.load(id), m.sourceComplete, id != activeID else { return }
         if shuttingDown { m.state = .interrupted; m.lastError = "Приложение закрыто. Можно продолжить обработку."; try? repository.save(m); reload(); return }
-        m.state = modelsReady ? .queued : .waitingForModels; m.lastError = nil; try? repository.save(m)
-        if modelsReady, !queued.contains(id) { queued.append(id) }
+        let canQueue = m.pendingRunId != nil || modelsReady
+        m.state = canQueue ? .queued : .waitingForModels; m.lastError = nil; try? repository.save(m)
+        if canQueue, !queued.contains(id) { queued.append(id) }
         // Re-enqueuing a finished capture must keep its original FIFO position.
         reload(); if !busy { Task { await processQueue() } }
     }
     func processQueue() async {
         guard !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
-              modelsReady, let repository, let catalog = activeCatalog else { return }
+              let repository, let catalog else { return }
         busy = true; defer { busy = false; activeID = nil; status = ""; reload() }
-        while !queued.isEmpty && modelsReady && !resourcesPaused && !suspendingQueue && resourcePauseTask == nil && !shuttingDown {
+        while !queued.isEmpty && !resourcesPaused && !suspendingQueue && resourcePauseTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
                 status = "Обработка ожидает охлаждения Mac"
                 try? await Task.sleep(for: .seconds(2)); continue
@@ -495,13 +496,16 @@ import LocalScribeCore
             let id = queued.removeFirst(); activeID = id
             do {
                 var m = try repository.load(id)
-                var info: RunInfo?
-                if let pending = m.pendingRunId { info = try? Disk.read(RunInfo.self, at: repository.run(id,pending).appendingPathComponent("run.json")) }
-                let livePending = info?.liveCapture == true && info?.sourceHash == "capture:" + (info?.id ?? "")
-                if !livePending && (info?.sourceHash != m.sha256 || info?.liveCapture != true && info?.profileHash != catalog.fingerprint || info?.pipelineVersion != RunInfo(sourceHash: "", profileHash: "").pipelineVersion) {
-                    info = try repository.beginRun(&m, catalog: catalog)
+                if m.pendingRunId == nil {
+                    guard modelsReady, let selectedCatalog = activeCatalog else {
+                        m.state = .waitingForModels; try repository.save(m); continue
+                    }
+                    _ = try repository.beginRun(&m, catalog: selectedCatalog)
                 }
-                guard var info else { throw ScribeError.message("Не удалось создать задание") }
+                var info = try await Task.detached(priority: .utility) { try repository.resumeRun(id, catalog: catalog) }.value
+                guard activeID == id else { throw CancellationError() }
+                m = try repository.load(id)
+                let livePending = info.liveCapture == true && info.sourceHash == "capture:" + info.id
                 let run = repository.run(id,info.id)
                 if livePending {
                     m.captureProcessing = .transcribing; try repository.save(m); reload()

@@ -51,6 +51,25 @@ public struct ModelCatalog: Codable, Sendable {
         return Disk.fingerprint(models.map { legacy ? $0.revision : "\($0.id):\($0.revision):\($0.files.map(\.sha256).joined())" }.joined(separator: ":"))
     }
     public init(schemaVersion: Int = 1, models: [ModelProfile]) { self.schemaVersion = schemaVersion; self.models = models }
+    /// Resolve the run's frozen selection, never the preferences for new jobs.
+    /// The role order and fingerprint algorithm also preserve legacy checkpoints.
+    public func pinned(to info: RunInfo) throws -> ModelCatalog {
+        guard schemaVersion == 1 else { throw ScribeError.message("Несовместимая версия каталога моделей") }
+        if let ids = info.modelIDs, Set(ids.keys) != Set(ModelRole.allCases.map(\.rawValue)) {
+            throw ScribeError.message("Некорректный закреплённый комплект моделей")
+        }
+        let profiles = try ModelRole.allCases.map { role in
+            let id = try info.modelID(for: role)
+            let matches = models.filter { $0.id == id && $0.purpose == role }
+            guard matches.count == 1 else { throw ScribeError.message("Закреплённая модель \(id) недоступна в каталоге") }
+            return matches[0]
+        }
+        let pinned = ModelCatalog(models: profiles)
+        guard pinned.fingerprint == info.profileHash else {
+            throw ScribeError.message("Ревизии или SHA-256 закреплённых моделей не совпадают с заданием")
+        }
+        return pinned
+    }
     public func validate(at root: URL, progress: (@Sendable (String) -> Void)? = nil) throws {
         for m in models {
             try m.validate(at: root)

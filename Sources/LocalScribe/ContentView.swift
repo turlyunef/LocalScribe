@@ -55,7 +55,7 @@ struct ContentView: View {
                             ProgressView().controlSize(.small)
                             Button("Отменить") { Task { await model.cancelSelected() } }.help("Отменить обработку выбранной записи")
                         } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
-                            Button("Продолжить") { model.resume(selected.id) }.disabled(model.finalizingRecording || model.recordingID == selected.id || selected.state == .waitingForModels && !model.modelsReady).help("Продолжить обработку выбранной записи с контрольной точки")
+                            Button("Продолжить") { model.resume(selected.id) }.disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady).help("Продолжить обработку выбранной записи с контрольной точки")
                         }
                         RecordingActionsView(
                             canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,

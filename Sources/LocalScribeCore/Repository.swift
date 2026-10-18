@@ -94,6 +94,31 @@ public struct RecordingRepository: Sendable {
         manifest = updated; published = true
         return info
     }
+    /// Read and verify an existing job without replacing its identity or checkpoints.
+    /// File hashing is expensive; callers must keep this off the main actor.
+    public func resumeRun(_ id: String, catalog: ModelCatalog) throws -> RunInfo {
+        do {
+            let manifest = try load(id)
+            guard manifest.schemaVersion == 1, let pending = manifest.pendingRunId, UUID(uuidString: pending) != nil else {
+                throw ScribeError.message("Некорректное незавершённое задание")
+            }
+            let info: RunInfo
+            do { info = try Disk.read(RunInfo.self, at: run(id, pending).appendingPathComponent("run.json")) }
+            catch { throw ScribeError.message("Не удалось прочитать незавершённое задание") }
+            guard info.schemaVersion == 1, info.id == pending else { throw ScribeError.message("Некорректное незавершённое задание") }
+            guard info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else {
+                throw ScribeError.message("Версия обработки изменилась; контрольные точки этого задания несовместимы")
+            }
+            let livePending = info.liveCapture == true && info.sourceHash == "capture:" + info.id
+            guard livePending || manifest.sourceComplete && info.sourceHash == manifest.sha256 else {
+                throw ScribeError.message("Исходник не совпадает с незавершённым заданием")
+            }
+            try catalog.pinned(to: info).validate(at: models)
+            return info
+        } catch {
+            throw ScribeError.message("Не удалось продолжить: \(error.localizedDescription). Задание и контрольные точки сохранены. Для создания нового задания с выбранными моделями нажмите «Обработать заново».")
+        }
+    }
     /// Publish a final fingerprint only after proving the streamed PCM belongs to
     /// the completed, hashed original. Re-running this transaction is safe after a crash.
     public func bindLiveTranscript(_ id: String, info: RunInfo) throws -> RunInfo {
