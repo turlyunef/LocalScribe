@@ -28,11 +28,11 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     public func validatePaths() throws {
         guard Self.safeComponent(id), !files.isEmpty,
               files.allSatisfy({ $0.size >= 0 && !$0.localPath.hasPrefix("/") && !$0.localPath.isEmpty &&
-                  !$0.localPath.split(separator: "/").contains("..") }),
+                  $0.localPath.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { Self.safeComponent(String($0)) } }),
               Set(files.map(\.localPath)).count == files.count else { throw ScribeError.message("Недопустимый путь в каталоге моделей") }
     }
     public static func safeComponent(_ value: String) -> Bool {
-        !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\")
+        !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\") && !value.contains("\0")
     }
     public func validate(at root: URL) throws {
         try validatePaths()
@@ -185,16 +185,20 @@ public actor ModelInstaller {
         try profile.validatePaths()
         try Task.checkCancellation()
         let fm = FileManager.default
-        let final = root.appendingPathComponent(profile.id)
+        let directory = try ModelDirectory.root(root)
+        let partialName = profile.id + ".partial"
+        let existingPartial = try directory.child(partialName)
+        try existingPartial?.validateTree()
+        let final = try directory.child(profile.id)
+        try final?.validateTree()
         progress(ModelInstallProgress(profile: profile))
-        if fm.fileExists(atPath:final.path) {
-            if (try? profile.validate(at: root)) != nil {
+        if let final {
+            if try profile.files.allSatisfy({ try final.matches($0) }) {
                 try Task.checkCancellation()
                 progress(ModelInstallProgress(profile: profile, fileIndex: profile.files.count, completedFiles: profile.files.count, completedBytes: profile.bytes, phase: .complete)); return
             }
         }
-        let partial = root.appendingPathComponent(profile.id + ".partial")
-        try Disk.directory(partial)
+        let partial = try existingPartial ?? directory.child(partialName, create: true)!
         let temporaryBytes = localSource == nil ? (profile.files.map(\.size).max() ?? 0) : 0
         try Disk.requireSpace(profile.bytes + temporaryBytes + 500_000_000, at: root)
         var completedBytes: Int64 = 0
@@ -204,28 +208,27 @@ public actor ModelInstaller {
             let report: @Sendable (Int64, ModelInstallProgress.Phase) -> Void = { bytes, phase in
                 progress(ModelInstallProgress(profile: profile, fileIndex: index, completedFiles: index, completedBytes: verifiedBytes, fileBytes: bytes, phase: phase))
             }
-            let destination = partial.appendingPathComponent(f.localPath)
+            let (parent, name) = try partial.location(f.localPath)!
             report(0, .checking)
-            if (try? destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == f.size,
-               (try? Disk.hash(destination)) == f.sha256 {
+            if try partial.matches(f) {
                 completedBytes += f.size
                 progress(ModelInstallProgress(profile: profile, fileIndex: index + 1, completedFiles: index + 1, completedBytes: completedBytes))
                 continue
             }
-            try Disk.directory(destination.deletingLastPathComponent())
             var verified = false
-            defer { if !verified { try? fm.removeItem(at: destination) } }
+            defer { if !verified { try? parent.remove(name) } }
             report(0, .downloading)
-            if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
+            let output = try parent.create(name)
+            defer { try? output.close() }
             if let localSource {
                 let source = localSource.appendingPathComponent(f.localPath)
                 let input = try FileHandle(forReadingFrom: source); defer { try? input.close() }
-                try copy(input, to: destination, expectedSize: f.size) { report($0, .downloading) }
+                try copy(input, to: output, expectedSize: f.size) { report($0, .downloading) }
             } else if let fetch {
                 let source = try await fetch(index) { report($0, .downloading) }
                 defer { try? source.close() }
                 report(f.size, .verifying)
-                try copy(source, to: destination, expectedSize: f.size) { _ in }
+                try copy(source, to: output, expectedSize: f.size) { _ in }
             } else {
                 let encoded = f.path.split(separator: "/").map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)! }.joined(separator: "/")
                 let url = URL(string: "https://huggingface.co/\(profile.repository)/resolve/\(profile.revision)/\(encoded)")!
@@ -233,29 +236,25 @@ public actor ModelInstaller {
                 let (temp, response) = try await transfer.download(from: url)
                 defer { try? fm.removeItem(at: temp) }
                 guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ScribeError.message("Источник модели недоступен") }
-                if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
-                try fm.moveItem(at: temp, to: destination)
+                let input = try FileHandle(forReadingFrom: temp); defer { try? input.close() }
+                try copy(input, to: output, expectedSize: f.size) { _ in }
             }
             report(f.size, .verifying)
-            guard (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == f.size,
-                  try Disk.hash(destination) == f.sha256 else { try? fm.removeItem(at: destination); throw ScribeError.message("Не совпала SHA-256 файла \(f.localPath). Повторите загрузку.") }
+            guard try ModelDirectory.matches(output, f) else { throw ScribeError.message("Не совпала SHA-256 файла \(f.localPath). Повторите загрузку.") }
             verified = true
             completedBytes += f.size
             progress(ModelInstallProgress(profile: profile, fileIndex: index + 1, completedFiles: index + 1, completedBytes: completedBytes))
         }
         try Task.checkCancellation()
-        if fm.fileExists(atPath: final.path) { try fm.removeItem(at: final) }
-        try fm.moveItem(at: partial, to: final)
+        try directory.publish(partial, named: partialName, as: profile.id, profile: profile)
         progress(ModelInstallProgress(profile: profile, fileIndex: profile.files.count, completedFiles: profile.files.count, completedBytes: profile.bytes, phase: .complete))
     }
-    private func copy(_ input: FileHandle, to destination: URL, expectedSize: Int64, progress: (Int64) -> Void) throws {
+    private func copy(_ input: FileHandle, to output: FileHandle, expectedSize: Int64, progress: (Int64) -> Void) throws {
         var status = stat()
         guard fstat(input.fileDescriptor, &status) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
         if status.st_mode & S_IFMT == S_IFREG, status.st_size != expectedSize {
             throw ScribeError.message("Размер исходного файла модели не совпал с каталогом")
         }
-        guard FileManager.default.createFile(atPath: destination.path, contents: nil) else { throw ScribeError.message("Не удалось создать файл модели") }
-        let output = try FileHandle(forWritingTo: destination); defer { try? output.close() }
         var count: Int64 = 0
         while true {
             try Task.checkCancellation()
