@@ -36,10 +36,10 @@ public struct RecordingRepository: Sendable {
     }
     public func importFile(_ source: URL, info: AudioInfo, allowDuplicate: Bool = false) throws -> Manifest {
         let fm = FileManager.default
-        let digest = try Disk.hash(source)
+        let input = try ImportSource(source)
+        let digest = try input.hash()
         if !allowDuplicate, let duplicate = list().first(where: { $0.sha256 == digest }) { throw DuplicateRecording(id: duplicate.id) }
-        let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
-        try Disk.requireSpace(Int64(size) + Int64(info.duration * 32_000) + 500_000_000, at: root)
+        try Disk.requireSpace(input.size + Int64(info.duration * 32_000) + 500_000_000, at: root)
         var manifest = Manifest(sourceType: "import", title: source.deletingPathExtension().lastPathComponent, filename: source.lastPathComponent)
         let folder = folder(manifest.id)
         var published = false
@@ -47,8 +47,7 @@ public struct RecordingRepository: Sendable {
         try Disk.directory(folder.appendingPathComponent("source"))
         let original = folder.appendingPathComponent(manifest.originalRelativePath)
         let partial = original.appendingPathExtension("partial")
-        try fm.copyItem(at: source, to: partial)
-        guard try Disk.hash(partial) == digest else { throw ScribeError.message("Не удалось проверить сохранённый оригинал") }
+        try input.copy(to: partial, verifying: digest)
         try fm.moveItem(at: partial, to: original)
         manifest.sha256 = digest; manifest.durationMs = Int((info.duration * 1000).rounded()); manifest.sampleRate = info.sampleRate; manifest.channels = info.channels; manifest.sourceComplete = true; manifest.state = .queued
         try save(manifest)

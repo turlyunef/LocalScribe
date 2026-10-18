@@ -18,6 +18,9 @@ public enum Disk {
     }
     public static func hash(_ url: URL) throws -> String {
         let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
+        return try hash(file)
+    }
+    static func hash(_ file: FileHandle) throws -> String {
         var hash = SHA256()
         while let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty { hash.update(data: bytes) }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()

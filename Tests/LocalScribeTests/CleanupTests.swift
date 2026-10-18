@@ -54,14 +54,17 @@ final class CleanupTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         try Disk.directory(root)
-        let original = root.appendingPathComponent("original.wav"), link = root.appendingPathComponent("import.wav")
+        // The source names fit NAME_MAX, but adding .partial to the archived
+        // original exceeds it. Fail destination creation after staging the folder.
+        let suffix = String(repeating: "w", count: 245)
+        let original = root.appendingPathComponent("original.\(suffix)"), link = root.appendingPathComponent("import.\(suffix)")
         try Data("external original".utf8).write(to: original)
         let hash = try Disk.hash(original)
-        // Copying this relative symlink into the archive makes its target missing,
-        // so verification fails after the import folder and partial were created.
-        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: "original.wav")
+        try FileManager.default.createSymbolicLink(atPath: link.path, withDestinationPath: original.lastPathComponent)
         let repo = try RecordingRepository(root: root.appendingPathComponent("archive"))
-        XCTAssertThrowsError(try repo.importFile(link, info: AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le")))
+        XCTAssertThrowsError(try repo.importFile(link, info: AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le"))) { error in
+            XCTAssertEqual((error as? POSIXError)?.code, .ENAMETOOLONG)
+        }
         XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: repo.root.appendingPathComponent("recordings").path).isEmpty)
         XCTAssertEqual(try Disk.hash(original), hash)
         XCTAssertEqual(try Disk.hash(link), hash)
