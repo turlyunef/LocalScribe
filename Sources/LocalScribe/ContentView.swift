@@ -54,16 +54,15 @@ struct ContentView: View {
                         } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
                             Button("Продолжить") { model.resume(selected.id) }.disabled(model.recordingID != nil || selected.state == .waitingForModels && !model.modelsReady)
                         }
-                        Menu {
-                            Button("Показать аудио в Finder", action: model.showAudio)
-                            Button("Обработать заново") { model.repeatAnalysis(summaryOnly: false) }.disabled(model.busy || model.recordingID != nil || !selected.sourceComplete || !model.modelsReady || model.installing)
-                            Menu("Пересоздать итоги") {
-                                Button("Русский") { model.repeatAnalysis(summaryOnly: true, language: "ru") }
-                                Button("English") { model.repeatAnalysis(summaryOnly: true, language: "en") }
-                            }.disabled(model.transcript?.diarized != true || model.busy || model.recordingID != nil || !model.modelsReady || model.installing)
-                            Divider()
-                            Button("Удалить запись…", role: .destructive) { Task { await model.deleteSelected() } }.disabled(model.recordingID == selected.id)
-                        } label: { Image(systemName: "ellipsis.circle") }.menuStyle(.borderlessButton).frame(width: 28)
+                        RecordingActionsView(
+                            canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
+                            canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
+                            canDelete: model.recordingID != selected.id,
+                            showAudio: model.showAudio,
+                            repeatAnalysis: { model.repeatAnalysis(summaryOnly: false) },
+                            recreateSummary: { model.repeatAnalysis(summaryOnly: true, language: $0) },
+                            deleteRecording: { Task { await model.deleteSelected() } }
+                        )
                     }.padding(20)
                     if let error = selected.lastError { Text(error).font(.callout).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal,20).padding(.bottom,10) }
                     if selected.activeRunId != nil && selected.pendingRunId != nil { Text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.").font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
@@ -144,7 +143,7 @@ struct RecordingTitleView: View {
                     draft = title
                     editing = true
                 } label: {
-                    Text(title).multilineTextAlignment(.leading)
+                    Text(title).multilineTextAlignment(.leading).lineLimit(2)
                 }
                 .buttonStyle(.plain)
                 .help("Нажмите, чтобы изменить название")

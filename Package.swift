@@ -19,6 +19,7 @@ let package = Package(
             .product(name: "SpeakerKit", package: "argmax-oss-swift"),
             .product(name: "MLXLLM", package: "mlx-swift-lm"),
             .product(name: "MLXLMCommon", package: "mlx-swift-lm")], swiftSettings: [.swiftLanguageMode(.v5)]),
-        .testTarget(name: "LocalScribeTests", dependencies: ["LocalScribeCore"])
+        .testTarget(name: "LocalScribeTests", dependencies: ["LocalScribeCore"]),
+        .testTarget(name: "LocalScribeUITests", dependencies: ["LocalScribe"])
     ]
 )
