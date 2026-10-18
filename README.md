@@ -19,6 +19,8 @@ bash scripts/build_app.sh
 
 По умолчанию используется ad-hoc подпись для личной локальной сборки. Для Developer ID задайте `LOCALSCRIBE_SIGN_IDENTITY`; notarization для распространения выполняется отдельно. Отключать Gatekeeper или системную защиту не требуется. Полнота App Sandbox/TCC-проверки указана в отчёте.
 
+Исходник иконки — [Resources/AppIcon.png](Resources/AppIcon.png) с прозрачным полем вокруг значка. `bash scripts/build_icon.sh` создаёт [Resources/AppIcon.icns](Resources/AppIcon.icns) со всеми размерами macOS от 16 до 1024 px через системные `sips` и `iconutil`. Упаковщик запускает эту команду автоматически и включает иконку в `.app`.
+
 ## Первый запуск
 
 1. Откройте локально собранный `dist/LocalScribe.app`. Можно переместить его в Applications.

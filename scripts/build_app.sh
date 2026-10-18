@@ -3,6 +3,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 IDENTITY="${LOCALSCRIBE_SIGN_IDENTITY:--}"
+bash scripts/build_icon.sh
 if [ ! -x Assets/tools/ffmpeg ] || [ ! -x Assets/tools/ffprobe ]; then bash scripts/build_ffmpeg.sh; fi
 # Reject a stale tool compiled for the build machine's newer OS.
 for tool in Assets/tools/ffmpeg Assets/tools/ffprobe; do
@@ -21,6 +22,7 @@ cp Resources/models.lock.json "$SERVICE/Contents/Resources/"
 cp "$BIN/LocalScribe" "$APP/Contents/MacOS/"
 cp "$BIN/LocalScribeWorker" "$APP/Contents/Helpers/"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 cp Resources/models.lock.json "$APP/Contents/Resources/"
 cp Assets/tools/ffmpeg Assets/tools/ffprobe "$APP/Contents/Resources/tools/"
 # SwiftPM resource bundles (including MLX Metal libraries) must travel with the executables.
