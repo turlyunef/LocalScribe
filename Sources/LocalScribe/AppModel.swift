@@ -38,7 +38,7 @@ import LocalScribeCore
                              cpuCores: ProcessInfo.processInfo.processorCount, gpuWorkingSetBytes: gpu?.recommendedMaxWorkingSetSize ?? 0,
                              appleSilicon: appleSilicon, supportsMetal: gpu != nil)
     }()
-    var canManageModels: Bool { !installing && !verifyingModels && !busy && !startingRecording && recordingID == nil && !shuttingDown }
+    var canManageModels: Bool { !preparingStorage && !installing && !verifyingModels && !busy && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
     var activeCatalog: ModelCatalog? { catalog.flatMap { modelLibrary.activeCatalog(from: $0) } }
     @Published var recordingID: String?
     @Published var startingRecording = false
@@ -48,6 +48,7 @@ import LocalScribeCore
     @Published var soundNotice: String?
     @Published var busy = false
     @Published var shuttingDown = false
+    @Published private(set) var preparingStorage = true
     @Published var tab: ExportPart = .transcript
     @Published var jumpTo: String?
     let repository: RecordingRepository?
@@ -63,6 +64,7 @@ import LocalScribeCore
     private var memorySource: DispatchSourceMemoryPressure?
     private var sleepObserver: NSObjectProtocol?
     private var installTask: Task<Void, Never>?
+    private var importTasks: [UUID: Task<Void, Never>] = [:]
     private var resultSignature = ""
     var selected: Manifest? { recordings.first { $0.id == selection } }
     var tools: URL { resources.appendingPathComponent("tools") }
@@ -71,7 +73,7 @@ import LocalScribeCore
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
         catalog = try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json"))
-        do { let repo = try RecordingRepository(); try repo.recover(); repository = repo; recordings = repo.list() }
+        do { let repo = try RecordingRepository(); repository = repo; recordings = repo.list() }
         catch { repository = nil; self.error = "Не удалось открыть локальное хранилище: \(error.localizedDescription)" }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.critical], queue: .main)
         memorySource?.setEventHandler { [weak self] in Task { @MainActor in await self?.pause(reason: "Обработка приостановлена из-за нехватки памяти. Можно продолжить с контрольной точки.") } }
@@ -82,13 +84,25 @@ import LocalScribeCore
                 await self?.pause(reason: "Обработка прервана перед сном. Нажмите «Продолжить» после пробуждения.")
             }
         }
-        Task { await verifyModels() }
+        Task {
+            status = "Восстанавливаем локальное хранилище…"
+            if let repository {
+                do {
+                    recordings = try await Task.detached(priority: .utility) {
+                        try repository.recover(); return repository.list()
+                    }.value
+                } catch { self.error = "Не удалось восстановить локальное хранилище: \(error.localizedDescription)" }
+            }
+            preparingStorage = false
+            if status == "Восстанавливаем локальное хранилище…" { status = "" }
+            await verifyModels()
+        }
         if CommandLine.arguments.contains("--self-check") { Task { await sandboxSelfCheck() } }
         if CommandLine.arguments.contains("--self-check-microphone") { Task { await microphoneSelfCheck() } }
     }
     func reload() { recordings = repository?.list() ?? []; loadResult() }
     func renameRecording(_ id: String, title: String) {
-        guard let repository else { return }
+        guard !preparingStorage, let repository else { return }
         do {
             try repository.rename(id, title: title)
             reload()
@@ -229,15 +243,19 @@ import LocalScribeCore
         guard panel.runModal() == .OK else { return }; importURLs(panel.urls)
     }
     func importURLs(_ urls: [URL]) {
-        guard let repository else { return }
-        Task {
+        guard !preparingStorage, !shuttingDown, let repository else { return }
+        let taskID = UUID()
+        importTasks[taskID] = Task {
+            defer { importTasks.removeValue(forKey: taskID) }
             for url in urls {
+                guard !shuttingDown else { return }
                 let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
                 let tools = self.tools
                 do {
                     let manifest = try await Task.detached(priority: .userInitiated) { let info = try Media.probe(url, tools: tools); return try repository.importFile(url, info: info) }.value
                     selection = manifest.id; reload(); enqueue(manifest.id)
                 } catch let duplicate as DuplicateRecording {
+                    guard !shuttingDown else { return }
                     let alert = NSAlert(); alert.messageText = "Такой файл уже есть в архиве"; alert.addButton(withTitle: "Открыть существующую"); alert.addButton(withTitle: "Импортировать ещё раз"); alert.addButton(withTitle: "Отмена")
                     let answer = alert.runModal()
                     if answer == .alertFirstButtonReturn { selection = duplicate.id }
@@ -252,7 +270,7 @@ import LocalScribeCore
         }
     }
     func startRecording() async {
-        guard recordingID == nil, let repository, !stopping, !shuttingDown, !startingRecording, !installing else { return }
+        guard recordingID == nil, let repository, !preparingStorage, !stopping, !shuttingDown, !startingRecording, !finalizingRecording, !installing else { return }
         startingRecording = true
         defer { startingRecording = false }
         await pause(reason: "Обработка приостановлена на время записи. Нажмите «Продолжить», когда будет удобно.")
@@ -314,7 +332,10 @@ import LocalScribeCore
         try? FileManager.default.removeItem(at: folder.appendingPathComponent("capture"))
     }
     func resume(_ id: String) {
+        guard !preparingStorage, !shuttingDown, !finalizingRecording else { return }
+        finalizingRecording = true
         Task {
+            defer { finalizingRecording = false }
             do {
                 if let repository, var m = try? repository.load(id), !m.sourceComplete {
                     let parts = (try? FileManager.default.contentsOfDirectory(at:repository.folder(id).appendingPathComponent("capture"),includingPropertiesForKeys:nil)) ?? []
@@ -341,7 +362,7 @@ import LocalScribeCore
         reload(); if !busy, recordingID == nil { Task { await processQueue() } }
     }
     private func processQueue() async {
-        guard !busy, !installing, !verifyingModels, !startingRecording, !shuttingDown, recordingID == nil, modelsReady, let repository, let catalog = activeCatalog else { return }
+        guard !preparingStorage, !busy, !installing, !verifyingModels, !startingRecording, !shuttingDown, recordingID == nil, modelsReady, let repository, let catalog = activeCatalog else { return }
         busy = true; defer { busy = false; activeID = nil; status = ""; reload() }
         while !queued.isEmpty && recordingID == nil && modelsReady {
             if ProcessInfo.processInfo.thermalState == .critical { error = "Mac перегрет. Обработку можно продолжить после охлаждения."; break }
@@ -374,12 +395,12 @@ import LocalScribeCore
                 m = try repository.load(id)
                 m.activeRunId = info.id; m.pendingRunId = nil; m.state = m.warnings.isEmpty ? .completed : .completedWithWarnings; m.lastError = nil
                 try repository.save(m)
-                try? FileManager.default.removeItem(at: run.appendingPathComponent("work"))
             } catch {
                 if var m = try? repository.load(id) {
                     if m.state.processing { m.state = activeID == id ? .failed : .interrupted; m.lastError = (error as? ScribeError)?.localizedDescription ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."; try? repository.save(m) }
                 }
             }
+            await Task.detached(priority: .utility) { try? repository.cleanupTemporaryFiles(id) }.value
             activeID = nil; reload()
         }
     }
@@ -423,7 +444,7 @@ import LocalScribeCore
         if var m = try? repository.load(id) { m.state = .cancelled; try? repository.save(m) }; reload()
     }
     func deleteSelected() async {
-        guard let selected, let repository, selected.id != recordingID else { return }
+        guard let selected, let repository, selected.id != recordingID, !finalizingRecording else { return }
         let alert = NSAlert(); alert.messageText = "Удалить запись и результаты?"; alert.informativeText = "Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся."
         alert.addButton(withTitle: "Удалить запись"); alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
@@ -443,10 +464,14 @@ import LocalScribeCore
     }
     func shutdown() async {
         shuttingDown = true
-        installTask?.cancel(); downloader.cancel()
+        memorySource?.cancel(); memorySource = nil
+        if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }; sleepObserver = nil
+        installTask?.cancel(); downloader.close()
         if recordingID != nil { await stopRecording() }
         while finalizingRecording { try? await Task.sleep(for:.milliseconds(50)) }
         await pause(reason:"Приложение закрыто. Можно продолжить обработку."); supervisor.terminateNow()
+        await installTask?.value
+        for task in Array(importTasks.values) { await task.value }
     }
     /// Explicit developer mode: short real input test, no models/archive, audio deleted.
     private func microphoneSelfCheck() async {

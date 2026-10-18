@@ -52,12 +52,12 @@ struct ContentView: View {
                             ProgressView().controlSize(.small)
                             Button("Отменить") { Task { await model.cancelSelected() } }
                         } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
-                            Button("Продолжить") { model.resume(selected.id) }.disabled(model.recordingID != nil || selected.state == .waitingForModels && !model.modelsReady)
+                            Button("Продолжить") { model.resume(selected.id) }.disabled(model.finalizingRecording || model.recordingID != nil || selected.state == .waitingForModels && !model.modelsReady)
                         }
                         RecordingActionsView(
                             canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
                             canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
-                            canDelete: model.recordingID != selected.id,
+                            canDelete: !model.finalizingRecording && model.recordingID != selected.id,
                             showAudio: model.showAudio,
                             repeatAnalysis: { model.repeatAnalysis(summaryOnly: false) },
                             recreateSummary: { model.repeatAnalysis(summaryOnly: true, language: $0) },
@@ -85,7 +85,7 @@ struct ContentView: View {
                     ContentUnavailableView {
                         Label("Разговор останется на вашем Mac", systemImage: "waveform")
                     } description: { Text("Запишите встроенный микрофон или импортируйте аудио.\nРасшифровка, участники и итоги — после сохранения звука.") } actions: {
-                        Button("Новая запись") { recordingSheet = true }.buttonStyle(.borderedProminent).disabled(model.startingRecording || model.installing)
+                        Button("Новая запись") { recordingSheet = true }.buttonStyle(.borderedProminent).disabled(model.startingRecording || model.finalizingRecording || model.installing)
                         Button("Импортировать аудио", action: model.chooseImport)
                     }
                 }
@@ -94,7 +94,7 @@ struct ContentView: View {
         }
         .toolbar {
             ToolbarItemGroup {
-                Button { recordingSheet = true } label: { Label("Новая запись", systemImage: "mic") }.disabled(model.recordingID != nil || model.startingRecording || model.installing)
+                Button { recordingSheet = true } label: { Label("Новая запись", systemImage: "mic") }.disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording || model.installing)
                 Button(action: model.chooseImport) { Label("Импорт", systemImage: "square.and.arrow.down") }
             }
         }
@@ -110,7 +110,7 @@ struct ContentView: View {
                 HStack { Spacer(); Button("Отмена") { recordingSheet = false }; Button("Начать") { recordingSheet = false; Task { await model.startRecording() } }.buttonStyle(.borderedProminent) }
             }.padding(28).frame(width: 440)
         }
-        .disabled(model.shuttingDown)
+        .disabled(model.preparingStorage || model.shuttingDown)
         .alert("LocalScribe", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button("OK") { model.error = nil } } message: { Text(model.error ?? "") }
     }
 }

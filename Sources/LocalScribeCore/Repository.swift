@@ -41,7 +41,10 @@ public struct RecordingRepository: Sendable {
         let size = try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         try Disk.requireSpace(Int64(size) + Int64(info.duration * 32_000) + 500_000_000, at: root)
         var manifest = Manifest(sourceType: "import", title: source.deletingPathExtension().lastPathComponent, filename: source.lastPathComponent)
-        let folder = folder(manifest.id); try Disk.directory(folder.appendingPathComponent("source"))
+        let folder = folder(manifest.id)
+        var published = false
+        defer { if !published { try? fm.removeItem(at: folder) } }
+        try Disk.directory(folder.appendingPathComponent("source"))
         let original = folder.appendingPathComponent(manifest.originalRelativePath)
         let partial = original.appendingPathExtension("partial")
         try fm.copyItem(at: source, to: partial)
@@ -49,6 +52,7 @@ public struct RecordingRepository: Sendable {
         try fm.moveItem(at: partial, to: original)
         manifest.sha256 = digest; manifest.durationMs = Int((info.duration * 1000).rounded()); manifest.sampleRate = info.sampleRate; manifest.channels = info.channels; manifest.sourceComplete = true; manifest.state = .queued
         try save(manifest)
+        published = true
         return manifest
     }
     public func beginRun(_ manifest: inout Manifest, catalog: ModelCatalog, summaryLanguage: String? = nil, summaryOnly: Bool = false) throws -> RunInfo {
@@ -61,7 +65,10 @@ public struct RecordingRepository: Sendable {
         }
         info.modelIDs = modelIDs
         info.transcriptSourceRunID = summaryOnly ? manifest.activeRunId : nil
-        let path = run(manifest.id, info.id); try Disk.directory(path)
+        let path = run(manifest.id, info.id)
+        var published = false
+        defer { if !published { try? FileManager.default.removeItem(at: path) } }
+        try Disk.directory(path)
         try Disk.write(info, to: path.appendingPathComponent("run.json"))
         if summaryOnly, let active = manifest.activeRunId {
             for name in ["asr-transcript.json", "transcript.json", "diarization.json"] {
@@ -76,7 +83,9 @@ public struct RecordingRepository: Sendable {
                 }
             }
         }
-        manifest.pendingRunId = info.id; manifest.state = .queued; manifest.lastError = nil; try save(manifest)
+        var updated = manifest
+        updated.pendingRunId = info.id; updated.state = .queued; updated.lastError = nil; try save(updated)
+        manifest = updated; published = true
         return info
     }
     public func results(_ manifest: Manifest) -> (Transcript?, Summary?) {
@@ -96,6 +105,39 @@ public struct RecordingRepository: Sendable {
     public func delete(_ manifest: Manifest) throws {
         guard UUID(uuidString: manifest.id) != nil else { throw ScribeError.message("Недопустимый идентификатор записи") }
         try FileManager.default.removeItem(at: folder(manifest.id))
+        try? Disk.write(list(), to: root.appendingPathComponent("index.json"))
+    }
+    /// Call only after capture/worker exit. Audio caches are reproducible; JSON
+    /// checkpoints and unfinished capture fragments remain available for recovery.
+    public func cleanupTemporaryFiles(_ id: String) throws {
+        let manifest = try load(id)
+        guard manifest.schemaVersion == 1, manifest.sourceComplete,
+              !manifest.state.processing, manifest.state != .recording else { return }
+        let fm = FileManager.default, recording = folder(id)
+        func ownedDirectory(_ url: URL) -> Bool {
+            guard let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]) else { return false }
+            return values.isDirectory == true && values.isSymbolicLink != true
+        }
+        guard ownedDirectory(recording) else { return }
+        let components = manifest.originalRelativePath.split(separator: "/")
+        guard components.count == 2, components[0] == "source", components[1].hasPrefix("original."),
+              ownedDirectory(recording.appendingPathComponent("source")) else { return }
+        let original = recording.appendingPathComponent(manifest.originalRelativePath)
+        var disposable = [recording.appendingPathComponent("capture"), original.appendingPathExtension("assembling.caf")]
+        let runs = recording.appendingPathComponent("runs")
+        if ownedDirectory(runs) {
+            for run in (try? fm.contentsOfDirectory(at: runs, includingPropertiesForKeys: nil)) ?? [] {
+                guard UUID(uuidString: run.lastPathComponent) != nil, ownedDirectory(run),
+                      let info = try? Disk.read(RunInfo.self, at: run.appendingPathComponent("run.json")),
+                      info.schemaVersion == 1, info.id == run.lastPathComponent, info.sourceHash == manifest.sha256 else { continue }
+                disposable.append(run.appendingPathComponent("work"))
+            }
+        }
+        disposable = disposable.filter { fm.fileExists(atPath: $0.path) }
+        guard !disposable.isEmpty else { return }
+        // Never discard the last usable copy if an original was lost or changed.
+        guard try Disk.hash(original) == manifest.sha256 else { return }
+        for url in disposable { try fm.removeItem(at: url) }
     }
     public func recover() throws {
         for var m in list() {
@@ -105,6 +147,8 @@ public struct RecordingRepository: Sendable {
                 m.state = .interrupted; m.warnings.append("Запись была прервана. Завершённые фрагменты сохранены; последний фрагмент мог быть утрачен.")
                 try save(m)
             }
+            // Best effort: a cleanup failure must not make the archive unavailable.
+            try? cleanupTemporaryFiles(m.id)
         }
     }
 }

@@ -1,17 +1,58 @@
 import Foundation
 import AVFoundation
+import Darwin
 
 public struct AudioInfo: Codable, Sendable {
     public var duration: Double; public var sampleRate: Double; public var channels: Int; public var codec: String
 }
 public enum Media {
     public static func execute(_ executable: URL, _ arguments: [String]) throws -> Data {
-        let p = Process(); p.executableURL = executable; p.arguments = arguments
-        let output = Pipe(); p.standardOutput = output
-        // Diagnostic media text is not logged. Direct stderr to /dev/null; never leave an unread pipe.
-        p.standardError = FileHandle.nullDevice; p.standardInput = FileHandle.nullDevice
-        try p.run(); let data = output.fileHandleForReading.readDataToEndOfFile(); p.waitUntilExit()
-        guard p.terminationStatus == 0 else { throw ScribeError.message("Не удалось прочитать аудио (код \(p.terminationStatus)). Файл повреждён или кодек не поддерживается.") }
+        // Foundation Process creates a separate process group on macOS. Spawn
+        // without SETPGROUP so media tools inherit the worker's cancellation group.
+        let output = Pipe()
+        defer { try? output.fileHandleForReading.close(); try? output.fileHandleForWriting.close() }
+        for handle in [output.fileHandleForReading, output.fileHandleForWriting] {
+            guard fcntl(handle.fileDescriptor, F_SETFD, FD_CLOEXEC) == 0 else { throw ScribeError.message("Не удалось настроить канал аудиоинструмента") }
+        }
+        var actions: posix_spawn_file_actions_t?
+        guard posix_spawn_file_actions_init(&actions) == 0 else { throw ScribeError.message("Не удалось настроить запуск аудиоинструмента") }
+        defer { posix_spawn_file_actions_destroy(&actions) }
+        var attributes: posix_spawnattr_t?
+        guard posix_spawnattr_init(&attributes) == 0 else { throw ScribeError.message("Не удалось настроить сигналы аудиоинструмента") }
+        defer { posix_spawnattr_destroy(&attributes) }
+        // Swift/Dispatch threads may block signals. Media children must still
+        // respond to the worker group's SIGTERM, regardless of the calling thread.
+        var mask = sigset_t(), defaults = sigset_t()
+        sigemptyset(&mask); sigemptyset(&defaults)
+        for signal in [SIGTERM, SIGINT, SIGHUP, SIGQUIT, SIGPIPE] { sigaddset(&defaults, signal) }
+        guard posix_spawnattr_setsigmask(&attributes, &mask) == 0,
+              posix_spawnattr_setsigdefault(&attributes, &defaults) == 0,
+              posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF)) == 0 else { throw ScribeError.message("Не удалось настроить сигналы аудиоинструмента") }
+        // Never persist diagnostic media text or leave an unread stderr pipe.
+        let setup = [posix_spawn_file_actions_addopen(&actions, STDIN_FILENO, "/dev/null", O_RDONLY, 0),
+                     posix_spawn_file_actions_addopen(&actions, STDERR_FILENO, "/dev/null", O_WRONLY, 0),
+                     posix_spawn_file_actions_adddup2(&actions, output.fileHandleForWriting.fileDescriptor, STDOUT_FILENO),
+                     posix_spawn_file_actions_addclose(&actions, output.fileHandleForReading.fileDescriptor),
+                     posix_spawn_file_actions_addclose(&actions, output.fileHandleForWriting.fileDescriptor)]
+        guard setup.allSatisfy({ $0 == 0 }) else { throw ScribeError.message("Не удалось настроить потоки аудиоинструмента") }
+        var argv = ([executable.path] + arguments).map { strdup($0) } + [nil]
+        var environment = ProcessInfo.processInfo.environment.map { strdup("\($0.key)=\($0.value)") } + [nil]
+        defer { for pointer in argv + environment { free(pointer) } }
+        guard argv.dropLast().allSatisfy({ $0 != nil }), environment.dropLast().allSatisfy({ $0 != nil }) else { throw ScribeError.message("Не хватает памяти для запуска аудиоинструмента") }
+        var pid: pid_t = 0
+        let launch = argv.withUnsafeMutableBufferPointer { arguments in
+            environment.withUnsafeMutableBufferPointer { environment in
+                posix_spawn(&pid, executable.path, &actions, &attributes, arguments.baseAddress!, environment.baseAddress!)
+            }
+        }
+        guard launch == 0 else { throw ScribeError.message("Не удалось запустить аудиоинструмент (код \(launch))") }
+        try? output.fileHandleForWriting.close()
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        var status: Int32 = 0, waited: pid_t
+        repeat { waited = waitpid(pid, &status, 0) } while waited == -1 && errno == EINTR
+        guard waited == pid else { throw ScribeError.message("Не удалось дождаться завершения аудиоинструмента") }
+        let code = (status & 0x7f) == 0 ? (status >> 8) & 0xff : status & 0x7f
+        guard code == 0 else { throw ScribeError.message("Не удалось прочитать аудио (код \(code)). Файл повреждён или кодек не поддерживается.") }
         return data
     }
     public static func probe(_ source: URL, tools: URL) throws -> AudioInfo {
@@ -31,6 +72,7 @@ public enum Media {
         if FileManager.default.fileExists(atPath: destination.path) { try FileManager.default.removeItem(at: destination) }
         let temporary = destination.deletingPathExtension().appendingPathExtension("partial.wav")
         if FileManager.default.fileExists(atPath: temporary.path) { try FileManager.default.removeItem(at: temporary) }
+        defer { try? FileManager.default.removeItem(at: temporary) }
         // Detect gross phase cancellation from a bounded sample. Full QA remains necessary for varied stereo material.
         let info = try probe(source, tools: tools)
         var warning: String?
@@ -71,6 +113,7 @@ public enum Media {
         let format = try AVAudioFile(forReading: first).processingFormat
         let temp = destination.appendingPathExtension("assembling.caf")
         if FileManager.default.fileExists(atPath: temp.path) { try FileManager.default.removeItem(at: temp) }
+        defer { try? FileManager.default.removeItem(at: temp) }
         var total: Int64 = 0
         do {
             let out = try AVAudioFile(forWriting: temp, settings: format.settings)

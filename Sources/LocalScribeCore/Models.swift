@@ -175,6 +175,8 @@ public actor ModelInstaller {
                 continue
             }
             try Disk.directory(destination.deletingLastPathComponent())
+            var verified = false
+            defer { if !verified { try? fm.removeItem(at: destination) } }
             report(0, .downloading)
             if fm.fileExists(atPath: destination.path) { try fm.removeItem(at: destination) }
             if let localSource {
@@ -199,6 +201,7 @@ public actor ModelInstaller {
             report(f.size, .verifying)
             guard (try destination.resourceValues(forKeys: [.fileSizeKey]).fileSize).map(Int64.init) == f.size,
                   try Disk.hash(destination) == f.sha256 else { try? fm.removeItem(at: destination); throw ScribeError.message("Не совпала SHA-256 файла \(f.localPath). Повторите загрузку.") }
+            verified = true
             completedBytes += f.size
             progress(ModelInstallProgress(profile: profile, fileIndex: index + 1, completedFiles: index + 1, completedBytes: completedBytes))
         }

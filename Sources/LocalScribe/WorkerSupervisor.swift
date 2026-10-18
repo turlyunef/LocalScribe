@@ -9,6 +9,11 @@ import Darwin
     func run(_ command: WorkerCommand, executable: URL, diagnosticURL: URL? = nil, onEvent: @escaping @MainActor (WorkerEvent) -> Void) async throws {
         guard process == nil else { throw ScribeError.message("Другой этап ещё работает") }
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
+        defer {
+            for pipe in [input, output, errors] {
+                try? pipe.fileHandleForReading.close(); try? pipe.fileHandleForWriting.close()
+            }
+        }
         p.executableURL = executable; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         p.environment = ProcessInfo.processInfo.environment.merging(["HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1", "TOKENIZERS_PARALLELISM": "false"]) { _, value in value }
         try p.run(); process = p; control = input
@@ -23,8 +28,8 @@ import Darwin
             }
             return diagnostic
         }
-        let read = Task.detached { () throws -> [WorkerEvent] in
-            var buffer = Data(), events: [WorkerEvent] = []
+        let read = Task.detached { () throws -> (last: WorkerEvent?, failure: WorkerEvent?) in
+            var buffer = Data(), last: WorkerEvent?, failure: WorkerEvent?
             var bytes = [UInt8](repeating:0,count:16_384)
             while true {
                 // One POSIX read returns currently available pipe bytes. Foundation's
@@ -37,23 +42,35 @@ import Darwin
                 while let end = buffer.firstIndex(of: 10) {
                     let line = buffer[..<end]; buffer.removeSubrange(...end)
                     guard let event = try? JSONDecoder().decode(WorkerEvent.self, from: line), event.version == 1, event.jobId == command.jobId, event.runId == command.runId else { throw ScribeError.message("Нарушена версия или формат протокола worker") }
-                    events.append(event); await onEvent(event)
+                    last = event
+                    if event.type == "failed" { failure = event }
+                    await onEvent(event)
                 }
             }
             guard buffer.isEmpty else { throw ScribeError.message("Незавершённое сообщение worker") }
-            return events
+            return (last, failure)
         }
-        try input.fileHandleForWriting.write(contentsOf: JSONEncoder().encode(command) + Data([10]))
-        do {
-            let events = try await read.value
-            await Task.detached { p.waitUntilExit() }.value
-            let diagnostic = await drain.value
-            if let diagnosticURL { try? diagnostic.write(to:diagnosticURL,options:.atomic) }
-            if let failure = events.last(where: { $0.type == "failed" }) { throw ScribeError.message(failure.message) }
-            guard p.terminationStatus == 0, events.last?.type == "completed" else { throw ScribeError.message("Процесс обработки прерван (код \(p.terminationStatus)). Контрольные точки сохранены.") }
-        } catch {
-            await cancel()
-            throw error
+        try await withTaskCancellationHandler {
+            do {
+                try Task.checkCancellation()
+                try input.fileHandleForWriting.write(contentsOf: JSONEncoder().encode(command) + Data([10]))
+                let events = try await read.value
+                await Task.detached { p.waitUntilExit() }.value
+                let diagnostic = await drain.value
+                if let diagnosticURL { try? diagnostic.write(to:diagnosticURL,options:.atomic) }
+                try Task.checkCancellation()
+                if let failure = events.failure { throw ScribeError.message(failure.message) }
+                guard p.terminationStatus == 0, events.last?.type == "completed" else { throw ScribeError.message("Процесс обработки прерван (код \(p.terminationStatus)). Контрольные точки сохранены.") }
+            } catch {
+                await cancel()
+                // Detached pipe readers must finish before their descriptors close
+                // or another worker starts, including a failed command write.
+                _ = try? await read.value
+                _ = await drain.value
+                throw error
+            }
+        } onCancel: {
+            Task { @MainActor in if self.process === p { await self.cancel() } }
         }
     }
     func cancel() async {

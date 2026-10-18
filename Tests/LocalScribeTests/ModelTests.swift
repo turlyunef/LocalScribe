@@ -112,6 +112,28 @@ final class ModelTests: XCTestCase {
         try old.validate(at: repo.models)
         XCTAssertFalse(FileManager.default.fileExists(atPath: repo.models.appendingPathComponent(new.id).path))
     }
+    func testCancellationDuringCopyDeletesUnverifiedFileAndKeepsVerifiedFilesForResume() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (profile, source) = try fixture("asr", role: .asr, root: root, contents: ["verified", String(repeating: "x", count: 9_000_000)])
+        let models = root.appendingPathComponent("models"); try Disk.directory(models)
+        let installation = Task {
+            try await ModelInstaller().install(profile, root: models, localSource: source) { progress in
+                if progress.fileIndex == 1 && progress.phase == .downloading && progress.fileBytes > 0 {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                }
+            }
+        }
+        do { try await installation.value; XCTFail("Cancelled copy was published") }
+        catch is CancellationError {} catch { XCTFail("Unexpected error: \(error)") }
+        let partial = models.appendingPathComponent("asr.partial")
+        XCTAssertEqual(try Disk.hash(partial.appendingPathComponent("file-0.bin")), profile.files[0].sha256)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: partial.appendingPathComponent("file-1.bin").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: models.appendingPathComponent("asr").path))
+        try FileManager.default.removeItem(at: source.appendingPathComponent("file-0.bin"))
+        try await ModelInstaller().install(profile, root: models, localSource: source) { _ in }
+        try profile.validate(at: models)
+    }
     func testSelectedProfilesAndTokenizerAreBoundToNewRunOnly() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
