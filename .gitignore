@@ -4,6 +4,8 @@ Vendor/
 build/
 dist/
 Assets/
+!.agents/skills/swift-agents-md/assets/
+!.agents/skills/swift-agents-md/assets/AGENTS.template.md
 .DS_Store
 __pycache__/
 *.log

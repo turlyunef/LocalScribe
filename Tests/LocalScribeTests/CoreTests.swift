@@ -2,6 +2,88 @@ import XCTest
 import AVFoundation
 @testable import LocalScribeCore
 final class CoreTests: XCTestCase {
+    func testRenamePersistsTitleAndUpdatesArchiveIndex() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let first = Manifest(sourceType: "microphone", title: "Запись 18.10.2026, 12:00", filename: "original.caf")
+        let second = Manifest(sourceType: "import", title: "Другая встреча", filename: "meeting.wav")
+        try repo.save(first); try repo.save(second)
+
+        try repo.rename(first.id, title: "  Планирование — команда 🎙️ \n")
+
+        let reopened = try RecordingRepository(root: root)
+        XCTAssertEqual(try reopened.load(first.id).displayTitle, "Планирование — команда 🎙️")
+        XCTAssertEqual(reopened.list().first { $0.id == first.id }?.displayTitle, "Планирование — команда 🎙️")
+        XCTAssertEqual(try reopened.load(second.id).displayTitle, second.displayTitle)
+        let index = try Disk.read([Manifest].self, at: root.appendingPathComponent("index.json"))
+        XCTAssertEqual(index.first { $0.id == first.id }?.displayTitle, "Планирование — команда 🎙️")
+    }
+
+    func testRenamePreservesLatestProcessingStateOriginalAndRuns() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        var manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        try repo.save(manifest)
+        let source = repo.folder(manifest.id).appendingPathComponent(manifest.originalRelativePath)
+        try Disk.directory(source.deletingLastPathComponent())
+        try Data("original audio".utf8).write(to: source)
+        let run = RunInfo(sourceHash: try Disk.hash(source), profileHash: "profile")
+        let runFile = repo.run(manifest.id, run.id).appendingPathComponent("run.json")
+        try Disk.write(run, to: runFile)
+        let runBefore = try Data(contentsOf: runFile)
+        manifest = try repo.load(manifest.id)
+        manifest.sha256 = run.sourceHash; manifest.sourceComplete = true
+        manifest.durationMs = 123_000; manifest.sampleRate = 16000; manifest.channels = 1
+        manifest.activeRunId = UUID().uuidString; manifest.pendingRunId = run.id
+        manifest.state = .transcribing; manifest.warnings = ["Предупреждение"]
+        try repo.save(manifest)
+        var expected = try repo.load(manifest.id)
+        expected.displayTitle = "Новое название во время обработки"
+
+        try repo.rename(manifest.id, title: expected.displayTitle)
+
+        let renamed = try repo.load(manifest.id)
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        XCTAssertEqual(try encoder.encode(renamed), try encoder.encode(expected))
+        XCTAssertEqual(try Disk.hash(source), run.sourceHash)
+        XCTAssertEqual(try Data(contentsOf: runFile), runBefore)
+        XCTAssertTrue(ExportService.render(manifest: renamed, transcript: nil, summary: nil, markdown: false).contains(expected.displayTitle))
+    }
+
+    func testRenameRejectsEmptyTitleWithoutChangingManifest() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let manifest = Manifest(sourceType: "microphone", title: "Автоматическое название", filename: "original.caf")
+        try repo.save(manifest)
+        let file = repo.folder(manifest.id).appendingPathComponent("manifest.json")
+        let before = try Data(contentsOf: file)
+        for title in ["", " \t\n ", "\u{00A0}"] {
+            XCTAssertThrowsError(try repo.rename(manifest.id, title: title)) { error in
+                XCTAssertEqual(error.localizedDescription, "Название записи не может быть пустым")
+            }
+            XCTAssertEqual(try Data(contentsOf: file), before)
+        }
+    }
+
+    func testRenameRejectsMissingInvalidAndUnsupportedRecordings() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        for id in [UUID().uuidString, "../outside"] {
+            XCTAssertThrowsError(try repo.rename(id, title: "Новое название"))
+        }
+        var manifest = Manifest(sourceType: "import", title: "Будущая версия", filename: "meeting.wav")
+        manifest.schemaVersion = 2
+        let file = repo.folder(manifest.id).appendingPathComponent("manifest.json")
+        try Disk.write(manifest, to: file)
+        let before = try Data(contentsOf: file)
+        XCTAssertThrowsError(try repo.rename(manifest.id, title: "Новое название"))
+        XCTAssertEqual(try Data(contentsOf: file), before)
+    }
+
     func testAudioEngineNotificationDoesNotImplyMicrophoneChange() {
         let input = CaptureInputConfiguration(deviceID:42,sampleRate:48000,channels:1,formatID:1,formatFlags:2)
         XCTAssertEqual(CaptureConfigurationAction.evaluate(expected:input,current:input,engineRunning:true),.keepRecording)
@@ -55,6 +137,7 @@ final class CoreTests: XCTestCase {
         let repo = try RecordingRepository(root:root.appendingPathComponent("data"))
         let info = AudioInfo(duration:1,sampleRate:16000,channels:1,codec:"pcm_f32le")
         let first = try repo.importFile(original,info:info)
+        XCTAssertEqual(first.displayTitle, original.deletingPathExtension().lastPathComponent)
         XCTAssertEqual(try Disk.hash(repo.folder(first.id).appendingPathComponent(first.originalRelativePath)),before)
         XCTAssertThrowsError(try repo.importFile(original,info:info)) { error in XCTAssertEqual((error as? DuplicateRecording)?.id,first.id) }
         let second = try repo.importFile(original,info:info,allowDuplicate:true)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Swift AGENTS.md"
+  short_description: "Создание AGENTS.md по фактам Swift-проекта"
+  default_prompt: "Используй $swift-agents-md: создай или обнови AGENTS.md для текущего Swift-проекта."

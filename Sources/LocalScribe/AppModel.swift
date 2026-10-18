@@ -87,6 +87,15 @@ import LocalScribeCore
         if CommandLine.arguments.contains("--self-check-microphone") { Task { await microphoneSelfCheck() } }
     }
     func reload() { recordings = repository?.list() ?? []; loadResult() }
+    func renameRecording(_ id: String, title: String) {
+        guard let repository else { return }
+        do {
+            try repository.rename(id, title: title)
+            reload()
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
     func loadResult() {
         guard let selected, let repository else { transcript = nil; summary = nil; resultSignature = ""; return }
         let signature = selected.id + (selected.activeRunId ?? "") + (selected.pendingRunId ?? "") + selected.state.rawValue
@@ -297,6 +306,8 @@ import LocalScribeCore
             let result = try Media.assembleCapture(folder.appendingPathComponent("capture"), destination: destination)
             return (result.0, result.1, try Disk.hash(destination))
         }.value
+        // The title may have changed while the audio was being assembled.
+        m = try repository.load(id)
         m.durationMs = Int(Double(frames)/rate*1000); m.sampleRate = rate; m.channels = 1; m.sha256 = hash; m.sourceComplete = true; m.state = .recorded
         try repository.save(m)
         // Finalized fragments are removed only after the original and manifest have been validated.

@@ -41,7 +41,10 @@ struct ContentView: View {
                 if let selected = model.selected {
                     HStack {
                         VStack(alignment: .leading, spacing: 4) {
-                            Text(selected.displayTitle).font(.title2).fontWeight(.semibold)
+                            RecordingTitleView(title: selected.displayTitle) { title in
+                                model.renameRecording(selected.id, title: title)
+                            }
+                            .id(selected.id)
                             Text(selected.state.title).font(.subheadline).foregroundStyle(.secondary)
                         }
                         Spacer()
@@ -110,6 +113,53 @@ struct ContentView: View {
         }
         .disabled(model.shuttingDown)
         .alert("LocalScribe", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button("OK") { model.error = nil } } message: { Text(model.error ?? "") }
+    }
+}
+
+struct RecordingTitleView: View {
+    var title: String
+    var save: (String) -> Void
+    @State private var draft = ""
+    @State private var editing = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        Group {
+            if editing {
+                TextField("Название записи", text: $draft)
+                    .textFieldStyle(.roundedBorder)
+                    .focused($focused)
+                    .onSubmit(commit)
+                    .onExitCommand {
+                        editing = false
+                        focused = false
+                    }
+                    .onChange(of: focused) { _, value in
+                        if !value { commit() }
+                    }
+                    .onAppear { focused = true }
+                    .accessibilityLabel("Название записи")
+            } else {
+                Button {
+                    draft = title
+                    editing = true
+                } label: {
+                    Text(title).multilineTextAlignment(.leading)
+                }
+                .buttonStyle(.plain)
+                .help("Нажмите, чтобы изменить название")
+                .accessibilityLabel("Изменить название записи: \(title)")
+            }
+        }
+        .font(.title2).fontWeight(.semibold)
+    }
+
+    private func commit() {
+        guard editing else { return }
+        // End editing before clearing focus to avoid saving twice.
+        editing = false
+        focused = false
+        if draft != title { save(draft) }
     }
 }
 

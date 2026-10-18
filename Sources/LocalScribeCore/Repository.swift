@@ -26,6 +26,14 @@ public struct RecordingRepository: Sendable {
         let dirs = (try? FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("recordings"), includingPropertiesForKeys: nil)) ?? []
         return dirs.compactMap { try? load($0.lastPathComponent) }.sorted { $0.createdAt > $1.createdAt }
     }
+    public func rename(_ id: String, title: String) throws {
+        let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !title.isEmpty else { throw ScribeError.message("Название записи не может быть пустым") }
+        // Read the current manifest so renaming cannot restore stale processing state.
+        var manifest = try load(id)
+        manifest.displayTitle = title
+        try save(manifest)
+    }
     public func importFile(_ source: URL, info: AudioInfo, allowDuplicate: Bool = false) throws -> Manifest {
         let fm = FileManager.default
         let digest = try Disk.hash(source)
