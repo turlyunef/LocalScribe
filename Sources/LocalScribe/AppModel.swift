@@ -8,12 +8,14 @@ import LocalScribeCore
     @Published var recordings: [Manifest] = []
     @Published var selection: String? {
         didSet {
-            if oldValue != selection { transcript = nil; summary = nil; resultSignature = "" }
+            if oldValue != selection { transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil }
             loadResult()
         }
     }
     @Published var transcript: Transcript?
     @Published var summary: Summary?
+    @Published var resultEdit: ResultEditDraft?
+    @Published private(set) var savingResult = false
     @Published var error: String?
     @Published var status = ""
     @Published var modelsStatus = "Проверяем модели…"
@@ -38,7 +40,7 @@ import LocalScribeCore
                              cpuCores: ProcessInfo.processInfo.processorCount, gpuWorkingSetBytes: gpu?.recommendedMaxWorkingSetSize ?? 0,
                              appleSilicon: appleSilicon, supportsMetal: gpu != nil)
     }()
-    var canManageModels: Bool { !preparingStorage && !installing && !verifyingModels && !busy && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
+    var canManageModels: Bool { !savingResult && resultEdit == nil && !preparingStorage && !installing && !verifyingModels && !busy && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
     var activeCatalog: ModelCatalog? { catalog.flatMap { modelLibrary.activeCatalog(from: $0) } }
     @Published var recordingID: String?
     @Published var startingRecording = false
@@ -66,15 +68,17 @@ import LocalScribeCore
     private var installTask: Task<Void, Never>?
     private var importTasks: [UUID: Task<Void, Never>] = [:]
     private var resultSignature = ""
+    private var resultLoadID = UUID()
     var selected: Manifest? { recordings.first { $0.id == selection } }
     var tools: URL { resources.appendingPathComponent("tools") }
     var worker: URL { Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
-    init() {
+    init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true) {
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
         catalog = try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json"))
-        do { let repo = try RecordingRepository(); repository = repo; recordings = repo.list() }
+        do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; recordings = repo.list() }
         catch { repository = nil; self.error = "Не удалось открыть локальное хранилище: \(error.localizedDescription)" }
+        if !startServices { preparingStorage = false; return }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.critical], queue: .main)
         memorySource?.setEventHandler { [weak self] in Task { @MainActor in await self?.pause(reason: "Обработка приостановлена из-за нехватки памяти. Можно продолжить с контрольной точки.") } }
         memorySource?.resume()
@@ -115,11 +119,38 @@ import LocalScribeCore
         let signature = selected.id + (selected.activeRunId ?? "") + (selected.pendingRunId ?? "") + selected.state.rawValue
         guard resultSignature != signature else { return }
         resultSignature = signature
+        transcript = nil; summary = nil
+        let loadID = UUID(); resultLoadID = loadID
         Task {
             let results = await Task.detached(priority: .userInitiated) { repository.results(selected) }.value
-            guard self.selection == selected.id, self.resultSignature == signature else { return }
+            guard self.selection == selected.id, self.resultSignature == signature, self.resultLoadID == loadID else { return }
             self.transcript = results.0; self.summary = results.1
         }
+    }
+    var canEditResult: Bool {
+        guard let selected else { return false }
+        return !preparingStorage && !shuttingDown && !savingResult && !busy
+            && !startingRecording && !finalizingRecording && recordingID == nil
+            && selected.activeRunId != nil && selected.pendingRunId == nil
+            && !selected.state.processing && ![JobState.recording, .queued].contains(selected.state)
+            && transcript != nil
+    }
+    func beginResultEditing() {
+        guard canEditResult, let selected, let runID = selected.activeRunId, let transcript else { return }
+        resultEdit = ResultEditDraft(recordingID: selected.id, runID: runID, transcript: transcript, summary: summary)
+    }
+    func saveResultEdits(_ draft: ResultEditDraft) async throws {
+        guard !savingResult, !shuttingDown, let repository, resultEdit?.id == draft.id else {
+            throw ScribeError.message("Редактор уже закрыт. Откройте результат заново.")
+        }
+        savingResult = true
+        defer { savingResult = false }
+        _ = try await Task.detached(priority: .userInitiated) { try repository.saveResultEdits(draft) }.value
+        // Invalidate even a load of the same recording/run that started earlier.
+        resultLoadID = UUID(); resultSignature = ""
+        if resultEdit?.id == draft.id { resultEdit = nil }
+        reload()
+        status = "Изменения сохранены"
     }
     func verifyModels() async {
         guard let catalog, let repository, canManageModels else { return }
@@ -253,7 +284,7 @@ import LocalScribeCore
                 let tools = self.tools
                 do {
                     let manifest = try await Task.detached(priority: .userInitiated) { let info = try Media.probe(url, tools: tools); return try repository.importFile(url, info: info) }.value
-                    selection = manifest.id; reload(); enqueue(manifest.id)
+                    completeImport(manifest)
                 } catch let duplicate as DuplicateRecording {
                     guard !shuttingDown else { return }
                     let alert = NSAlert(); alert.messageText = "Такой файл уже есть в архиве"; alert.addButton(withTitle: "Открыть существующую"); alert.addButton(withTitle: "Импортировать ещё раз"); alert.addButton(withTitle: "Отмена")
@@ -262,15 +293,20 @@ import LocalScribeCore
                     if answer == .alertSecondButtonReturn {
                         do {
                             let manifest = try await Task.detached { let info = try Media.probe(url, tools: tools); return try repository.importFile(url, info: info, allowDuplicate: true) }.value
-                            selection = manifest.id; reload(); enqueue(manifest.id)
+                            completeImport(manifest)
                         } catch { self.error = error.localizedDescription }
                     }
                 } catch { self.error = error.localizedDescription }
             }
         }
     }
+    func completeImport(_ manifest: Manifest) {
+        // Import may finish while a result sheet owns an unsaved local draft.
+        if resultEdit == nil && !savingResult { selection = manifest.id }
+        reload(); enqueue(manifest.id)
+    }
     func startRecording() async {
-        guard recordingID == nil, let repository, !preparingStorage, !stopping, !shuttingDown, !startingRecording, !finalizingRecording, !installing else { return }
+        guard resultEdit == nil, !savingResult, recordingID == nil, let repository, !preparingStorage, !stopping, !shuttingDown, !startingRecording, !finalizingRecording, !installing else { return }
         startingRecording = true
         defer { startingRecording = false }
         await pause(reason: "Обработка приостановлена на время записи. Нажмите «Продолжить», когда будет удобно.")
@@ -379,8 +415,6 @@ import LocalScribeCore
                 let stages: [Stage] = [.preparingAudio,.transcribing,.diarizing,.summarizing]
                 for stage in stages {
                     if activeID != id { throw CancellationError() }
-                    // Summary-only runs do not require a WAV when their transcript checkpoint is valid.
-                    if stage == .preparingAudio, let t = try? Disk.read(Transcript.self, at: run.appendingPathComponent("transcript.json")), t.fingerprint == info.fingerprint { continue }
                     if try stageComplete(stage, run: run, manifest: m, info: info) { continue }
                     m = try repository.load(id); m.state = JobState(rawValue: stage.rawValue)!; try repository.save(m); reload()
                     let command = WorkerCommand(jobId: id, runId: info.id, stage: stage, recordingPath: repository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
@@ -404,7 +438,15 @@ import LocalScribeCore
             activeID = nil; reload()
         }
     }
-    private func stageComplete(_ stage: Stage, run: URL, manifest: Manifest, info: RunInfo) throws -> Bool {
+    func stageComplete(_ stage: Stage, run: URL, manifest: Manifest, info: RunInfo) throws -> Bool {
+        // A validated final transcript completes every audio/ASR stage, including
+        // a summary-only run copied from a manually edited revision.
+        if stage == .preparingAudio || stage == .transcribing,
+           let transcript = try? Disk.read(Transcript.self, at: run.appendingPathComponent("transcript.json")),
+           transcript.fingerprint == info.fingerprint, transcript.diarized {
+            try transcript.validate(durationMs: manifest.durationMs)
+            return true
+        }
         switch stage {
         case .preparingAudio:
             guard let checkpoint = try? Disk.read([String:String].self, at: run.appendingPathComponent("prepared.json")), checkpoint["fingerprint"] == info.fingerprint,
@@ -472,6 +514,7 @@ import LocalScribeCore
         if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }; sleepObserver = nil
         installTask?.cancel(); downloader.close()
         if recordingID != nil { await stopRecording() }
+        while savingResult { try? await Task.sleep(for: .milliseconds(50)) }
         while finalizingRecording { try? await Task.sleep(for:.milliseconds(50)) }
         await pause(reason:"Приложение закрыто. Можно продолжить обработку."); supervisor.terminateNow()
         await installTask?.value

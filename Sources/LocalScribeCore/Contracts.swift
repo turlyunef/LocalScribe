@@ -110,7 +110,7 @@ public struct Segment: Codable, Identifiable, Sendable, Equatable {
         self.id = id; self.startMs = startMs; self.endMs = endMs; self.speakerId = speakerId; self.text = text; self.language = language; self.overlap = overlap; self.uncertain = uncertain; self.words = words
     }
 }
-public struct Transcript: Codable, Sendable {
+public struct Transcript: Codable, Sendable, Equatable {
     public var schemaVersion = 1; public var fingerprint: String
     public var diarized: Bool; public var segments: [Segment]
     public init(fingerprint: String, diarized: Bool, segments: [Segment]) { self.fingerprint = fingerprint; self.diarized = diarized; self.segments = segments }
@@ -143,7 +143,7 @@ public struct Finding: Codable, Identifiable, Sendable, Equatable {
         self.id = id; self.text = text; self.evidenceSegmentIds = evidenceSegmentIds; self.ownerSpeakerId = ownerSpeakerId; self.ownerName = ownerName; self.dueText = dueText; self.uncertain = uncertain
     }
 }
-public struct Summary: Codable, Sendable {
+public struct Summary: Codable, Sendable, Equatable {
     public var schemaVersion: Int = 1
     public var language: String
     public var overview: [Finding]; public var decisions: [Finding]; public var tasks: [Finding]; public var openQuestions: [Finding]

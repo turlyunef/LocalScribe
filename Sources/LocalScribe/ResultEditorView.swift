@@ -1,0 +1,140 @@
+import SwiftUI
+import LocalScribeCore
+
+struct ResultEditorView: View {
+    let initial: ResultEditDraft
+    let save: (ResultEditDraft) async throws -> Void
+    let cancel: () -> Void
+    @State private var draft: ResultEditDraft
+    @State private var part: ExportPart
+    @State private var saving = false
+    @State private var error: String?
+
+    init(initial: ResultEditDraft, initialPart: ExportPart = .transcript,
+         save: @escaping (ResultEditDraft) async throws -> Void, cancel: @escaping () -> Void) {
+        self.initial = initial; self.save = save; self.cancel = cancel
+        _draft = State(initialValue: initial)
+        _part = State(initialValue: initialPart == .summary ? .summary : .transcript)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Редактирование результата").font(.title2).fontWeight(.semibold)
+            Text("Таймкоды и участники сохраняются. Итоги не пересоздаются автоматически после правки реплик.")
+                .font(.callout).foregroundStyle(.secondary)
+            Picker("Раздел", selection: $part) {
+                Text("Расшифровка").tag(ExportPart.transcript)
+                Text("Итоги").tag(ExportPart.summary)
+            }.pickerStyle(.segmented)
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    if part == .transcript {
+                        ForEach($draft.transcript.segments) { $segment in
+                            VStack(alignment: .leading, spacing: 6) {
+                                Text("\(timecode(segment.startMs)) · \(speakerName(segment.speakerId))")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                TextEditor(text: $segment.text).font(.body)
+                                    .frame(minHeight: 80).border(.quaternary)
+                                    .accessibilityLabel("Текст реплики \(timecode(segment.startMs))")
+                                    .accessibilityIdentifier("edit.segment.\(segment.id)")
+                            }
+                        }
+                    } else if draft.summary != nil {
+                        Text("Ответственный и срок должны встречаться в выбранных репликах-основаниях.")
+                            .font(.caption).foregroundStyle(.secondary)
+                        summarySection("Обзор", keyPath: \.overview)
+                        summarySection("Решения", keyPath: \.decisions)
+                        summarySection("Задачи", keyPath: \.tasks)
+                        summarySection("Открытые вопросы", keyPath: \.openQuestions)
+                    } else {
+                        Text("Итоги ещё не созданы.").foregroundStyle(.secondary)
+                        Button("Добавить итоги") { draft.summary = Summary(language: draft.transcript.primaryLanguage) }
+                    }
+                }.padding(4)
+            }
+            if let error { Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled) }
+            HStack {
+                Text("Правки сохраняются новой версией результата.").font(.caption).foregroundStyle(.secondary)
+                Spacer()
+                if saving { ProgressView().controlSize(.small) }
+                Button("Отмена", action: cancel).keyboardShortcut(.cancelAction)
+                    .accessibilityIdentifier("edit.cancel")
+                Button("Сохранить") {
+                    saving = true; error = nil
+                    Task {
+                        defer { saving = false }
+                        do { try await save(draft) }
+                        catch { self.error = error.localizedDescription }
+                    }
+                }
+                .keyboardShortcut("s", modifiers: .command).buttonStyle(.borderedProminent)
+                .disabled(draft.transcript == initial.transcript && draft.summary == initial.summary)
+                .accessibilityIdentifier("edit.save")
+            }
+        }
+        .padding(24).frame(minWidth: 700, idealWidth: 800, minHeight: 550, idealHeight: 700)
+        .disabled(saving)
+        // An explicit Cancel prevents accidental loss of a draft on Escape or click outside.
+        .interactiveDismissDisabled()
+    }
+
+    private func findings(_ keyPath: WritableKeyPath<Summary, [Finding]>) -> Binding<[Finding]> {
+        Binding(get: { draft.summary?[keyPath: keyPath] ?? [] },
+                set: { draft.summary?[keyPath: keyPath] = $0 })
+    }
+
+    private func optionalText(_ value: Binding<String?>) -> Binding<String> {
+        Binding(get: { value.wrappedValue ?? "" }, set: {
+            value.wrappedValue = $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+        })
+    }
+
+    private func summarySection(_ title: String, keyPath: WritableKeyPath<Summary, [Finding]>) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(title).font(.headline)
+            ForEach(findings(keyPath)) { $finding in
+                VStack(alignment: .leading, spacing: 8) {
+                    TextField("Текст пункта", text: $finding.text, axis: .vertical)
+                        .lineLimit(2...10).textFieldStyle(.roundedBorder)
+                        .accessibilityLabel("\(title): текст пункта")
+                        .accessibilityIdentifier("edit.finding.\(finding.id)")
+                    Picker("Спикер ответственного", selection: $finding.ownerSpeakerId) {
+                        Text("Не указан").tag(nil as String?)
+                        ForEach(Array(Set(draft.transcript.segments.compactMap(\.speakerId))).sorted(), id: \.self) { id in
+                            Text(speakerName(id)).tag(Optional(id))
+                        }
+                    }
+                    HStack {
+                        TextField("Ответственный (необязательно)", text: optionalText($finding.ownerName))
+                        TextField("Срок (необязательно)", text: optionalText($finding.dueText))
+                    }
+                    HStack {
+                        Menu("Основания: \(finding.evidenceSegmentIds.count)") {
+                            ForEach(draft.transcript.segments) { segment in
+                                Toggle("\(timecode(segment.startMs)) · \(segment.text.prefix(70))", isOn: Binding(
+                                    get: { finding.evidenceSegmentIds.contains(segment.id) },
+                                    set: { included in
+                                        if included {
+                                            finding.evidenceSegmentIds.append(segment.id)
+                                            if segment.uncertain { finding.uncertain = true }
+                                        } else { finding.evidenceSegmentIds.removeAll { $0 == segment.id } }
+                                    }))
+                            }
+                        }
+                        Toggle("Есть неопределённость", isOn: $finding.uncertain)
+                            .disabled(draft.transcript.segments.contains { $0.uncertain && finding.evidenceSegmentIds.contains($0.id) })
+                        Spacer()
+                        Button("Удалить пункт", systemImage: "trash", role: .destructive) {
+                            draft.summary?[keyPath: keyPath].removeAll { $0.id == finding.id }
+                        }.labelStyle(.iconOnly).help("Удалить пункт из раздела «\(title)»")
+                    }.font(.caption)
+                }.padding(10).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
+            }
+            Button("Добавить пункт") {
+                guard let first = draft.transcript.segments.first else { return }
+                draft.summary?[keyPath: keyPath].append(Finding(id: UUID().uuidString, text: "",
+                    evidenceSegmentIds: [first.id], uncertain: first.uncertain))
+            }.disabled(draft.transcript.segments.isEmpty)
+        }
+    }
+}

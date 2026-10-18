@@ -70,6 +70,10 @@ struct ContentView: View {
                         Picker("Результат", selection: $model.tab) { Text("Расшифровка").tag(ExportPart.transcript); Text("Итоги").tag(ExportPart.summary) }.pickerStyle(.segmented).frame(width: 270)
                         if model.tab == .summary, let summary = model.summary { Text(summary.language == "ru" ? "Русский" : "English").font(.caption).foregroundStyle(.secondary) }
                         Spacer()
+                        Button("Редактировать", systemImage: "pencil", action: model.beginResultEditing)
+                            .disabled(!model.canEditResult)
+                            .help("Изменить текст расшифровки и итогов")
+                            .accessibilityIdentifier("result.edit")
                         Menu {
                             ForEach(ExportPart.allCases, id: \.self) { part in Button(part.rawValue) { model.copy(part) }.help("Копировать: \(part.rawValue)") }
                         } label: { Label("Копировать", systemImage: "doc.on.doc") } primaryAction: { model.copy(model.tab) }
@@ -111,6 +115,10 @@ struct ContentView: View {
                 Text("Голоса в наушниках не записываются. Запись можно сохранить и без установленных моделей.").font(.callout).foregroundStyle(.secondary)
                 HStack { Spacer(); Button("Отмена") { recordingSheet = false }.help("Закрыть окно без начала записи"); Button("Начать") { recordingSheet = false; Task { await model.startRecording() } }.buttonStyle(.borderedProminent).help("Начать запись встроенного микрофона") }
             }.padding(28).frame(width: 440)
+        }
+        .sheet(item: $model.resultEdit) { draft in
+            ResultEditorView(initial: draft, initialPart: model.tab, save: model.saveResultEdits,
+                             cancel: { model.resultEdit = nil })
         }
         .disabled(model.preparingStorage || model.shuttingDown)
         .alert("LocalScribe", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button("OK") { model.error = nil }.help("Закрыть сообщение об ошибке") } message: { Text(model.error ?? "") }
