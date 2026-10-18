@@ -143,9 +143,14 @@ import LocalScribeCore
         transcript = nil; summary = nil
         let loadID = UUID(); resultLoadID = loadID
         Task {
-            let results = await Task.detached(priority: .userInitiated) { repository.results(selected) }.value
-            guard self.selection == selected.id, self.resultSignature == signature, self.resultLoadID == loadID else { return }
-            self.transcript = results.0; self.summary = results.1
+            do {
+                let results = try await Task.detached(priority: .userInitiated) { try repository.results(selected) }.value
+                guard self.selection == selected.id, self.resultSignature == signature, self.resultLoadID == loadID else { return }
+                self.transcript = results.0; self.summary = results.1
+            } catch {
+                guard self.selection == selected.id, self.resultSignature == signature, self.resultLoadID == loadID else { return }
+                self.errorHandler.report(error)
+            }
         }
     }
     var canEditResult: Bool {

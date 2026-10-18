@@ -288,7 +288,7 @@ final class InferenceFailureTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: repo.folder(manifest.id).appendingPathComponent("manifest.json")), manifestBefore)
             XCTAssertEqual(try repo.load(manifest.id).activeRunId, manifest.activeRunId)
             XCTAssertEqual(try repo.load(manifest.id).pendingRunId, manifest.pendingRunId)
-            XCTAssertEqual(repo.results(manifest).0?.segments.first?.text, "Old result")
+            XCTAssertEqual(try repo.results(manifest).0?.segments.first?.text, "Old result")
         }
     }
 

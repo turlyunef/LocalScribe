@@ -62,7 +62,9 @@ extension RecordingRepository {
         guard info.schemaVersion == 1, info.id == draft.runID, info.sourceHash == manifest.sha256 else {
             throw ScribeError.message("Не удалось проверить исходную версию результата")
         }
-        let original = try Disk.read(Transcript.self, at: source.appendingPathComponent("transcript.json"))
+        guard let original = try results(manifest).0 else {
+            throw ScribeError.message("Не удалось прочитать исходную расшифровку")
+        }
         try original.validate(durationMs: manifest.durationMs)
         guard original.fingerprint == info.fingerprint,
               draft.transcript.schemaVersion == original.schemaVersion,
@@ -97,7 +99,7 @@ extension RecordingRepository {
         try transcript.validate(durationMs: manifest.durationMs)
         try draft.summary?.validate(against: transcript, allowingUnlinkedFindings: true)
 
-        info.id = UUID().uuidString; info.createdAt = Date()
+        info.id = UUID().uuidString; info.createdAt = Date(); info.manualEdits = true
         info.transcriptSourceRunID = draft.runID
         let destination = run(manifest.id, info.id)
         var published = false

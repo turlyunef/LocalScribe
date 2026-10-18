@@ -52,7 +52,7 @@ final class ResultEditingTests: XCTestCase {
             XCTAssertEqual(try Data(contentsOf: exported), Data("export".utf8))
             for (file, bytes) in zip(files, before) { XCTAssertEqual(try Data(contentsOf: old.appendingPathComponent(file)), bytes) }
             let reopened = try RecordingRepository(root: repo.root)
-            let result = reopened.results(try reopened.load(manifest.id))
+            let result = try reopened.results(try reopened.load(manifest.id))
             XCTAssertEqual(result.0?.segments[0].text, "Анна подготовит отчёт завтра 😀")
             XCTAssertEqual(result.0?.segments[0].words, [])
             XCTAssertEqual(result.0?.segments[1], initial.transcript.segments[1])
@@ -78,8 +78,8 @@ final class ResultEditingTests: XCTestCase {
             draft.summary?.tasks = []
             draft.summary?.overview = [Finding(id: "new", text: "Проверка плана", evidenceSegmentIds: ["s2"], uncertain: true)]
             let saved = try repo.saveResultEdits(draft)
-            XCTAssertEqual(repo.results(saved).0, initial.transcript)
-            XCTAssertEqual(repo.results(saved).1, draft.summary)
+            XCTAssertEqual(try repo.results(saved).0, initial.transcript)
+            XCTAssertEqual(try repo.results(saved).1, draft.summary)
         }
     }
 
@@ -88,8 +88,8 @@ final class ResultEditingTests: XCTestCase {
             try FileManager.default.removeItem(at: repo.run(manifest.id, initial.runID).appendingPathComponent("summary.json"))
             var draft = initial; draft.summary = nil; draft.transcript.segments[1].text = "Исправлено"
             let saved = try repo.saveResultEdits(draft)
-            XCTAssertEqual(repo.results(saved).0?.segments[1].text, "Исправлено")
-            XCTAssertNil(repo.results(saved).1)
+            XCTAssertEqual(try repo.results(saved).0?.segments[1].text, "Исправлено")
+            XCTAssertNil(try repo.results(saved).1)
         }
     }
 
@@ -111,8 +111,8 @@ final class ResultEditingTests: XCTestCase {
         try withResult { repo, manifest, initial, _ in
             var draft = initial; draft.transcript.segments[0].text = "Черновик"; draft.summary?.tasks = []
             XCTAssertNotEqual(draft.transcript, initial.transcript)
-            XCTAssertEqual(repo.results(manifest).0, initial.transcript)
-            XCTAssertEqual(repo.results(manifest).1, initial.summary)
+            XCTAssertEqual(try repo.results(manifest).0, initial.transcript)
+            XCTAssertEqual(try repo.results(manifest).1, initial.summary)
             XCTAssertEqual(try repo.load(manifest.id).activeRunId, initial.runID)
         }
     }
@@ -139,8 +139,8 @@ final class ResultEditingTests: XCTestCase {
             for edit in invalid {
                 XCTAssertThrowsError(try repo.saveResultEdits(edit))
                 XCTAssertEqual(try repo.load(manifest.id).activeRunId, initial.runID)
-                XCTAssertEqual(repo.results(manifest).0, initial.transcript)
-                XCTAssertEqual(repo.results(manifest).1, initial.summary)
+                XCTAssertEqual(try repo.results(manifest).0, initial.transcript)
+                XCTAssertEqual(try repo.results(manifest).1, initial.summary)
             }
             XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: repo.folder(manifest.id).appendingPathComponent("runs").path), [initial.runID])
         }
@@ -155,9 +155,9 @@ final class ResultEditingTests: XCTestCase {
             XCTAssertEqual(draft.summary, initial.summary)
             XCTAssertFalse(draft.deleteSegment("missing"))
             let saved = try repo.saveResultEdits(draft)
-            XCTAssertEqual(repo.results(saved).0, draft.transcript)
-            XCTAssertEqual(repo.results(saved).1, initial.summary)
-            XCTAssertEqual(repo.results(manifest).0, initial.transcript)
+            XCTAssertEqual(try repo.results(saved).0, draft.transcript)
+            XCTAssertEqual(try repo.results(saved).1, initial.summary)
+            XCTAssertEqual(try repo.results(manifest).0, initial.transcript)
         }
     }
 
@@ -168,7 +168,7 @@ final class ResultEditingTests: XCTestCase {
             XCTAssertFalse(draft.deleteSegment("s1"))
             XCTAssertEqual(draft.transcript, initial.transcript)
             XCTAssertEqual(draft.summary, initial.summary)
-            XCTAssertEqual(repo.results(manifest).0, initial.transcript)
+            XCTAssertEqual(try repo.results(manifest).0, initial.transcript)
         }
     }
 
@@ -194,9 +194,9 @@ final class ResultEditingTests: XCTestCase {
             task.evidenceSegmentIds = []
             XCTAssertEqual(summary.tasks, [task])
             let saved = try repo.saveResultEdits(draft)
-            XCTAssertEqual(repo.results(saved).0?.segments, [initial.transcript.segments[1]])
-            XCTAssertEqual(repo.results(saved).1, summary)
-            XCTAssertEqual(repo.results(manifest).1, initial.summary)
+            XCTAssertEqual(try repo.results(saved).0?.segments, [initial.transcript.segments[1]])
+            XCTAssertEqual(try repo.results(saved).1, summary)
+            XCTAssertEqual(try repo.results(manifest).1, initial.summary)
             for markdown in [false, true] {
                 let export = ExportService.renderResult(manifest: saved, transcript: draft.transcript,
                                                         summary: summary, markdown: markdown)
@@ -217,8 +217,8 @@ final class ResultEditingTests: XCTestCase {
             XCTAssertTrue(draft.deleteSegment("s1", removingEvidence: true))
             XCTAssertTrue(draft.deleteSegment("s2"))
             var saved = try repo.saveResultEdits(draft)
-            XCTAssertEqual(repo.results(saved).0?.segments, [])
-            XCTAssertEqual(repo.results(saved).1?.tasks[0].evidenceSegmentIds, [])
+            XCTAssertEqual(try repo.results(saved).0?.segments, [])
+            XCTAssertEqual(try repo.results(saved).1?.tasks[0].evidenceSegmentIds, [])
             let info = try repo.beginRun(&saved, catalog: ModelCatalog(models: []), summaryOnly: true)
             let copy = try Disk.read(Transcript.self, at: repo.run(saved.id, info.id).appendingPathComponent("transcript.json"))
             XCTAssertEqual(copy.segments, [])
@@ -233,10 +233,10 @@ final class ResultEditingTests: XCTestCase {
             XCTAssertTrue(draft.deleteSegment("s1"))
             draft.transcript.segments[0].text = "Исправленный план"
             let saved = try repo.saveResultEdits(draft)
-            XCTAssertEqual(repo.results(saved).0?.segments[0].id, "s2")
-            XCTAssertEqual(repo.results(saved).0?.segments[0].startMs, 2500)
-            XCTAssertEqual(repo.results(saved).0?.segments[0].words, [])
-            XCTAssertNil(repo.results(saved).1)
+            XCTAssertEqual(try repo.results(saved).0?.segments[0].id, "s2")
+            XCTAssertEqual(try repo.results(saved).0?.segments[0].startMs, 2500)
+            XCTAssertEqual(try repo.results(saved).0?.segments[0].words, [])
+            XCTAssertNil(try repo.results(saved).1)
         }
     }
 

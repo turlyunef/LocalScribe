@@ -10,7 +10,7 @@ final class ResultEditingModelTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         let repo = try RecordingRepository(root: root)
         var manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
-        manifest.sha256 = "audio"; manifest.durationMs = 1000; manifest.state = .completed
+        manifest.sha256 = "audio"; manifest.durationMs = 1000; manifest.state = .completed; manifest.sourceComplete = true
         let run = RunInfo(sourceHash: manifest.sha256, profileHash: "profile")
         let path = repo.run(manifest.id, run.id)
         try Disk.write(run, to: path.appendingPathComponent("run.json"))
@@ -27,6 +27,28 @@ final class ResultEditingModelTests: XCTestCase {
         let deadline = Date().addingTimeInterval(3)
         while model.transcript == nil && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
         XCTAssertNotNil(model.transcript)
+    }
+
+    func testCorruptSavedResultIsNotDisplayedAndReportsRecoverableError() async throws {
+        let (root, repo, manifest) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = repo.run(manifest.id, manifest.activeRunId!).appendingPathComponent("summary.json")
+        var summary = try Disk.read(Summary.self, at: url)
+        summary.overview[0].evidenceSegmentIds = ["missing"]
+        try Disk.write(summary, to: url)
+        let before = try Data(contentsOf: url)
+        let model = AppModel(repository: repo, startServices: false)
+        model.selection = manifest.id
+        let deadline = Date().addingTimeInterval(3)
+        while model.errorHandler.messages.isEmpty && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertNil(model.transcript); XCTAssertNil(model.summary)
+        XCTAssertFalse(model.canEditResult)
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
+        XCTAssertTrue(model.errorHandler.messages.first?.contains("Файлы сохранены для восстановления") == true)
+        XCTAssertEqual(try Data(contentsOf: url), before)
+        // Repeated view refreshes must not present the same error again.
+        model.loadResult()
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
     }
 
     func testSaveRefreshesDisplayCopyAndExportData() async throws {

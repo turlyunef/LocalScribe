@@ -88,6 +88,8 @@ public struct RunInfo: Codable, Sendable {
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
     public var transcriptSourceRunID: String?
+    /// Nil identifies archives written before explicit result provenance.
+    public var manualEdits: Bool? = false
     public var liveCapture: Bool?
     public var createdAt = Date()
     public init(id: String = UUID().uuidString, sourceHash: String, profileHash: String, summaryLanguage: String? = nil) {
@@ -120,8 +122,8 @@ public struct Transcript: Codable, Sendable, Equatable {
     public var diarized: Bool; public var segments: [Segment]
     public init(fingerprint: String, diarized: Bool, segments: [Segment]) { self.fingerprint = fingerprint; self.diarized = diarized; self.segments = segments }
     public func validate(durationMs: Int) throws {
-        guard schemaVersion == 1, Set(segments.map(\.id)).count == segments.count,
-              segments.allSatisfy({ !$0.text.isEmpty && $0.startMs >= 0 && $0.endMs >= $0.startMs && $0.endMs <= durationMs && $0.words.allSatisfy { $0.startMs >= 0 && $0.endMs >= $0.startMs && $0.endMs <= durationMs } }) else {
+        guard (0...10_800_000).contains(durationMs), schemaVersion == 1, Set(segments.map(\.id)).count == segments.count,
+              segments.allSatisfy({ !$0.id.isEmpty && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.startMs >= 0 && $0.endMs >= $0.startMs && $0.endMs <= durationMs && $0.words.allSatisfy { $0.startMs >= 0 && $0.endMs >= $0.startMs && $0.endMs <= durationMs } }) else {
             throw ScribeError.message("Некорректные таймкоды или идентификаторы расшифровки")
         }
     }

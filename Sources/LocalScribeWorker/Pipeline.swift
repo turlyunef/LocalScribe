@@ -18,7 +18,8 @@ actor Pipeline {
         models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: command.toolsPath)
         manifest = try Disk.read(Manifest.self, at: recording.appendingPathComponent("manifest.json"))
         info = try Disk.read(RunInfo.self, at: run.appendingPathComponent("run.json"))
-        guard manifest.schemaVersion == 1, info.schemaVersion == 1, UUID(uuidString: command.jobId) != nil,
+        guard manifest.schemaVersion == 1, (0...10_800_000).contains(manifest.durationMs),
+              info.schemaVersion == 1, UUID(uuidString: command.jobId) != nil,
               recording.lastPathComponent == command.jobId, command.jobId == manifest.id, command.runId == info.id else {
             throw ScribeError.message("Некорректное задание обработки")
         }
@@ -28,7 +29,7 @@ actor Pipeline {
                   manifest.pendingRunId == info.id, capture.id == info.id, capture.fingerprint == info.fingerprint,
                   capture.modelIDs == info.modelIDs, info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else { throw ScribeError.message("Некорректное задание фонового распознавания") }
         } else {
-            guard info.sourceHash == manifest.sha256, manifest.sourceComplete,
+            guard info.sourceHash == manifest.sha256, manifest.sourceComplete, manifest.durationMs > 0,
                   try Disk.hash(recording.appendingPathComponent(manifest.originalRelativePath)) == info.sourceHash else { throw ScribeError.message("Исходник изменился или не завершён") }
         }
     }

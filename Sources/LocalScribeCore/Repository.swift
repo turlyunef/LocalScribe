@@ -121,31 +121,6 @@ public struct RecordingRepository: Sendable {
         try Disk.write(final, to: path.appendingPathComponent("run.json"))
         return final
     }
-    public func results(_ manifest: Manifest) -> (Transcript?, Summary?) {
-        let selected = manifest.activeRunId ?? manifest.pendingRunId
-        guard let selected else { return (nil, nil) }
-        let path = run(manifest.id, selected)
-        var t = (try? Disk.read(Transcript.self, at: path.appendingPathComponent("transcript.json"))) ?? (try? Disk.read(Transcript.self, at: path.appendingPathComponent("asr-transcript.json")))
-        if t == nil, let info = try? Disk.read(RunInfo.self, at: path.appendingPathComponent("capture-run.json")), info.liveCapture == true {
-            let urls = (try? FileManager.default.contentsOfDirectory(at: path.appendingPathComponent("live"), includingPropertiesForKeys: nil)) ?? []
-            let parts = urls.compactMap { try? Disk.read(LiveASRPart.self, at: $0) }.filter { saved in
-                guard info.schemaVersion == 1, info.id == selected, info.sourceHash == "capture:" + info.id,
-                      (0...360).contains(saved.part.index), saved.part.startMs == saved.part.index * 30_000,
-                      !saved.fragments.isEmpty, saved.fragments.count <= 5 else { return false }
-                return (try? saved.validate(info: info, index: saved.part.index, startMs: saved.part.startMs,
-                                            availableMs: saved.readEndMs, fragments: saved.fragments)) != nil
-            }.map(\.part)
-            if !parts.isEmpty { t = Analysis.mergeParts(parts, fingerprint: info.fingerprint) }
-        }
-        if t == nil, let info = try? Disk.read(RunInfo.self, at: path.appendingPathComponent("run.json")), info.sourceHash == manifest.sha256 {
-            let urls = (try? FileManager.default.contentsOfDirectory(at: path.appendingPathComponent("asr"), includingPropertiesForKeys: nil)) ?? []
-            let parts = urls.compactMap { try? Disk.read(ASRPart.self, at: $0) }.filter { part in
-                part.schemaVersion == 1 && part.fingerprint == info.fingerprint && part.index >= 0 && part.startMs == part.index * 300_000 && part.endMs == min(manifest.durationMs,(part.index+1)*300_000) && (try? Transcript(fingerprint:info.fingerprint,diarized:false,segments:part.segments).validate(durationMs:manifest.durationMs)) != nil
-            }
-            if !parts.isEmpty { t = Analysis.mergeParts(parts, fingerprint: info.fingerprint) }
-        }
-        return (t, try? Disk.read(Summary.self, at: path.appendingPathComponent("summary.json")))
-    }
     public func delete(_ manifest: Manifest) throws {
         guard UUID(uuidString: manifest.id) != nil else { throw ScribeError.message("Недопустимый идентификатор записи") }
         try FileManager.default.removeItem(at: folder(manifest.id))
