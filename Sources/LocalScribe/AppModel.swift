@@ -5,19 +5,22 @@ import Metal
 import LocalScribeCore
 
 @MainActor final class AppModel: ObservableObject {
-    @Published var recordings: [Manifest] = []
+    @Published var recordings: [Manifest] = [] { didSet { refreshPresentation() } }
     @Published var selection: String? {
         didSet {
             if oldValue != selection { transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil }
             loadResult()
         }
     }
-    @Published var transcript: Transcript?
-    @Published var summary: Summary?
+    @Published var transcript: Transcript? { didSet { resultRevision &+= 1; refreshPresentation() } }
+    @Published var summary: Summary? { didSet { resultRevision &+= 1; refreshPresentation() } }
     @Published var resultEdit: ResultEditDraft?
     @Published private(set) var savingResult = false
     let errorHandler = AppErrorHandler()
-    @Published var status = ""
+    let indicators = ActivityIndicators()
+    let resultPresentation = ResultPresentation()
+    private var resultRevision: UInt64 = 0
+    var status: String { get { indicators.status } set { indicators.status = newValue } }
     @Published var modelsStatus = "Проверяем модели…"
     @Published var modelsReady = false
     @Published var installing = false
@@ -49,13 +52,13 @@ import LocalScribeCore
     @Published var recordingID: String?
     @Published var startingRecording = false
     @Published var finalizingRecording = false
-    @Published var elapsed = 0.0
-    @Published var level = 0.0
-    @Published var soundNotice: String?
+    var elapsed: Double { get { indicators.elapsed } set { indicators.elapsed = newValue } }
+    var level: Double { get { indicators.level } set { indicators.level = newValue } }
+    var soundNotice: String? { get { indicators.soundNotice } set { indicators.soundNotice = newValue } }
     @Published var busy = false
     @Published var shuttingDown = false
     @Published private(set) var preparingStorage = true
-    @Published var tab: ExportPart = .transcript
+    @Published var tab: ExportPart = .transcript { didSet { refreshPresentation() } }
     @Published var jumpTo: String?
     let repository: RecordingRepository?
     let catalog: ModelCatalog?
@@ -126,6 +129,9 @@ import LocalScribeCore
         if CommandLine.arguments.contains("--self-check-microphone") { Task { await microphoneSelfCheck() } }
     }
     func reload() { recordings = repository?.list() ?? []; loadResult() }
+    private func refreshPresentation() {
+        resultPresentation.update(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: tab)
+    }
     func renameRecording(_ id: String, title: String) {
         guard !preparingStorage, let repository else { return }
         do {
@@ -665,7 +671,7 @@ import LocalScribeCore
     }
     func renderedResult(_ part: ExportPart, markdown: Bool = false) -> RenderedExport {
         guard let selected else { return RenderedExport() }
-        return ExportService.renderResult(manifest: selected, transcript: transcript, summary: summary, part: part, markdown: markdown)
+        return resultPresentation.render(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part, markdown: markdown)
     }
     func copy(_ part: ExportPart) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(rendered(part), forType: .string); status = "Скопировано" }
     func export(markdown: Bool, part: ExportPart) {

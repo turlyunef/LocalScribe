@@ -34,11 +34,7 @@ struct ContentView: View {
                 if model.recordingID != nil {
                     HStack(spacing: 14) {
                         Image(systemName: "record.circle.fill").foregroundStyle(.red)
-                        VStack(alignment: .leading) {
-                            Text(model.finalizingRecording ? "Сохраняем аудио…" : "Встроенный микрофон · \(timecode(Int(model.elapsed*1000)))").monospacedDigit()
-                            if let notice = model.soundNotice { Text(notice).font(.caption).foregroundStyle(.orange) }
-                        }
-                        ProgressView(value: model.level).frame(width: 100).accessibilityLabel("Уровень микрофона")
+                        CaptureMeterView(indicators: model.indicators, finalizing: model.finalizingRecording)
                         Spacer()
                         Button("Остановить") { Task { await model.stopRecording() } }.buttonStyle(.borderedProminent).disabled(model.finalizingRecording).help("Остановить запись и сохранить аудио")
                     }.padding().background(.red.opacity(0.05))
@@ -104,7 +100,7 @@ struct ContentView: View {
                         .help("Сохранить расшифровку, итоги или всё вместе в файл")
                     }.padding(.horizontal,20).padding(.bottom,12)
                     Divider()
-                    ResultTextView(result: model.renderedResult(model.tab), targetID: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = id; model.tab = .transcript })
+                    PresentedResultView(presentation: model.resultPresentation, targetID: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = id; model.tab = .transcript })
                 } else {
                     ContentUnavailableView {
                         Label("Разговор останется на вашем Mac", systemImage: "waveform")
@@ -113,7 +109,7 @@ struct ContentView: View {
                         Button("Импортировать аудио", action: model.chooseImport).help("Выбрать аудиофайлы для расшифровки")
                     }
                 }
-                if !model.status.isEmpty { Divider(); Text(model.status).font(.caption).foregroundStyle(.secondary).frame(maxWidth:.infinity,alignment:.leading).padding(10) }
+                ActivityStatusView(indicators: model.indicators)
             }.background(Color(nsColor: .textBackgroundColor))
         }
         .toolbar {
@@ -139,6 +135,54 @@ struct ContentView: View {
                              cancel: { model.resultEdit = nil }, reportError: model.errorHandler.report)
         }
         .disabled(model.preparingStorage || model.shuttingDown)
+    }
+}
+
+struct RecordingStatusText: View {
+    @ObservedObject var indicators: ActivityIndicators
+    var finalizing: Bool
+    var prefix: String
+
+    var body: some View {
+        Text(finalizing ? "Сохраняем аудио…" : "\(prefix) · \(timecode(Int(indicators.elapsed * 1000)))").monospacedDigit()
+    }
+}
+
+private struct CaptureMeterView: View {
+    @ObservedObject var indicators: ActivityIndicators
+    var finalizing: Bool
+
+    var body: some View {
+        VStack(alignment: .leading) {
+            RecordingStatusText(indicators: indicators, finalizing: finalizing, prefix: "Встроенный микрофон")
+            if let notice = indicators.soundNotice { Text(notice).font(.caption).foregroundStyle(.orange) }
+        }
+        ProgressView(value: indicators.level).frame(width: 100).accessibilityLabel("Уровень микрофона")
+    }
+}
+
+private struct ActivityStatusView: View {
+    @ObservedObject var indicators: ActivityIndicators
+
+    var body: some View {
+        if !indicators.status.isEmpty {
+            Divider()
+            Text(indicators.status).font(.caption).foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(10)
+        }
+    }
+}
+
+private struct PresentedResultView: View {
+    @ObservedObject var presentation: ResultPresentation
+    var targetID: String?
+    var onJump: (String) -> Void
+
+    var body: some View {
+        ZStack {
+            ResultTextView(result: presentation.result, targetID: targetID, onJump: onJump)
+            if presentation.isRendering { ProgressView("Подготавливаем результат…") }
+        }
     }
 }
 

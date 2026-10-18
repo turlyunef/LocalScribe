@@ -1,5 +1,5 @@
 import Foundation
-public enum ExportPart: String, CaseIterable { case transcript = "Расшифровка", summary = "Итоги", all = "Всё" }
+public enum ExportPart: String, CaseIterable, Sendable { case transcript = "Расшифровка", summary = "Итоги", all = "Всё" }
 public struct ExportTimestamp: Sendable, Equatable {
     public let segmentID: String
     public let range: NSRange
@@ -41,6 +41,13 @@ public enum ExportService {
         }
         func clean(_ text: String) -> String { Self.clean(text, markdown: markdown) }
         func heading(_ title: String) -> String { (markdown ? "## " : "") + title + "\n\n" }
+        // Look up only the referenced segments per finding. Transcript position is
+        // the stable chronological order, including segments with equal start times.
+        var evidenceIndex: [String: Int] = [:]
+        if part != .transcript, s != nil, let t {
+            evidenceIndex.reserveCapacity(t.segments.count)
+            for (index, segment) in t.segments.enumerated() { evidenceIndex[segment.id] = index }
+        }
         let date = (m.recordedAt ?? m.createdAt).formatted(date: .numeric, time: .shortened)
         append((markdown ? "# " : "") + clean(m.displayTitle) + "\n\n")
         append("\(m.recordedAt == nil ? "Дата импорта" : "Дата записи"): \(date)\nДлительность: \(timecode(m.durationMs))\n")
@@ -62,7 +69,7 @@ public enum ExportService {
                         if title == "Задачи" { append(" — Ответственный: \(clean(f.ownerName ?? f.ownerSpeakerId.map { speakerName($0) } ?? "Не указано")); срок: \(clean(f.dueText ?? "Не указано"))") }
                         if f.uncertain { append(" (требует проверки)") }
                         append(" ")
-                        let evidence = t?.segments.filter { f.evidenceSegmentIds.contains($0.id) } ?? []
+                        let evidence = Set(f.evidenceSegmentIds).compactMap { evidenceIndex[$0] }.sorted().compactMap { t?.segments[$0] }
                         for (index, segment) in evidence.enumerated() {
                             if index > 0 { append(" ") }
                             timestamp(segment, isTranscript: false)

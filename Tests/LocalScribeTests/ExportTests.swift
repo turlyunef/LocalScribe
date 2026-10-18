@@ -2,6 +2,24 @@ import XCTest
 @testable import LocalScribeCore
 
 final class ExportTests: XCTestCase {
+    func testIndexedEvidencePreservesTranscriptOrderDeduplicatesIDsAndUsesUTF16() {
+        let manifest = Manifest(sourceType: "import", title: "План 🧑🏽‍💻 [тест]", filename: "meeting.wav")
+        let transcript = Transcript(fingerprint: "f", diarized: true, segments: [
+            Segment(id: "first", startMs: 1000, endMs: 2000, text: "😀", language: "ru"),
+            Segment(id: "same-time", startMs: 1000, endMs: 2000, text: "Одинаковое время", language: "ru"),
+            Segment(id: "last", startMs: 76_000, endMs: 77_000, text: "Конец", language: "ru")
+        ])
+        let summary = Summary(language: "ru", overview: [Finding(id: "f", text: "Вывод 🧑🏽‍💻 *важно*",
+            evidenceSegmentIds: ["last", "same-time", "missing", "first", "last"])])
+        for markdown in [false, true] {
+            let rendered = ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: .summary, markdown: markdown)
+            XCTAssertEqual(rendered.timestamps.map(\.segmentID), ["first", "same-time", "last"])
+            XCTAssertEqual(rendered.timestamps.map { (rendered.text as NSString).substring(with: $0.range) },
+                           ["[00:00:01]", "[00:00:01]", "[00:01:16]"])
+            XCTAssertTrue(rendered.timestamps.allSatisfy { !$0.isTranscript })
+        }
+    }
+
     func testTranscriptUsesOnlyPhraseStartTimesInTextAndMarkdown() {
         var manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
         manifest.durationMs = 10_800_000

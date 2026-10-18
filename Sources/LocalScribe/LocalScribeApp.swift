@@ -28,7 +28,7 @@ import LocalScribeCore
         Settings { ModelSettings(model: model).frame(width: 760, height: 760) }
         MenuBarExtra("LocalScribe", systemImage: model.recordingID == nil ? "waveform" : "record.circle.fill") {
             if model.recordingID != nil {
-                Text(model.finalizingRecording ? "Сохраняем аудио…" : "Идёт запись · \(timecode(Int(model.elapsed*1000)))")
+                RecordingStatusText(indicators: model.indicators, finalizing: model.finalizingRecording, prefix: "Идёт запись")
                 Button("Остановить и сохранить") { Task { await model.stopRecording() } }.disabled(model.finalizingRecording).help("Остановить запись и сохранить аудио")
             } else { Text("LocalScribe · локальный архив") }
             Button("Открыть окно") { NSApplication.shared.activate(ignoringOtherApps: true); NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil) }.help("Показать главное окно LocalScribe")
