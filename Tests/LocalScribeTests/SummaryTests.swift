@@ -6,6 +6,11 @@ private actor SummaryPassLog {
     func append(_ pass: SummaryExtractionPass) { passes.append(pass) }
 }
 
+private actor QuestionPassLog {
+    var passes: [SummaryQuestionPass] = []
+    func append(_ pass: SummaryQuestionPass) { passes.append(pass) }
+}
+
 final class SummaryTests: XCTestCase {
     private var conversation: [Segment] {
         [Segment(id: "proposal", startMs: 0, endMs: 1000, speakerId: "speaker-1", text: "Предлагаю перенести запуск на пятницу.", language: "ru"),
@@ -120,5 +125,122 @@ final class SummaryTests: XCTestCase {
         XCTAssertTrue(result.decisions.isEmpty)
         XCTAssertTrue(result.tasks.isEmpty)
         XCTAssertTrue(result.openQuestions.isEmpty)
+    }
+
+    private func questionFixture(ending: String) async throws -> (Transcript, Summary) {
+        let segments = [
+            Segment(id: "budget-question", startMs: 0, endMs: 1000, text: "Какой бюджет запуска? Пока не определили.", language: "ru"),
+            Segment(id: "other-topic", startMs: 1000, endMs: 2000, text: "Теперь обсудим дизайн.", language: "ru"),
+            Segment(id: "more-context", startMs: 2000, endMs: 3000, text: "С макетами разберёмся отдельно.", language: "ru"),
+            Segment(id: "ending", startMs: 3000, endMs: 4000, text: ending, language: "ru")
+        ]
+        let groups = try SummarySource.groups(segments, tokenCounts: [4, 4, 4, 4], limit: 10)
+        XCTAssertEqual(groups.map { $0.map(\.id) }, [
+            ["budget-question", "other-topic"], ["other-topic", "more-context"], ["more-context", "ending"]
+        ])
+        var ledger = Summary(language: "ru")
+        for group in groups {
+            let extracted = try await SummaryExtraction.extract(group, language: "ru") { pass in
+                guard pass.section == .openQuestions, pass.focusSegmentIds.contains("budget-question") else { return Summary(language: "ru") }
+                return Summary(language: "ru", openQuestions: [Finding(id: "q", text: "Какой бюджет запуска?", evidenceSegmentIds: ["budget-question"])])
+            }
+            ledger.openQuestions += extracted.openQuestions
+        }
+        XCTAssertEqual(ledger.openQuestions.count, 1)
+        return (Transcript(fingerprint: "fixture", diarized: false, segments: segments), ledger)
+    }
+
+    func testQuestionFromFirstExtractionGroupIsClosedByAnswerInThirdGroupOutsideOverlap() async throws {
+        let (transcript, extracted) = try await questionFixture(ending: "Бюджет запуска утверждён: сто тысяч рублей.")
+        let log = QuestionPassLog()
+        var final = extracted
+        final.openQuestions = try await SummaryQuestionResolution.unresolved(extracted.openQuestions, transcript: transcript,
+            tokenCounts: [4, 4, 4, 4], limit: 10) { pass in
+            await log.append(pass)
+            if let answer = pass.later.first(where: { $0.id == "ending" }) {
+                return SummaryQuestionVerdict(effect: .resolved, sourceSegmentId: answer.id, quote: answer.text)
+            }
+            return SummaryQuestionVerdict(effect: .none)
+        }
+        XCTAssertTrue(final.openQuestions.isEmpty)
+        let passes = await log.passes
+        XCTAssertEqual(passes.map { $0.later.map(\.id) }, [["other-topic", "more-context"], ["more-context", "ending"]])
+        XCTAssertTrue(passes.allSatisfy { $0.question == extracted.openQuestions[0] })
+        XCTAssertFalse(passes[0].original.contains { $0.id == "ending" })
+        try final.validate(against: transcript)
+    }
+
+    func testQuestionRemainsWithoutAnswerOrWithAnswerToDifferentQuestion() async throws {
+        for ending in ["На этом закончим встречу.", "Бюджет дизайна утверждён: пять тысяч рублей."] {
+            let (transcript, extracted) = try await questionFixture(ending: ending)
+            let log = QuestionPassLog()
+            let unresolved = try await SummaryQuestionResolution.unresolved(extracted.openQuestions, transcript: transcript,
+                tokenCounts: [4, 4, 4, 4], limit: 10) { pass in
+                await log.append(pass)
+                // Deterministic semantic fixture: neither speech settles the launch budget.
+                return SummaryQuestionVerdict(effect: .none)
+            }
+            XCTAssertEqual(unresolved, extracted.openQuestions)
+            let passes = await log.passes
+            XCTAssertEqual(Set(passes.flatMap { $0.later.map(\.id) }), Set(transcript.segments.dropFirst().map(\.id)))
+        }
+    }
+
+    func testAmbiguousLateAnswerKeepsQuestionAndItsUncertaintyEvidence() async throws {
+        let (transcript, extracted) = try await questionFixture(ending: "Возможно, на запуск выделим сто тысяч, но это ещё не точно.")
+        let unresolved = try await SummaryQuestionResolution.unresolved(extracted.openQuestions, transcript: transcript,
+            tokenCounts: [4, 4, 4, 4], limit: 10) { pass in
+            guard let answer = pass.later.first(where: { $0.id == "ending" }) else { return SummaryQuestionVerdict(effect: .none) }
+            return SummaryQuestionVerdict(effect: .uncertain, sourceSegmentId: answer.id, quote: answer.text)
+        }
+        XCTAssertEqual(unresolved.count, 1)
+        XCTAssertEqual(unresolved.first?.text, extracted.openQuestions.first?.text)
+        XCTAssertEqual(unresolved.first?.evidenceSegmentIds, ["budget-question", "ending"])
+        XCTAssertEqual(unresolved.first?.uncertain, true)
+        try Summary(language: "ru", openQuestions: unresolved).validate(against: transcript)
+    }
+
+    func testQuestionVerdictsRequireExactLaterQuoteIncludingAfterCheckpointRoundTrip() throws {
+        let later = [Segment(id: "answer", startMs: 1000, endMs: 2000, text: "He said: “The budget is approved.”", language: "en")]
+        let valid = SummaryQuestionVerdict(effect: .resolved, sourceSegmentId: "answer", quote: "\"The budget is approved.\"")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let path = root.appendingPathComponent("verdict.json")
+        try Disk.write(valid.validated(later: later), to: path)
+        let resumed = try Disk.read(SummaryQuestionVerdict.self, at: path).validated(later: later)
+        XCTAssertEqual(resumed.effect, .resolved)
+        XCTAssertEqual(resumed.sourceSegmentId, "answer")
+        XCTAssertEqual(resumed.quote, "“The budget is approved.”")
+        for invalid in [
+            SummaryQuestionVerdict(effect: .resolved, sourceSegmentId: "original-question", quote: "The budget is approved."),
+            SummaryQuestionVerdict(effect: .resolved, sourceSegmentId: "answer", quote: "The launch is cancelled."),
+            SummaryQuestionVerdict(effect: .resolved, sourceSegmentId: "answer", quote: " "),
+            SummaryQuestionVerdict(effect: .resolved),
+            SummaryQuestionVerdict(effect: .uncertain, sourceSegmentId: "answer", quote: "invented"),
+            SummaryQuestionVerdict(effect: .none, sourceSegmentId: "answer", quote: "The budget is approved.")
+        ] {
+            try Disk.write(invalid, to: path)
+            XCTAssertThrowsError(try Disk.read(SummaryQuestionVerdict.self, at: path).validated(later: later))
+        }
+        XCTAssertThrowsError(try resumed.validated(later: []))
+    }
+
+    func testUncertainSourceCannotCloseQuestionAndLastTurnQuestionNeedsNoReview() async throws {
+        let (source, extracted) = try await questionFixture(ending: "Бюджет запуска утверждён: сто тысяч рублей.")
+        var transcript = source
+        transcript.segments[3].uncertain = true
+        let unresolved = try await SummaryQuestionResolution.unresolved(extracted.openQuestions, transcript: transcript,
+            tokenCounts: [4, 4, 4, 4], limit: 10) { pass in
+            guard let answer = pass.later.first(where: { $0.id == "ending" }) else { return SummaryQuestionVerdict(effect: .none) }
+            return SummaryQuestionVerdict(effect: .resolved, sourceSegmentId: answer.id, quote: answer.text)
+        }
+        XCTAssertEqual(unresolved.count, 1)
+        XCTAssertEqual(unresolved.first?.uncertain, true)
+        let lastQuestion = Finding(id: "last", text: "Остался вопрос", evidenceSegmentIds: ["ending"], uncertain: true)
+        let last = try await SummaryQuestionResolution.unresolved([lastQuestion], transcript: transcript, tokenCounts: [4, 4, 4, 4], limit: 10) { _ in
+            XCTFail("There is no later speech to review")
+            return SummaryQuestionVerdict(effect: .none)
+        }
+        XCTAssertEqual(last, [lastQuestion])
     }
 }

@@ -113,6 +113,82 @@ public enum SummarySource {
     }
 }
 
+public struct SummaryQuestionVerdict: Codable, Sendable {
+    public enum Effect: String, Codable, Sendable { case none, resolved, uncertain }
+    public var effect: Effect
+    public var sourceSegmentId: String?
+    public var quote: String?
+
+    public init(effect: Effect, sourceSegmentId: String? = nil, quote: String? = nil) {
+        self.effect = effect; self.sourceSegmentId = sourceSegmentId; self.quote = quote
+    }
+
+    /// Both generated and resumed verdicts must cite actual later speech.
+    public func validated(later: [Segment]) throws -> Self {
+        var result = self
+        if effect == .none {
+            guard sourceSegmentId == nil, quote == nil else {
+                throw ScribeError.message("Проверка открытого вопроса вернула противоречивый ответ")
+            }
+            return result
+        }
+        guard let id = sourceSegmentId, let quote,
+              let source = later.first(where: { $0.id == id }),
+              let verbatim = SummarySource.verbatimQuote(quote, in: source.text) else {
+            throw ScribeError.message("Не удалось проверить ответ на открытый вопрос по точной цитате")
+        }
+        result.quote = verbatim
+        if source.uncertain { result.effect = .uncertain }
+        return result
+    }
+}
+
+public struct SummaryQuestionPass: Sendable {
+    public let questionIndex: Int
+    public let partIndex: Int
+    public let question: Finding
+    public let original: [Segment]
+    public let later: [Segment]
+}
+
+public enum SummaryQuestionResolution {
+    /// Check every later passage, including ones far outside extraction overlap.
+    /// Silence never resolves a question; uncertainty retains its original evidence.
+    public static func unresolved(_ questions: [Finding], transcript: Transcript, tokenCounts: [Int], limit: Int = 3500,
+                                  review: @Sendable (SummaryQuestionPass) async throws -> SummaryQuestionVerdict) async throws -> [Finding] {
+        guard tokenCounts.count == transcript.segments.count else { throw ScribeError.message("Неверный размер контекста проверки вопросов") }
+        var result: [Finding] = []
+        for (questionIndex, question) in questions.enumerated() {
+            guard !question.evidenceSegmentIds.isEmpty,
+                  Set(question.evidenceSegmentIds).isSubset(of: Set(transcript.segments.map(\.id))),
+                  let lastEvidence = transcript.segments.lastIndex(where: { question.evidenceSegmentIds.contains($0.id) }) else {
+                throw ScribeError.message("Открытый вопрос не содержит основания в расшифровке")
+            }
+            let later = Array(transcript.segments.dropFirst(lastEvidence + 1))
+            let groups = try SummarySource.groups(later, tokenCounts: Array(tokenCounts.dropFirst(lastEvidence + 1)), limit: limit)
+            let original = SummarySource.evidenceContext(for: question, in: transcript)
+            var accepted: Finding? = question
+            for (partIndex, group) in groups.enumerated() {
+                let pass = SummaryQuestionPass(questionIndex: questionIndex, partIndex: partIndex,
+                    question: question, original: original, later: group)
+                let verdict = try await review(pass).validated(later: group)
+                switch verdict.effect {
+                case .none: break
+                case .resolved: accepted = nil
+                case .uncertain:
+                    accepted?.uncertain = true
+                    if let id = verdict.sourceSegmentId, accepted?.evidenceSegmentIds.contains(id) == false {
+                        accepted?.evidenceSegmentIds.append(id)
+                    }
+                }
+                if accepted == nil { break }
+            }
+            if let accepted { result.append(accepted) }
+        }
+        return result
+    }
+}
+
 public struct SummaryEvidenceVerdict: Codable, Sendable {
     public var supported: Bool
     public var sourceSegmentId: String?
