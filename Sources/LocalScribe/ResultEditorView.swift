@@ -8,6 +8,7 @@ struct ResultEditorView: View {
     @State private var draft: ResultEditDraft
     @State private var part: ExportPart
     @State private var saving = false
+    @State private var pendingDeletion: Segment?
     let reportError: (Error) -> Void
 
     init(initial: ResultEditDraft, initialPart: ExportPart = .transcript,
@@ -21,19 +22,28 @@ struct ResultEditorView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Редактирование результата").font(.title2).fontWeight(.semibold)
-            Text("Таймкоды и участники сохраняются. Итоги не пересоздаются автоматически после правки реплик.")
+            Text("Итоги не пересоздаются автоматически после правки реплик.")
                 .font(.callout).foregroundStyle(.secondary)
-            Picker("Раздел", selection: $part) {
+            Picker("Раздел результата", selection: $part) {
                 Text("Расшифровка").tag(ExportPart.transcript)
                 Text("Итоги").tag(ExportPart.summary)
-            }.pickerStyle(.segmented)
+            }.pickerStyle(.segmented).labelsHidden()
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 16) {
                     if part == .transcript {
                         ForEach($draft.transcript.segments) { $segment in
                             VStack(alignment: .leading, spacing: 6) {
-                                Text("\(timecode(segment.startMs)) · \(speakerName(segment.speakerId))")
-                                    .font(.caption).foregroundStyle(.secondary)
+                                HStack {
+                                    Text("\(timecode(segment.startMs)) · \(speakerName(segment.speakerId))")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                    Spacer()
+                                    Button("Удалить реплику", systemImage: "trash", role: .destructive) {
+                                        if !draft.deleteSegment(segment.id) { pendingDeletion = segment }
+                                    }
+                                    .labelStyle(.iconOnly).help("Удалить реплику")
+                                    .accessibilityLabel("Удалить реплику \(timecode(segment.startMs))")
+                                    .accessibilityIdentifier("edit.deleteSegment.\(segment.id)")
+                                }
                                 TextEditor(text: $segment.text).font(.body)
                                     .frame(minHeight: 80).border(.quaternary)
                                     .accessibilityLabel("Текст реплики \(timecode(segment.startMs))")
@@ -41,7 +51,7 @@ struct ResultEditorView: View {
                             }
                         }
                     } else if draft.summary != nil {
-                        Text("Ответственный и срок должны встречаться в выбранных репликах-основаниях.")
+                        Text("Основания необязательны. Если они выбраны, ответственный и срок должны встречаться в этих репликах.")
                             .font(.caption).foregroundStyle(.secondary)
                         summarySection("Обзор", keyPath: \.overview)
                         summarySection("Решения", keyPath: \.decisions)
@@ -54,7 +64,6 @@ struct ResultEditorView: View {
                 }.padding(4)
             }
             HStack {
-                Text("Правки сохраняются новой версией результата.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if saving { ProgressView().controlSize(.small) }
                 Button("Отмена", action: cancel).keyboardShortcut(.cancelAction)
@@ -76,6 +85,18 @@ struct ResultEditorView: View {
         .disabled(saving)
         // An explicit Cancel prevents accidental loss of a draft on Escape or click outside.
         .interactiveDismissDisabled()
+        .alert("Удалить реплику?", isPresented: Binding(
+            get: { pendingDeletion != nil },
+            set: { if !$0 { pendingDeletion = nil } }
+        ), presenting: pendingDeletion) { segment in
+            Button("Удалить связь и реплику", role: .destructive) {
+                draft.deleteSegment(segment.id, removingEvidence: true)
+                pendingDeletion = nil
+            }.accessibilityIdentifier("edit.confirmDeleteSegment")
+            Button("Отмена", role: .cancel) { pendingDeletion = nil }
+        } message: { _ in
+            Text("Реплика используется в Итогах как обоснование. Удалить связь и реплику? Пункты итогов сохранятся.")
+        }
     }
 
     private func findings(_ keyPath: WritableKeyPath<Summary, [Finding]>) -> Binding<[Finding]> {
@@ -100,7 +121,7 @@ struct ResultEditorView: View {
                         .accessibilityIdentifier("edit.finding.\(finding.id)")
                     Picker("Спикер ответственного", selection: $finding.ownerSpeakerId) {
                         Text("Не указан").tag(nil as String?)
-                        ForEach(Array(Set(draft.transcript.segments.compactMap(\.speakerId))).sorted(), id: \.self) { id in
+                        ForEach(Array(Set(draft.transcript.segments.compactMap(\.speakerId) + [finding.ownerSpeakerId].compactMap { $0 })).sorted(), id: \.self) { id in
                             Text(speakerName(id)).tag(Optional(id))
                         }
                     }
@@ -131,10 +152,10 @@ struct ResultEditorView: View {
                 }.padding(10).background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
             }
             Button("Добавить пункт") {
-                guard let first = draft.transcript.segments.first else { return }
+                let first = draft.transcript.segments.first
                 draft.summary?[keyPath: keyPath].append(Finding(id: UUID().uuidString, text: "",
-                    evidenceSegmentIds: [first.id], uncertain: first.uncertain))
-            }.disabled(draft.transcript.segments.isEmpty)
+                    evidenceSegmentIds: first.map { [$0.id] } ?? [], uncertain: first?.uncertain ?? false))
+            }
         }
     }
 }

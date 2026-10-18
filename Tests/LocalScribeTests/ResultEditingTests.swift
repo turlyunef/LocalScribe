@@ -123,12 +123,15 @@ final class ResultEditingTests: XCTestCase {
             var draft = initial; draft.transcript.segments[0].text = " \n\t"; invalid.append(draft)
             draft = initial; draft.transcript.segments[0].startMs = 1; invalid.append(draft)
             draft = initial; draft.transcript.segments[0].speakerId = nil; invalid.append(draft)
-            draft = initial; draft.transcript.segments.removeLast(); invalid.append(draft)
+            draft = initial; draft.transcript.segments.reverse(); invalid.append(draft)
+            draft = initial; draft.transcript.segments.append(initial.transcript.segments[0]); invalid.append(draft)
+            draft = initial; draft.transcript.segments[1].id = "new"; invalid.append(draft)
+            draft = initial; draft.transcript.segments[1].words = []; invalid.append(draft)
+            draft = initial; draft.transcript.segments.removeFirst(); invalid.append(draft)
             draft = initial; draft.transcript.fingerprint = "wrong"; invalid.append(draft)
             draft = initial; draft.summary?.tasks[0].text = ""; invalid.append(draft)
             draft = initial; draft.summary?.tasks[0].text = String(repeating: "a", count: 3001); invalid.append(draft)
             draft = initial; draft.summary?.tasks[0].evidenceSegmentIds = ["missing"]; invalid.append(draft)
-            draft = initial; draft.summary?.tasks[0].evidenceSegmentIds = []; invalid.append(draft)
             draft = initial; draft.summary?.tasks[0].ownerName = "Борис"; invalid.append(draft)
             draft = initial; draft.summary?.tasks[0].dueText = "сегодня"; invalid.append(draft)
             draft = initial; draft.transcript.segments[0].text = "Отчёт"; invalid.append(draft)
@@ -140,6 +143,119 @@ final class ResultEditingTests: XCTestCase {
                 XCTAssertEqual(repo.results(manifest).1, initial.summary)
             }
             XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: repo.folder(manifest.id).appendingPathComponent("runs").path), [initial.runID])
+        }
+    }
+
+    func testUnreferencedDeletionNeedsNoConfirmationAndPreservesRemainingMetadata() throws {
+        try withResult { repo, manifest, initial, _ in
+            var draft = initial
+            XCTAssertFalse(draft.isSegmentUsedAsEvidence("s2"))
+            XCTAssertTrue(draft.deleteSegment("s2"))
+            XCTAssertEqual(draft.transcript.segments, [initial.transcript.segments[0]])
+            XCTAssertEqual(draft.summary, initial.summary)
+            XCTAssertFalse(draft.deleteSegment("missing"))
+            let saved = try repo.saveResultEdits(draft)
+            XCTAssertEqual(repo.results(saved).0, draft.transcript)
+            XCTAssertEqual(repo.results(saved).1, initial.summary)
+            XCTAssertEqual(repo.results(manifest).0, initial.transcript)
+        }
+    }
+
+    func testReferencedDeletionRequiresConfirmationAndCanBeCancelledWithoutChanges() throws {
+        try withResult { repo, manifest, initial, _ in
+            var draft = initial
+            XCTAssertTrue(draft.isSegmentUsedAsEvidence("s1"))
+            XCTAssertFalse(draft.deleteSegment("s1"))
+            XCTAssertEqual(draft.transcript, initial.transcript)
+            XCTAssertEqual(draft.summary, initial.summary)
+            XCTAssertEqual(repo.results(manifest).0, initial.transcript)
+        }
+    }
+
+    func testConfirmedDeletionUnlinksEverySummarySectionAndRetainsUnrelatedFindings() throws {
+        try withResult { repo, manifest, initial, _ in
+            var draft = initial
+            let linked = Finding(id: "linked", text: "Вывод", evidenceSegmentIds: ["s1", "s2"],
+                                 ownerSpeakerId: "speaker-1", ownerName: "Анна", dueText: "завтра", uncertain: true)
+            let unrelated = Finding(id: "unrelated", text: "Без изменений", evidenceSegmentIds: ["s2"], uncertain: true)
+            draft.summary?.overview = [linked, unrelated]
+            draft.summary?.decisions = [linked]
+            draft.summary?.openQuestions = [linked]
+            XCTAssertTrue(draft.deleteSegment("s1", removingEvidence: true))
+            let summary = try XCTUnwrap(draft.summary)
+            for finding in summary.overview.prefix(1) + summary.decisions + summary.openQuestions {
+                XCTAssertEqual(finding.evidenceSegmentIds, ["s2"])
+                XCTAssertNil(finding.ownerSpeakerId); XCTAssertNil(finding.ownerName); XCTAssertNil(finding.dueText)
+                XCTAssertTrue(finding.uncertain)
+                XCTAssertEqual(finding.text, linked.text)
+            }
+            XCTAssertEqual(summary.overview[1], unrelated)
+            var task = try XCTUnwrap(initial.summary?.tasks.first)
+            task.evidenceSegmentIds = []
+            XCTAssertEqual(summary.tasks, [task])
+            let saved = try repo.saveResultEdits(draft)
+            XCTAssertEqual(repo.results(saved).0?.segments, [initial.transcript.segments[1]])
+            XCTAssertEqual(repo.results(saved).1, summary)
+            XCTAssertEqual(repo.results(manifest).1, initial.summary)
+            for markdown in [false, true] {
+                let export = ExportService.renderResult(manifest: saved, transcript: draft.transcript,
+                                                        summary: summary, markdown: markdown)
+                XCTAssertFalse(export.timestamps.contains { $0.segmentID == "s1" })
+                XCTAssertTrue(export.text.contains(task.text))
+            }
+            // A second revision must accept a previously unlinked finding as well.
+            var reopened = ResultEditDraft(recordingID: saved.id, runID: saved.activeRunId!,
+                                           transcript: draft.transcript, summary: summary)
+            reopened.summary?.tasks[0].text = "Уточнённая задача"
+            XCTAssertNoThrow(try repo.saveResultEdits(reopened))
+        }
+    }
+
+    func testDeletingAllSegmentsPreservesSummaryAndCanBeUsedToRegenerateIt() throws {
+        try withResult { repo, _, initial, _ in
+            var draft = initial
+            XCTAssertTrue(draft.deleteSegment("s1", removingEvidence: true))
+            XCTAssertTrue(draft.deleteSegment("s2"))
+            var saved = try repo.saveResultEdits(draft)
+            XCTAssertEqual(repo.results(saved).0?.segments, [])
+            XCTAssertEqual(repo.results(saved).1?.tasks[0].evidenceSegmentIds, [])
+            let info = try repo.beginRun(&saved, catalog: ModelCatalog(models: []), summaryOnly: true)
+            let copy = try Disk.read(Transcript.self, at: repo.run(saved.id, info.id).appendingPathComponent("transcript.json"))
+            XCTAssertEqual(copy.segments, [])
+            XCTAssertEqual(copy.fingerprint, info.fingerprint)
+        }
+    }
+
+    func testDeletionWithoutSummaryAndDeletionCombinedWithTextEdit() throws {
+        try withResult { repo, _, initial, _ in
+            var draft = initial
+            draft.summary = nil
+            XCTAssertTrue(draft.deleteSegment("s1"))
+            draft.transcript.segments[0].text = "Исправленный план"
+            let saved = try repo.saveResultEdits(draft)
+            XCTAssertEqual(repo.results(saved).0?.segments[0].id, "s2")
+            XCTAssertEqual(repo.results(saved).0?.segments[0].startMs, 2500)
+            XCTAssertEqual(repo.results(saved).0?.segments[0].words, [])
+            XCTAssertNil(repo.results(saved).1)
+        }
+    }
+
+    func testEvidenceIsOptionalOnlyForManualFindingsAndInvalidFieldsStillFail() throws {
+        try withResult { repo, _, initial, _ in
+            var draft = initial
+            draft.summary?.tasks[0].evidenceSegmentIds = []
+            let summary = try XCTUnwrap(draft.summary)
+            XCTAssertThrowsError(try summary.validate(against: draft.transcript))
+            XCTAssertNoThrow(try summary.validate(against: draft.transcript, allowingUnlinkedFindings: true))
+            XCTAssertNoThrow(try repo.saveResultEdits(draft))
+            for field in [\Finding.ownerName, \Finding.dueText] {
+                var invalid = summary
+                invalid.tasks[0][keyPath: field] = "  "
+                XCTAssertThrowsError(try invalid.validate(against: draft.transcript, allowingUnlinkedFindings: true))
+            }
+            var invalid = summary
+            invalid.tasks[0].evidenceSegmentIds = ["missing"]
+            XCTAssertThrowsError(try invalid.validate(against: draft.transcript, allowingUnlinkedFindings: true))
         }
     }
 

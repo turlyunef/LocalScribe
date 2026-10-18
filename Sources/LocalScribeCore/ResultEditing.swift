@@ -13,6 +13,37 @@ public struct ResultEditDraft: Identifiable, Sendable {
         self.recordingID = recordingID; self.runID = runID
         self.transcript = transcript; self.summary = summary
     }
+
+    public func isSegmentUsedAsEvidence(_ id: String) -> Bool {
+        guard let summary else { return false }
+        return (summary.overview + summary.decisions + summary.tasks + summary.openQuestions)
+            .contains { $0.evidenceSegmentIds.contains(id) }
+    }
+
+    /// Referenced turns require explicit confirmation. All changes stay in this draft.
+    @discardableResult
+    public mutating func deleteSegment(_ id: String, removingEvidence: Bool = false) -> Bool {
+        guard transcript.segments.contains(where: { $0.id == id }),
+              removingEvidence || !isSegmentUsedAsEvidence(id) else { return false }
+        transcript.segments.removeAll { $0.id == id }
+        func unlink(_ findings: inout [Finding]) {
+            for index in findings.indices where findings[index].evidenceSegmentIds.contains(id) {
+                findings[index].evidenceSegmentIds.removeAll { $0 == id }
+                // With remaining evidence, optional claims must still be grounded in it.
+                // Without evidence, keep the manually edited item's fields intact.
+                if !findings[index].evidenceSegmentIds.isEmpty {
+                    let single = Summary(language: transcript.primaryLanguage, tasks: [findings[index]])
+                    findings[index] = single.groundingOptionalFields(against: transcript).0.tasks[0]
+                }
+            }
+        }
+        if var updated = summary {
+            unlink(&updated.overview); unlink(&updated.decisions)
+            unlink(&updated.tasks); unlink(&updated.openQuestions)
+            summary = updated
+        }
+        return true
+    }
 }
 
 extension RecordingRepository {
@@ -36,28 +67,35 @@ extension RecordingRepository {
         guard original.fingerprint == info.fingerprint,
               draft.transcript.schemaVersion == original.schemaVersion,
               draft.transcript.fingerprint == original.fingerprint,
-              draft.transcript.diarized == original.diarized,
-              draft.transcript.segments.count == original.segments.count else {
+              draft.transcript.diarized == original.diarized else {
             throw ScribeError.message("Структура расшифровки изменилась. Откройте редактор заново.")
         }
         var transcript = original
-        for index in original.segments.indices {
-            let edited = draft.transcript.segments[index]
+        transcript.segments = []
+        var sourceIndex = original.segments.startIndex
+        for edited in draft.transcript.segments {
+            // The draft must be an ordered subset of the original, with unchanged metadata.
+            guard let index = original.segments[sourceIndex...].firstIndex(where: { $0.id == edited.id }) else {
+                throw ScribeError.message("Редактор может удалять реплики, но не добавлять и не переставлять их")
+            }
+            sourceIndex = original.segments.index(after: index)
             var expected = original.segments[index]
             expected.text = edited.text
             guard expected == edited else {
-                throw ScribeError.message("Редактор может менять только текст реплик, сохраняя таймкоды и участников")
+                throw ScribeError.message("Редактор должен сохранять таймкоды и участников оставшихся реплик")
             }
             let text = edited.text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !text.isEmpty else { throw ScribeError.message("Текст реплики не может быть пустым") }
-            transcript.segments[index].text = text
+            var segment = edited
+            segment.text = text
             if text != original.segments[index].text {
                 // ASR word timings describe the old wording and must not be reused.
-                transcript.segments[index].words = []
+                segment.words = []
             }
+            transcript.segments.append(segment)
         }
         try transcript.validate(durationMs: manifest.durationMs)
-        try draft.summary?.validate(against: transcript)
+        try draft.summary?.validate(against: transcript, allowingUnlinkedFindings: true)
 
         info.id = UUID().uuidString; info.createdAt = Date()
         info.transcriptSourceRunID = draft.runID

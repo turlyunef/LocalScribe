@@ -174,6 +174,87 @@ final class ResultEditorViewTests: XCTestCase {
         return children + children.flatMap { descendants($0) }
     }
 
+    private func checkDeletion(referenced: Bool, confirm: Bool = true) async throws {
+        _ = NSApplication.shared
+        NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
+        let initial = ResultEditDraft(recordingID: UUID().uuidString, runID: UUID().uuidString,
+            transcript: Transcript(fingerprint: "f", diarized: true, segments: [
+                Segment(id: "s", startMs: 0, endMs: 1000, text: "Удаляемая фраза", language: "ru"),
+                Segment(id: "keep", startMs: 1000, endMs: 2000, text: "Оставшаяся фраза", language: "ru")]),
+            summary: Summary(language: "ru", tasks: [Finding(id: "f", text: "Задача",
+                evidenceSegmentIds: [referenced ? "s" : "keep"])]))
+        var saved: ResultEditDraft?
+        var errors: [String] = []
+        let hosting = NSHostingView(rootView: ResultEditorView(initial: initial, save: { saved = $0 },
+            cancel: {}, reportError: { errors.append($0.localizedDescription) }))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = hosting; window.orderFront(nil)
+        defer { window.close() }
+        hosting.layoutSubtreeIfNeeded()
+        func button(_ id: String) -> AnyObject? {
+            descendants(hosting).first { $0.accessibilityIdentifier?() == id }
+        }
+        func waitUntil(_ condition: () -> Bool) async throws {
+            let deadline = Date().addingTimeInterval(3)
+            while !condition() && Date() < deadline { try await Task.sleep(for: .milliseconds(10)) }
+            XCTAssertTrue(condition())
+        }
+        func alertWindow() -> NSWindow? {
+            NSApp.windows.first { candidate in
+                candidate !== window && candidate.isVisible && descendants(candidate).contains {
+                    $0.accessibilityLabel?() == "Удалить связь и реплику"
+                }
+            }
+        }
+        try await waitUntil { button("edit.deleteSegment.s") != nil }
+        XCTAssertTrue(try XCTUnwrap(button("edit.deleteSegment.s")).accessibilityPerformPress?() ?? false)
+        if referenced {
+            try await waitUntil { alertWindow() != nil }
+            // Opening and cancelling the warning must not change the draft.
+            XCTAssertFalse(button("edit.save")?.isAccessibilityEnabled?() ?? true)
+            let alert = try XCTUnwrap(alertWindow())
+            let title = confirm ? "Удалить связь и реплику" : "Отмена"
+            let action = try XCTUnwrap(descendants(alert).first {
+                ($0.accessibilityTitle?() == title || $0.accessibilityLabel?() == title)
+                    && $0.accessibilityRole?() == .button
+            })
+            // Native alert buttons can return false even when their action runs.
+            // Verify dismissal and the resulting draft instead.
+            _ = action.accessibilityPerformPress?()
+            try await waitUntil { alertWindow() == nil }
+        } else {
+            XCTAssertNil(alertWindow())
+        }
+        if !referenced || confirm {
+            try await waitUntil { button("edit.deleteSegment.s") == nil }
+            XCTAssertNotNil(button("edit.deleteSegment.keep"))
+            XCTAssertTrue(try XCTUnwrap(button("edit.save")).accessibilityPerformPress?() ?? false)
+            try await waitUntil { saved != nil }
+            XCTAssertEqual(saved?.transcript.segments.map(\.id), ["keep"])
+            XCTAssertEqual(saved?.summary?.tasks[0].evidenceSegmentIds, referenced ? [] : ["keep"])
+            XCTAssertEqual(saved?.summary?.tasks[0].text, "Задача")
+        } else {
+            XCTAssertNotNil(button("edit.deleteSegment.s"))
+            XCTAssertFalse(button("edit.save")?.isAccessibilityEnabled?() ?? true)
+            XCTAssertNil(saved)
+        }
+        XCTAssertTrue(errors.isEmpty)
+        XCTAssertEqual(initial.transcript.segments.count, 2)
+    }
+
+    func testUnreferencedTurnDeletesWithoutWarning() async throws {
+        try await checkDeletion(referenced: false)
+    }
+
+    func testReferencedTurnConfirmationDeletesTurnAndEvidence() async throws {
+        try await checkDeletion(referenced: true)
+    }
+
+    func testReferencedTurnCancellationKeepsDraftUnchanged() async throws {
+        try await checkDeletion(referenced: true, confirm: false)
+    }
+
     func testFailedSaveReportsThroughHandlerAndRetryKeepsDraft() async throws {
         _ = NSApplication.shared
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
@@ -220,6 +301,10 @@ final class ResultEditorViewTests: XCTestCase {
         XCTAssertFalse(cancelled)
         XCTAssertEqual(editor.string, "Исправлено 😀")
         errors.dismissCurrent()
+        let retryDeadline = Date().addingTimeInterval(3)
+        while !(try button("edit.save").isAccessibilityEnabled?() ?? false) && Date() < retryDeadline {
+            try await Task.sleep(for: .milliseconds(10))
+        }
         XCTAssertTrue(try button("edit.save").isAccessibilityEnabled?() ?? false)
         XCTAssertTrue(try button("edit.save").accessibilityPerformPress?() ?? false)
         let saveDeadline = Date().addingTimeInterval(3)

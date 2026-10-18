@@ -167,13 +167,19 @@ public struct Summary: Codable, Sendable, Equatable {
         }
         return Summary(language:language,overview:merge(overview),decisions:merge(decisions),tasks:merge(tasks),openQuestions:merge(openQuestions))
     }
-    public func validate(against transcript: Transcript) throws {
+    /// Only manual result revisions may contain findings without source links.
+    /// Generated summaries continue to require evidence by default.
+    public func validate(against transcript: Transcript, allowingUnlinkedFindings: Bool = false) throws {
         let ids = Set(transcript.segments.map(\.id)), speakers = Set(transcript.segments.compactMap(\.speakerId))
         guard schemaVersion == 1, ["ru", "en"].contains(language) else { throw ScribeError.message("Некорректная версия или язык итогов") }
         for f in overview + decisions + tasks + openQuestions {
+            let unlinked = allowingUnlinkedFindings && f.evidenceSegmentIds.isEmpty
             guard !f.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, f.text.count <= 3000,
-                  !f.evidenceSegmentIds.isEmpty, Set(f.evidenceSegmentIds).isSubset(of: ids),
-                  f.ownerSpeakerId == nil || speakers.contains(f.ownerSpeakerId!) else { throw ScribeError.message("Итоги не прошли проверку ссылок и полей") }
+                  unlinked || !f.evidenceSegmentIds.isEmpty, Set(f.evidenceSegmentIds).isSubset(of: ids),
+                  unlinked || f.ownerSpeakerId == nil || speakers.contains(f.ownerSpeakerId!),
+                  f.ownerName == nil || !f.ownerName!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  f.dueText == nil || !f.dueText!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ScribeError.message("Итоги не прошли проверку ссылок и полей") }
+            if unlinked { continue }
             if let owner = f.ownerSpeakerId, !transcript.segments.contains(where:{ f.evidenceSegmentIds.contains($0.id) && $0.speakerId == owner }) { throw ScribeError.message("Спикер ответственного отсутствует в основании") }
             if let name = f.ownerName, name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !f.evidenceSegmentIds.contains(where: { id in transcript.segments.contains { $0.id == id && $0.text.localizedCaseInsensitiveContains(name) } }) { throw ScribeError.message("Имя ответственного отсутствует в основании") }
             if let due = f.dueText, due.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !f.evidenceSegmentIds.contains(where: { id in transcript.segments.contains { $0.id == id && $0.text.localizedCaseInsensitiveContains(due) } }) { throw ScribeError.message("Срок отсутствует в основании") }
