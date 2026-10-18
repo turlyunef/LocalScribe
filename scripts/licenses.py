@@ -7,9 +7,9 @@ for package in (root/'.build/checkouts').iterdir():
     for source in package.iterdir():
         if source.is_file() and source.name.lower().startswith(('license','copying','notice')):
             shutil.copyfile(source, dest/(package.name+'-'+source.name))
-ff = root/'Vendor/ffmpeg-8.0.1'
+ff = root/'build/ffmpeg-licenses'
 for name in ['COPYING.LGPLv2.1','COPYING.LGPLv3','LICENSE.md']:
-    if (ff/name).exists(): shutil.copyfile(ff/name, dest/('ffmpeg-'+name))
+    shutil.copyfile(ff/name, dest/('ffmpeg-'+name))
 shutil.copyfile(root/'docs/ThirdParty.md', dest/'ThirdParty.md')
 for name in ['LICENSE', 'NOTICES']:
     shutil.copyfile(root/'ThirdParty/SpeakerKit'/name, dest/('LocalScribeSpeakerKit-'+name))

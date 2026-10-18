@@ -3,12 +3,21 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 VERSION=8.0.1
+ARCHIVE_SHA256=05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
 mkdir -p Vendor Assets/tools build
 ARCHIVE="Vendor/ffmpeg-$VERSION.tar.xz"
 if [ ! -f "$ARCHIVE" ]; then curl --fail --location --retry 3 "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$ARCHIVE"; fi
-echo "05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41  $ARCHIVE" | shasum -a 256 -c -
-if [ ! -d "Vendor/ffmpeg-$VERSION" ]; then tar -xf "$ARCHIVE" -C Vendor; fi
-cd "Vendor/ffmpeg-$VERSION"
+# Only remove the private directory created by this invocation. In particular,
+# never reuse or delete a user's existing Vendor/ffmpeg-$VERSION tree.
+STAGING="$(mktemp -d "$ROOT/build/ffmpeg-$VERSION.XXXXXX")"
+trap 'rm -rf -- "$STAGING"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+# Verify and extract the same private snapshot, even if the cached archive changes.
+cp "$ARCHIVE" "$STAGING/source.tar.xz"
+echo "$ARCHIVE_SHA256  $STAGING/source.tar.xz" | shasum -a 256 -c -
+tar -xf "$STAGING/source.tar.xz" -C "$STAGING"
+cd "$STAGING/ffmpeg-$VERSION"
 ./configure --prefix="$ROOT/Assets/ffmpeg" --arch=arm64 --target-os=darwin \
  --extra-cflags=-mmacosx-version-min=26.0 --extra-ldflags=-mmacosx-version-min=26.0 \
  --cc=clang --disable-autodetect --disable-shared --enable-static --disable-gpl --disable-nonfree \
@@ -25,5 +34,11 @@ make -j4
 cp ffmpeg ffprobe "$ROOT/Assets/tools/"
 cp config.h "$ROOT/build/ffmpeg-config.h"
 cp ffbuild/config.log "$ROOT/build/ffmpeg-config.log"
+# Packaging must also use licenses from the verified source tree.
+mkdir -p "$ROOT/build/ffmpeg-licenses"
+cp COPYING.LGPLv2.1 COPYING.LGPLv3 LICENSE.md "$ROOT/build/ffmpeg-licenses/"
 cd "$ROOT"
-shasum -a 256 "$ARCHIVE" Assets/tools/ffmpeg Assets/tools/ffprobe > build/ffmpeg-sha256.txt
+{
+    echo "$ARCHIVE_SHA256  $ARCHIVE"
+    shasum -a 256 Assets/tools/ffmpeg Assets/tools/ffprobe
+} > build/ffmpeg-sha256.txt

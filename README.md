@@ -15,7 +15,7 @@ bash scripts/build_ffmpeg.sh
 bash scripts/build_app.sh
 ```
 
-Вторая команда создаёт `dist/LocalScribe.app`, включает worker, XPC-загрузчик, статические FFmpeg/ffprobe и SwiftPM/Metal-ресурсы. Зависимости из `Package.resolved`, без плавающего main. Каталог моделей в `Resources/models.lock.json`; перегенерировать его для обычной сборки нельзя. Исходники FFmpeg скачиваются с проверкой закреплённой SHA-256; их конфигурация и хэши сохраняются в `build/`.
+Вторая команда создаёт `dist/LocalScribe.app`, включает worker, XPC-загрузчик, статические FFmpeg/ffprobe и SwiftPM/Metal-ресурсы. Зависимости из `Package.resolved`, без плавающего main. Каталог моделей в `Resources/models.lock.json`; перегенерировать его для обычной сборки нельзя. Каждая сборка FFmpeg проверяет закреплённую SHA-256 копии архива и извлекает её в новый временный каталог, который удаляется при завершении. Существующее дерево `Vendor/ffmpeg-8.0.1` не используется и не изменяется. Конфигурация, хэши и лицензии проверенных исходников сохраняются в `build/`. Если инструменты собраны прежним скриптом, один раз повторите `bash scripts/build_ffmpeg.sh` перед упаковкой, чтобы подготовить лицензии в новом расположении.
 
 По умолчанию используется ad-hoc подпись для личной локальной сборки. Для Developer ID задайте `LOCALSCRIBE_SIGN_IDENTITY`; notarization для распространения выполняется отдельно. Отключать Gatekeeper или системную защиту не требуется. Полнота App Sandbox/TCC-проверки указана в отчёте.
 
@@ -54,7 +54,7 @@ bash scripts/build_app.sh
 
 ```sh
 swift test -c release -j 4
-python3 -m unittest discover -s scripts/tests -v  # bootstrap: локальные mock-источники без весов и сети
+python3 -m unittest discover -s scripts/tests -v  # bootstrap и сборка FFmpeg: локальные фикстуры без весов и сети
 python3 scripts/download_models.py       # только bootstrap разработчика, те же SHA-256
 python3 scripts/download_models.py --model asr-small --model summary-4b --model diarization
 python3 scripts/smoke.py /path/to/audio.wav --worker .build/out/Products/Release/LocalScribeWorker
