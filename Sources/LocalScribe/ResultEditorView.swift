@@ -63,6 +63,7 @@ struct ResultEditorView: View {
                     }
                 }.padding(4)
             }
+            .contentMargins(.trailing, 20, for: .scrollContent)
             HStack {
                 Spacer()
                 if saving { ProgressView().controlSize(.small) }

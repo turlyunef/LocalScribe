@@ -19,9 +19,11 @@ struct ContentView: View {
             }
             .navigationTitle("LocalScribe")
             .navigationSplitViewColumnWidth(min: 220, ideal: 270)
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(spacing: 6) {
                 Label("Всё обрабатывается на Mac", systemImage: "lock.shield").font(.caption)
+                    .accessibilityIdentifier("sidebar.localProcessing")
                 SettingsLink { Text(model.modelsReady ? "Модели готовы" : "Установить модели") }.font(.caption).help("Открыть настройки и управление моделями")
+                    .accessibilityIdentifier("sidebar.models")
             }.foregroundStyle(.secondary).padding()
         } detail: {
             VStack(spacing: 0) {
@@ -80,7 +82,7 @@ struct ContentView: View {
                         }
                         .pickerStyle(.segmented)
                         .frame(width: 270)
-                        if model.tab == .summary, let summary = model.summary { Text(summary.language == "ru" ? "Русский" : "English").font(.caption).foregroundStyle(.secondary) }
+                        .accessibilityIdentifier("result.section")
                         Spacer()
                         Button("Редактировать", systemImage: "pencil", action: model.beginResultEditing)
                             .disabled(!model.canEditResult)
