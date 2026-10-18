@@ -1,0 +1,365 @@
+diff --git a/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift b/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
+index 8293ec3..2730aff 100644
+--- a/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
++++ b/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
+@@ -88,7 +88,6 @@ actor PyannoteDiarizerActor {
+     private var audioLength: Int = 0
+     private var timings: PyannoteDiarizationTimings
+     private var modelLoadTime: CFAbsoluteTime
+-    private var diarizationTask: Task<Void, Error>?
+
+     init(config: DiarizerConfig) {
+         self.config = config
+@@ -136,8 +135,6 @@ actor PyannoteDiarizerActor {
+     }
+
+     func reset() async {
+-        diarizationTask?.cancel()
+-        diarizationTask = nil
+         await config.clusterer.reset()
+         timings = .init()
+     }
+@@ -165,77 +162,107 @@ actor PyannoteDiarizerActor {
+
+         timings.numberOfSegmenterWorkers = segmenterModel.concurrentWorkers
+
+-        // Fire the segmenting + embedding pipeline in the background; clusterSpeakers() awaits diarizationTask before clustering.
++        // Keep inference in the caller task so cancellation reaches every clip and worker.
+         let progressObj = Progress(totalUnitCount: 100)
+         let progressReporter = ProgressReporter(progress: progressObj, callback: progressCallback)
+-        diarizationTask = Task {
+-            var processedAudioSeconds = 0.0
+-
+-            for (seekClipStart, seekClipEnd) in seekClips {
+-                try Task.checkCancellation()
+-
+-                let audioClip = Array(audioArray[seekClipStart..<seekClipEnd])
+-                let clipSeconds = Double(audioClip.count) / Double(WhisperKit.sampleRate)
+-                self.timings.inputAudioSeconds += clipSeconds
+-
+-                let expectedChunks = max(1, segmenterModel.maxChunks(for: audioClip.count))
+-                let counter = EmbeddingBatchCounter()
+-
+-                let embedderWorkerCount = concurrentEmbedderWorkers ?? min(8, max(2, Int(clipSeconds / 30.0)))
+-                self.timings.numberOfEmbedderWorkers = embedderWorkerCount
+-
+-                let (outputStream, outputContinuation) = AsyncStream.makeStream(of: SpeakerSegmenterOutput.self)
+-
+-                try await withThrowingTaskGroup(of: Void.self) { group in
+-                    for _ in 0..<embedderWorkerCount {
+-                        group.addTask { [processedAudioSeconds, progressReporter] in
+-                            for await output in outputStream {
+-                                guard !Task.isCancelled else { break }
+-                                let startTime = CFAbsoluteTimeGetCurrent()
+-                                do {
+-                                    let embeddings = try await embedderModel.embed(segmenterOutput: output)
+-                                    await clusterer.add(speakerEmbeddings: embeddings)
+-                                } catch {
+-                                    Logging.error("[PyannoteDiarizer] Error processing embeddings: \(error)")
+-                                }
+-                                let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1_000
+-                                await counter.add(time: elapsed)
+-
+-                                let done = await counter.count
+-                                let fraction = (processedAudioSeconds + clipSeconds * Double(done) / Double(expectedChunks)) / max(totalAudioSeconds, 1)
+-                                let completed = Int64(min(max(fraction, 0), 0.99) * 100)
+-                                await progressReporter.report(completed: completed)
+-                            }
+-                        }
+-                    }
++        var processedAudioSeconds = 0.0
++
++        for (seekClipStart, seekClipEnd) in seekClips {
++            try Task.checkCancellation()
++
++            let audioClip = Array(audioArray[seekClipStart..<seekClipEnd])
++            let clipSeconds = Double(audioClip.count) / Double(WhisperKit.sampleRate)
++            self.timings.inputAudioSeconds += clipSeconds
++
++            let expectedChunks = segmenterModel.maxChunks(for: audioClip.count)
++
++            let embedderWorkerCount = concurrentEmbedderWorkers ?? min(8, max(2, Int(clipSeconds / 30.0)))
++            self.timings.numberOfEmbedderWorkers = embedderWorkerCount
++
++            let snap = try await Self.processClip(
++                expectedChunks: expectedChunks, workerCount: embedderWorkerCount,
++                produce: { continuation in
++                    try await segmenterModel.predict(audioArray: audioClip, outputContinuation: continuation)
++                },
++                embed: { output in try await embedderModel.embed(segmenterOutput: output) },
++                consume: { embeddings in await clusterer.add(speakerEmbeddings: embeddings) },
++                progress: { [processedAudioSeconds] done in
++                    let fraction = (processedAudioSeconds + clipSeconds * Double(done) / Double(max(expectedChunks, 1))) / max(totalAudioSeconds, 1)
++                    let completed = Int64(min(max(fraction, 0), 0.99) * 100)
++                    await progressReporter.report(completed: completed)
++                }
++            )
++
++            self.timings.segmenterTime += snap.segmenterTime
++            self.timings.embedderTime += snap.embedderTime
++            self.timings.numberOfChunks += snap.chunkCount
++            processedAudioSeconds += clipSeconds
++        }
++
++        await progressReporter.report(completed: 100)
++    }
+
++    // LocalScribe: close the stream BEFORE the group waits for cancelled children.
++    // This also covers a producer that throws without finishing its continuation.
++    static func processClip(
++        expectedChunks: Int,
++        workerCount: Int,
++        produce: @escaping @Sendable (AsyncStream<SpeakerSegmenterOutput>.Continuation) async throws -> Void,
++        embed: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> [SpeakerEmbedding],
++        consume: @escaping @Sendable ([SpeakerEmbedding]) async -> Void,
++        progress: @escaping @Sendable (Int) async -> Void = { _ in }
++    ) async throws -> EmbeddingBatchCounter.Snapshot {
++        let counter = EmbeddingBatchCounter()
++        let (stream, continuation) = AsyncStream.makeStream(of: SpeakerSegmenterOutput.self)
++        try await withTaskCancellationHandler {
++            try await withThrowingTaskGroup(of: Void.self) { group in
++                for _ in 0..<max(1, workerCount) {
+                     group.addTask {
+-                        let segmenterStart = CFAbsoluteTimeGetCurrent()
+-                        try await segmenterModel.predict(audioArray: audioClip, outputContinuation: outputContinuation)
+-                        await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - segmenterStart) * 1_000)
++                        for await output in stream {
++                            try Task.checkCancellation()
++                            let start = CFAbsoluteTimeGetCurrent()
++                            let embeddings = try await embed(output)
++                            try Task.checkCancellation()
++                            // Empty embeddings are a successful silence block, not a failed inference.
++                            let done = try await counter.add(index: output.chunkIndex, expectedChunks: expectedChunks,
++                                                             time: (CFAbsoluteTimeGetCurrent() - start) * 1_000)
++                            await consume(embeddings)
++                            await progress(done)
++                        }
++                        try Task.checkCancellation()
+                     }
+-
+-                    // Drain the group to propagate any error thrown by the segmenter model
++                }
++                group.addTask {
++                    defer { continuation.finish() }
++                    let start = CFAbsoluteTimeGetCurrent()
++                    try await produce(continuation)
++                    try Task.checkCancellation()
++                    await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - start) * 1_000)
++                }
++                do {
+                     for try await _ in group {}
++                } catch {
++                    continuation.finish()
++                    group.cancelAll()
++                    throw error
+                 }
+-
+-                let snap = await counter.snapshot()
+-                self.timings.segmenterTime += snap.segmenterTime
+-                self.timings.embedderTime += snap.embedderTime
+-                self.timings.numberOfChunks += snap.chunkCount
+-                processedAudioSeconds += clipSeconds
+             }
+-
+-            await progressReporter.report(completed: 100)
++        } onCancel: {
++            continuation.finish()
++        }
++        try Task.checkCancellation()
++        let snapshot = await counter.snapshot()
++        guard snapshot.count == expectedChunks else {
++            throw SpeakerKitError.invalidModelOutput("Incomplete diarization: missing chunks")
+         }
++        return snapshot
+     }
+
+     func clusterSpeakers(with clusterer: Clusterer, options: PyannoteDiarizationOptions? = nil, progressCallback: (@Sendable (Progress) -> Void)? = nil) async throws -> DiarizationResult {
+         let progressObj = Progress(totalUnitCount: 100)
+         progressObj.completedUnitCount = 0
+         progressCallback?(progressObj)
+-        try await diarizationTask?.value
+-        diarizationTask = nil
++        try Task.checkCancellation()
+
+         progressObj.completedUnitCount = 50
+         progressCallback?(progressObj)
+@@ -429,14 +456,18 @@ private actor ProgressReporter {
+
+ // MARK: - EmbeddingBatchCounter
+
+-private actor EmbeddingBatchCounter {
+-    private(set) var count: Int = 0
++actor EmbeddingBatchCounter {
++    private var completedIndices: Set<Int> = []
++    var count: Int { completedIndices.count }
+     private(set) var embedderTime: CFAbsoluteTime = 0
+     private(set) var segmenterTime: CFAbsoluteTime = 0
+
+-    func add(time: CFAbsoluteTime) {
+-        count += 1
++    func add(index: Int, expectedChunks: Int, time: CFAbsoluteTime) throws -> Int {
++        guard (0..<expectedChunks).contains(index), completedIndices.insert(index).inserted else {
++            throw SpeakerKitError.invalidModelOutput("Unexpected or duplicate diarization chunk")
++        }
+         embedderTime += time
++        return count
+     }
+
+     func addSegmenterTime(_ time: CFAbsoluteTime) {
+diff --git a/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift b/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
+index e28110e..42a563f 100644
+--- a/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
++++ b/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
+@@ -135,84 +135,80 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
+             Logging.debug(String(format: "[SpeakerKit] Total segmenter model inference time: %.2f ms", totalTime))
+         }
+
+-        var chunkEndIndex = 0
+-        let audioArrayCount = audioArray.count
+-        let maxIndex = audioArrayCount - windowPadding
+-
++        let sampleRateFloat = Float(sampleRate)
++        let modelSampleRate = modelSampleRate
++        let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
+         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
++        let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
++        try await predictChunks(audioArray: audioArray, outputContinuation: outputContinuation,
++                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset) { index, waveform in
++            guard let audioSamples = AudioProcessor.padOrTrimAudio(
++                fromArray: Self.reflectTail(waveform, toLength: maxChunkLength),
++                startAt: 0, toLength: maxChunkLength
++            ) else {
++                throw SpeakerKitError.generic("Segmentation Failed: Audio samples are nil")
++            }
++            let modelInputs = SpeakerSegmenterInput(waveform: audioSamples)
++            let features = try await model.asyncPrediction(from: modelInputs, options: MLPredictionOptions())
++            return SpeakerSegmenterOutput(
++                features: features, chunkIndex: index, audioChunk: audioSamples,
++                chunkStride: chunkStride, waveformLength: Float(waveform.count) / sampleRateFloat,
++                modelSampleRate: modelSampleRate, audioSampleRate: sampleRateFloat
++            )
++        }
++    }
+
++    // LocalScribe: the same scheduling path is used with Core ML and fake predictors.
++    // A failed prediction must never become a silent/empty feature provider.
++    func predictChunks(
++        audioArray: [Float],
++        outputContinuation: AsyncStream<SpeakerSegmenterOutput>.Continuation,
++        windowPadding: Int = 0,
++        chunkStrideOffset: Int,
++        predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
++    ) async throws {
++        defer { outputContinuation.finish() }
++        let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
++        guard chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
++              windowPadding >= 0, windowPadding <= audioArray.count else {
++            throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
++        }
++        var chunkEndIndex = 0
+         var chunks: [(index: Int, waveform: [Float])] = []
+-        var chunkIndex = 0
+-        let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
+-        while chunkEndIndex < maxIndex {
++        while chunkEndIndex < audioArray.count - windowPadding {
+             let chunkStartIndex = max(chunkEndIndex - chunkStrideOffset, 0)
+-            chunkEndIndex = min(chunkStartIndex + maxChunkLength, audioArrayCount)
+-            let chunk = Array(audioArray[chunkStartIndex..<chunkEndIndex])
+-            chunks.append((index: chunkIndex, waveform: chunk))
+-            chunkIndex += 1
++            chunkEndIndex = min(chunkStartIndex + maxChunkLength, audioArray.count)
++            chunks.append((index: chunks.count, waveform: Array(audioArray[chunkStartIndex..<chunkEndIndex])))
+         }
+-        Logging.debug("[SpeakerSegmenter] split \(audioArrayCount) into \(chunkIndex) chunks with stride offset \(chunkStrideOffset)")
+-
+         let chunkStream = AsyncStream<(index: Int, waveform: [Float])> { continuation in
+-            for chunk in chunks {
+-                continuation.yield(chunk)
+-            }
++            for chunk in chunks { continuation.yield(chunk) }
+             continuation.finish()
+         }
+
+-        let modelSampleRate = modelSampleRate
+-        let workerCount = max(1, concurrentWorkers)
+-
+-        await withTaskGroup(of: Void.self) { taskGroup in
+-            let sampleRateFloat = Float(sampleRate)
+-            let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
+-            for workerID in 0..<workerCount {
+-                taskGroup.addTask { [model] in
++        try await withThrowingTaskGroup(of: Int.self) { group in
++            for _ in 0..<max(1, concurrentWorkers) {
++                group.addTask {
++                    var completed = 0
+                     for await chunk in chunkStream {
+-                        guard !Task.isCancelled else { break }
+-                        Logging.debug("[SpeakerSegmenter][\(workerID)] inferring chunk \(chunk.index) count: \(chunk.waveform.count)")
+-
+-                        var output: SpeakerSegmenterOutput
+-                        let waveformLength = Float(chunk.waveform.count) / sampleRateFloat
+-                        do {
+-                            guard let audioSamples = AudioProcessor.padOrTrimAudio(
+-                                fromArray: Self.reflectTail(chunk.waveform, toLength: maxChunkLength),
+-                                startAt: 0,
+-                                toLength: maxChunkLength
+-                            ) else {
+-                                throw SpeakerKitError.generic("Segmentation Failed: Audio samples are nil")
+-                            }
+-
+-                            let modelInputs = SpeakerSegmenterInput(waveform: audioSamples)
+-                            let start = CFAbsoluteTimeGetCurrent()
+-                            let outputFeatures = try await model.asyncPrediction(from: modelInputs, options: MLPredictionOptions())
+-                            output = SpeakerSegmenterOutput(
+-                                features: outputFeatures,
+-                                chunkIndex: chunk.index,
+-                                audioChunk: audioSamples,
+-                                chunkStride: chunkStride,
+-                                waveformLength: waveformLength,
+-                                modelSampleRate: modelSampleRate,
+-                                audioSampleRate: sampleRateFloat
+-                            )
+-                            Logging.debug("[SpeakerSegmenter][\(workerID)] inference for chunk \(chunk.index) took \(CFAbsoluteTimeGetCurrent() - start)")
+-                        } catch {
+-                            output = SpeakerSegmenterOutput(
+-                                features: NoOpMLFeatureProvider(),
+-                                chunkIndex: chunk.index,
+-                                audioChunk: MLMultiArray(),
+-                                chunkStride: chunkStride,
+-                                waveformLength: waveformLength,
+-                                modelSampleRate: modelSampleRate,
+-                                audioSampleRate: sampleRateFloat
+-                            )
+-                            Logging.debug("[SpeakerSegmenter][\(workerID)] inference for chunk \(chunk.index) encountered an error: \(error)")
++                        try Task.checkCancellation()
++                        let output = try await predictChunk(chunk.index, chunk.waveform)
++                        try Task.checkCancellation()
++                        guard output.chunkIndex == chunk.index else {
++                            throw SpeakerKitError.invalidModelOutput("Segmenter returned the wrong chunk index")
+                         }
+-                        outputContinuation.yield(output)
++                        if case .terminated = outputContinuation.yield(output) { throw CancellationError() }
++                        completed += 1
+                     }
+-                    Logging.debug("[SpeakerSegmenter][\(workerID)] all chunks finished.")
++                    try Task.checkCancellation()
++                    return completed
+                 }
+             }
++            var completed = 0
++            for try await count in group { completed += count }
++            try Task.checkCancellation()
++            guard completed == chunks.count else {
++                throw SpeakerKitError.invalidModelOutput("Incomplete segmentation")
++            }
+         }
+     }
+
+@@ -237,6 +233,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
+     }
+
+     func maxChunks(for audioLength: Int) -> Int {
++        guard audioLength > 0 else { return 0 }
+         let chunkLength = Double(Self.chunkLengthInSeconds) * Double(sampleRate)
+         if useFullRedundancy {
+             let offset = modelChunkStrideOffset

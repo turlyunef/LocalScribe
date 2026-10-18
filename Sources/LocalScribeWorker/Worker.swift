@@ -10,7 +10,7 @@ import LocalScribeSpeakerKit
     }
     static func main() async {
         if CommandLine.arguments.contains("--versions") {
-            print("LocalScribeWorker protocol=1 ArgmaxOSS=1.1.1 SpeakerKitPatch=tail-reflection1 MLXSwiftLM=2.31.3 macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)")
+            print("LocalScribeWorker protocol=1 ArgmaxOSS=1.1.1 SpeakerKitPatch=tail-reflection1-inference-errors1 MLXSwiftLM=2.31.3 macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)")
             return
         }
         let protocolOutput = FileHandle(fileDescriptor: dup(STDOUT_FILENO), closeOnDealloc: true)

@@ -75,25 +75,46 @@ actor Pipeline {
         try Disk.write(transcript, to: run.appendingPathComponent("asr-transcript.json"))
         return "asr-transcript.json"
     }
-    func diarize() async throws -> String {
+    func diarize(
+        infer: @Sendable (URL, URL, Int) async throws -> [VoiceInterval] = { folder, wave, duration in
+            try await Pipeline.inferSpeakers(modelFolder: folder, wave: wave, durationMs: duration)
+        }
+    ) async throws -> String {
         let transcript = try Disk.read(Transcript.self, at: run.appendingPathComponent("asr-transcript.json"))
+        guard transcript.fingerprint == info.fingerprint, !transcript.diarized else {
+            throw ScribeError.message("Некорректная контрольная точка распознавания")
+        }
+        try transcript.validate(durationMs: manifest.durationMs)
+        try Task.checkCancellation()
         if transcript.segments.isEmpty {
             try Disk.write(Transcript(fingerprint: info.fingerprint, diarized: true, segments: []), to: run.appendingPathComponent("transcript.json")); return "transcript.json"
         }
-        let config = try PyannoteConfig(modelFolder: modelFolder(.diarization).path, download: false, load: true, verbose: false, logLevel: .none, concurrentSegmenterWorkers: 1, concurrentEmbedderWorkers: 1)
-        let kit = try await SpeakerKit(config)
-        let samples = try Media.samples(wave)
-        let result = try await kit.diarize(audioArray: samples)
-        let intervals = result.segments.compactMap { s -> VoiceInterval? in
-            guard let id = s.speaker.speakerId else { return nil }
-            return VoiceInterval.clipped(startSeconds: Double(s.startTime), endSeconds: Double(s.endTime),
-                                         speakerId: "raw-\(id)", durationMs: manifest.durationMs)
+        let intervals: [VoiceInterval]
+        do {
+            intervals = try await infer(modelFolder(.diarization), wave, manifest.durationMs)
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ScribeError.message("Диаризация завершилась ошибкой. Расшифровка сохранена; можно повторить диаризацию.")
         }
+        try Task.checkCancellation()
         guard !intervals.isEmpty else { throw ScribeError.message("Участники не определены. Расшифровка сохранена; можно повторить диаризацию.") }
         try Disk.write(DiarizationArtifact(fingerprint: info.fingerprint, intervals: intervals), to: run.appendingPathComponent("diarization.json"))
         let mapped = Analysis.assignSpeakers(transcript, intervals: intervals)
         try mapped.validate(durationMs: manifest.durationMs)
         try Disk.write(mapped, to: run.appendingPathComponent("transcript.json"))
         return "transcript.json"
+    }
+
+    nonisolated private static func inferSpeakers(modelFolder: URL, wave: URL, durationMs: Int) async throws -> [VoiceInterval] {
+        let config = PyannoteConfig(modelFolder: modelFolder.path, download: false, load: true, verbose: false, logLevel: .none, concurrentSegmenterWorkers: 1, concurrentEmbedderWorkers: 1)
+        let kit = try await SpeakerKit(config)
+        let samples = try Media.samples(wave)
+        let result = try await kit.diarize(audioArray: samples)
+        return result.segments.compactMap { s -> VoiceInterval? in
+            guard let id = s.speaker.speakerId else { return nil }
+            return VoiceInterval.clipped(startSeconds: Double(s.startTime), endSeconds: Double(s.endTime),
+                                         speakerId: "raw-\(id)", durationMs: durationMs)
+        }
     }
 }

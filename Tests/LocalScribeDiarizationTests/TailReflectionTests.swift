@@ -68,7 +68,7 @@ final class TailReflectionTests: XCTestCase {
     func testOldRunKeepsItsFingerprintWhileNewRunInvalidatesCheckpoints() throws {
         let current = RunInfo(sourceHash: "source", profileHash: "legacy-model-profile")
         var previous = current
-        previous.pipelineVersion = "1.0.0-audio2-asr5-live1-summary11"
+        previous.pipelineVersion = "1.0.0-audio2-asr5-live1-diarization2-summary11"
         let decoded = try JSONDecoder().decode(RunInfo.self, from: JSONEncoder().encode(previous))
         XCTAssertEqual(decoded.pipelineVersion, previous.pipelineVersion)
         XCTAssertEqual(decoded.fingerprint, Disk.fingerprint(previous.sourceHash + previous.profileHash + previous.pipelineVersion))

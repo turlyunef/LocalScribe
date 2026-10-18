@@ -88,7 +88,6 @@ actor PyannoteDiarizerActor {
     private var audioLength: Int = 0
     private var timings: PyannoteDiarizationTimings
     private var modelLoadTime: CFAbsoluteTime
-    private var diarizationTask: Task<Void, Error>?
 
     init(config: DiarizerConfig) {
         self.config = config
@@ -136,8 +135,6 @@ actor PyannoteDiarizerActor {
     }
 
     func reset() async {
-        diarizationTask?.cancel()
-        diarizationTask = nil
         await config.clusterer.reset()
         timings = .init()
     }
@@ -165,77 +162,107 @@ actor PyannoteDiarizerActor {
 
         timings.numberOfSegmenterWorkers = segmenterModel.concurrentWorkers
 
-        // Fire the segmenting + embedding pipeline in the background; clusterSpeakers() awaits diarizationTask before clustering.
+        // Keep inference in the caller task so cancellation reaches every clip and worker.
         let progressObj = Progress(totalUnitCount: 100)
         let progressReporter = ProgressReporter(progress: progressObj, callback: progressCallback)
-        diarizationTask = Task {
-            var processedAudioSeconds = 0.0
+        var processedAudioSeconds = 0.0
 
-            for (seekClipStart, seekClipEnd) in seekClips {
-                try Task.checkCancellation()
+        for (seekClipStart, seekClipEnd) in seekClips {
+            try Task.checkCancellation()
 
-                let audioClip = Array(audioArray[seekClipStart..<seekClipEnd])
-                let clipSeconds = Double(audioClip.count) / Double(WhisperKit.sampleRate)
-                self.timings.inputAudioSeconds += clipSeconds
+            let audioClip = Array(audioArray[seekClipStart..<seekClipEnd])
+            let clipSeconds = Double(audioClip.count) / Double(WhisperKit.sampleRate)
+            self.timings.inputAudioSeconds += clipSeconds
 
-                let expectedChunks = max(1, segmenterModel.maxChunks(for: audioClip.count))
-                let counter = EmbeddingBatchCounter()
+            let expectedChunks = segmenterModel.maxChunks(for: audioClip.count)
 
-                let embedderWorkerCount = concurrentEmbedderWorkers ?? min(8, max(2, Int(clipSeconds / 30.0)))
-                self.timings.numberOfEmbedderWorkers = embedderWorkerCount
+            let embedderWorkerCount = concurrentEmbedderWorkers ?? min(8, max(2, Int(clipSeconds / 30.0)))
+            self.timings.numberOfEmbedderWorkers = embedderWorkerCount
 
-                let (outputStream, outputContinuation) = AsyncStream.makeStream(of: SpeakerSegmenterOutput.self)
-
-                try await withThrowingTaskGroup(of: Void.self) { group in
-                    for _ in 0..<embedderWorkerCount {
-                        group.addTask { [processedAudioSeconds, progressReporter] in
-                            for await output in outputStream {
-                                guard !Task.isCancelled else { break }
-                                let startTime = CFAbsoluteTimeGetCurrent()
-                                do {
-                                    let embeddings = try await embedderModel.embed(segmenterOutput: output)
-                                    await clusterer.add(speakerEmbeddings: embeddings)
-                                } catch {
-                                    Logging.error("[PyannoteDiarizer] Error processing embeddings: \(error)")
-                                }
-                                let elapsed = (CFAbsoluteTimeGetCurrent() - startTime) * 1_000
-                                await counter.add(time: elapsed)
-
-                                let done = await counter.count
-                                let fraction = (processedAudioSeconds + clipSeconds * Double(done) / Double(expectedChunks)) / max(totalAudioSeconds, 1)
-                                let completed = Int64(min(max(fraction, 0), 0.99) * 100)
-                                await progressReporter.report(completed: completed)
-                            }
-                        }
-                    }
-
-                    group.addTask {
-                        let segmenterStart = CFAbsoluteTimeGetCurrent()
-                        try await segmenterModel.predict(audioArray: audioClip, outputContinuation: outputContinuation)
-                        await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - segmenterStart) * 1_000)
-                    }
-
-                    // Drain the group to propagate any error thrown by the segmenter model
-                    for try await _ in group {}
+            let snap = try await Self.processClip(
+                expectedChunks: expectedChunks, workerCount: embedderWorkerCount,
+                produce: { continuation in
+                    try await segmenterModel.predict(audioArray: audioClip, outputContinuation: continuation)
+                },
+                embed: { output in try await embedderModel.embed(segmenterOutput: output) },
+                consume: { embeddings in await clusterer.add(speakerEmbeddings: embeddings) },
+                progress: { [processedAudioSeconds] done in
+                    let fraction = (processedAudioSeconds + clipSeconds * Double(done) / Double(max(expectedChunks, 1))) / max(totalAudioSeconds, 1)
+                    let completed = Int64(min(max(fraction, 0), 0.99) * 100)
+                    await progressReporter.report(completed: completed)
                 }
+            )
 
-                let snap = await counter.snapshot()
-                self.timings.segmenterTime += snap.segmenterTime
-                self.timings.embedderTime += snap.embedderTime
-                self.timings.numberOfChunks += snap.chunkCount
-                processedAudioSeconds += clipSeconds
-            }
-
-            await progressReporter.report(completed: 100)
+            self.timings.segmenterTime += snap.segmenterTime
+            self.timings.embedderTime += snap.embedderTime
+            self.timings.numberOfChunks += snap.chunkCount
+            processedAudioSeconds += clipSeconds
         }
+
+        await progressReporter.report(completed: 100)
+    }
+
+    // LocalScribe: close the stream BEFORE the group waits for cancelled children.
+    // This also covers a producer that throws without finishing its continuation.
+    static func processClip(
+        expectedChunks: Int,
+        workerCount: Int,
+        produce: @escaping @Sendable (AsyncStream<SpeakerSegmenterOutput>.Continuation) async throws -> Void,
+        embed: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> [SpeakerEmbedding],
+        consume: @escaping @Sendable ([SpeakerEmbedding]) async -> Void,
+        progress: @escaping @Sendable (Int) async -> Void = { _ in }
+    ) async throws -> EmbeddingBatchCounter.Snapshot {
+        let counter = EmbeddingBatchCounter()
+        let (stream, continuation) = AsyncStream.makeStream(of: SpeakerSegmenterOutput.self)
+        try await withTaskCancellationHandler {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<max(1, workerCount) {
+                    group.addTask {
+                        for await output in stream {
+                            try Task.checkCancellation()
+                            let start = CFAbsoluteTimeGetCurrent()
+                            let embeddings = try await embed(output)
+                            try Task.checkCancellation()
+                            // Empty embeddings are a successful silence block, not a failed inference.
+                            let done = try await counter.add(index: output.chunkIndex, expectedChunks: expectedChunks,
+                                                             time: (CFAbsoluteTimeGetCurrent() - start) * 1_000)
+                            await consume(embeddings)
+                            await progress(done)
+                        }
+                        try Task.checkCancellation()
+                    }
+                }
+                group.addTask {
+                    defer { continuation.finish() }
+                    let start = CFAbsoluteTimeGetCurrent()
+                    try await produce(continuation)
+                    try Task.checkCancellation()
+                    await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - start) * 1_000)
+                }
+                do {
+                    for try await _ in group {}
+                } catch {
+                    continuation.finish()
+                    group.cancelAll()
+                    throw error
+                }
+            }
+        } onCancel: {
+            continuation.finish()
+        }
+        try Task.checkCancellation()
+        let snapshot = await counter.snapshot()
+        guard snapshot.count == expectedChunks else {
+            throw SpeakerKitError.invalidModelOutput("Incomplete diarization: missing chunks")
+        }
+        return snapshot
     }
 
     func clusterSpeakers(with clusterer: Clusterer, options: PyannoteDiarizationOptions? = nil, progressCallback: (@Sendable (Progress) -> Void)? = nil) async throws -> DiarizationResult {
         let progressObj = Progress(totalUnitCount: 100)
         progressObj.completedUnitCount = 0
         progressCallback?(progressObj)
-        try await diarizationTask?.value
-        diarizationTask = nil
+        try Task.checkCancellation()
 
         progressObj.completedUnitCount = 50
         progressCallback?(progressObj)
@@ -429,14 +456,18 @@ private actor ProgressReporter {
 
 // MARK: - EmbeddingBatchCounter
 
-private actor EmbeddingBatchCounter {
-    private(set) var count: Int = 0
+actor EmbeddingBatchCounter {
+    private var completedIndices: Set<Int> = []
+    var count: Int { completedIndices.count }
     private(set) var embedderTime: CFAbsoluteTime = 0
     private(set) var segmenterTime: CFAbsoluteTime = 0
 
-    func add(time: CFAbsoluteTime) {
-        count += 1
+    func add(index: Int, expectedChunks: Int, time: CFAbsoluteTime) throws -> Int {
+        guard (0..<expectedChunks).contains(index), completedIndices.insert(index).inserted else {
+            throw SpeakerKitError.invalidModelOutput("Unexpected or duplicate diarization chunk")
+        }
         embedderTime += time
+        return count
     }
 
     func addSegmenterTime(_ time: CFAbsoluteTime) {

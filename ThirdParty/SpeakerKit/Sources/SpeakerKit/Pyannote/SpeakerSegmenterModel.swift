@@ -135,83 +135,79 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
             Logging.debug(String(format: "[SpeakerKit] Total segmenter model inference time: %.2f ms", totalTime))
         }
 
-        var chunkEndIndex = 0
-        let audioArrayCount = audioArray.count
-        let maxIndex = audioArrayCount - windowPadding
-
-        let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
-
-        var chunks: [(index: Int, waveform: [Float])] = []
-        var chunkIndex = 0
+        let sampleRateFloat = Float(sampleRate)
+        let modelSampleRate = modelSampleRate
         let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
-        while chunkEndIndex < maxIndex {
-            let chunkStartIndex = max(chunkEndIndex - chunkStrideOffset, 0)
-            chunkEndIndex = min(chunkStartIndex + maxChunkLength, audioArrayCount)
-            let chunk = Array(audioArray[chunkStartIndex..<chunkEndIndex])
-            chunks.append((index: chunkIndex, waveform: chunk))
-            chunkIndex += 1
-        }
-        Logging.debug("[SpeakerSegmenter] split \(audioArrayCount) into \(chunkIndex) chunks with stride offset \(chunkStrideOffset)")
-
-        let chunkStream = AsyncStream<(index: Int, waveform: [Float])> { continuation in
-            for chunk in chunks {
-                continuation.yield(chunk)
+        let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+        let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
+        try await predictChunks(audioArray: audioArray, outputContinuation: outputContinuation,
+                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset) { index, waveform in
+            guard let audioSamples = AudioProcessor.padOrTrimAudio(
+                fromArray: Self.reflectTail(waveform, toLength: maxChunkLength),
+                startAt: 0, toLength: maxChunkLength
+            ) else {
+                throw SpeakerKitError.generic("Segmentation Failed: Audio samples are nil")
             }
+            let modelInputs = SpeakerSegmenterInput(waveform: audioSamples)
+            let features = try await model.asyncPrediction(from: modelInputs, options: MLPredictionOptions())
+            return SpeakerSegmenterOutput(
+                features: features, chunkIndex: index, audioChunk: audioSamples,
+                chunkStride: chunkStride, waveformLength: Float(waveform.count) / sampleRateFloat,
+                modelSampleRate: modelSampleRate, audioSampleRate: sampleRateFloat
+            )
+        }
+    }
+
+    // LocalScribe: the same scheduling path is used with Core ML and fake predictors.
+    // A failed prediction must never become a silent/empty feature provider.
+    func predictChunks(
+        audioArray: [Float],
+        outputContinuation: AsyncStream<SpeakerSegmenterOutput>.Continuation,
+        windowPadding: Int = 0,
+        chunkStrideOffset: Int,
+        predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
+    ) async throws {
+        defer { outputContinuation.finish() }
+        let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+        guard chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
+              windowPadding >= 0, windowPadding <= audioArray.count else {
+            throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
+        }
+        var chunkEndIndex = 0
+        var chunks: [(index: Int, waveform: [Float])] = []
+        while chunkEndIndex < audioArray.count - windowPadding {
+            let chunkStartIndex = max(chunkEndIndex - chunkStrideOffset, 0)
+            chunkEndIndex = min(chunkStartIndex + maxChunkLength, audioArray.count)
+            chunks.append((index: chunks.count, waveform: Array(audioArray[chunkStartIndex..<chunkEndIndex])))
+        }
+        let chunkStream = AsyncStream<(index: Int, waveform: [Float])> { continuation in
+            for chunk in chunks { continuation.yield(chunk) }
             continuation.finish()
         }
 
-        let modelSampleRate = modelSampleRate
-        let workerCount = max(1, concurrentWorkers)
-
-        await withTaskGroup(of: Void.self) { taskGroup in
-            let sampleRateFloat = Float(sampleRate)
-            let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
-            for workerID in 0..<workerCount {
-                taskGroup.addTask { [model] in
+        try await withThrowingTaskGroup(of: Int.self) { group in
+            for _ in 0..<max(1, concurrentWorkers) {
+                group.addTask {
+                    var completed = 0
                     for await chunk in chunkStream {
-                        guard !Task.isCancelled else { break }
-                        Logging.debug("[SpeakerSegmenter][\(workerID)] inferring chunk \(chunk.index) count: \(chunk.waveform.count)")
-
-                        var output: SpeakerSegmenterOutput
-                        let waveformLength = Float(chunk.waveform.count) / sampleRateFloat
-                        do {
-                            guard let audioSamples = AudioProcessor.padOrTrimAudio(
-                                fromArray: Self.reflectTail(chunk.waveform, toLength: maxChunkLength),
-                                startAt: 0,
-                                toLength: maxChunkLength
-                            ) else {
-                                throw SpeakerKitError.generic("Segmentation Failed: Audio samples are nil")
-                            }
-
-                            let modelInputs = SpeakerSegmenterInput(waveform: audioSamples)
-                            let start = CFAbsoluteTimeGetCurrent()
-                            let outputFeatures = try await model.asyncPrediction(from: modelInputs, options: MLPredictionOptions())
-                            output = SpeakerSegmenterOutput(
-                                features: outputFeatures,
-                                chunkIndex: chunk.index,
-                                audioChunk: audioSamples,
-                                chunkStride: chunkStride,
-                                waveformLength: waveformLength,
-                                modelSampleRate: modelSampleRate,
-                                audioSampleRate: sampleRateFloat
-                            )
-                            Logging.debug("[SpeakerSegmenter][\(workerID)] inference for chunk \(chunk.index) took \(CFAbsoluteTimeGetCurrent() - start)")
-                        } catch {
-                            output = SpeakerSegmenterOutput(
-                                features: NoOpMLFeatureProvider(),
-                                chunkIndex: chunk.index,
-                                audioChunk: MLMultiArray(),
-                                chunkStride: chunkStride,
-                                waveformLength: waveformLength,
-                                modelSampleRate: modelSampleRate,
-                                audioSampleRate: sampleRateFloat
-                            )
-                            Logging.debug("[SpeakerSegmenter][\(workerID)] inference for chunk \(chunk.index) encountered an error: \(error)")
+                        try Task.checkCancellation()
+                        let output = try await predictChunk(chunk.index, chunk.waveform)
+                        try Task.checkCancellation()
+                        guard output.chunkIndex == chunk.index else {
+                            throw SpeakerKitError.invalidModelOutput("Segmenter returned the wrong chunk index")
                         }
-                        outputContinuation.yield(output)
+                        if case .terminated = outputContinuation.yield(output) { throw CancellationError() }
+                        completed += 1
                     }
-                    Logging.debug("[SpeakerSegmenter][\(workerID)] all chunks finished.")
+                    try Task.checkCancellation()
+                    return completed
                 }
+            }
+            var completed = 0
+            for try await count in group { completed += count }
+            try Task.checkCancellation()
+            guard completed == chunks.count else {
+                throw SpeakerKitError.invalidModelOutput("Incomplete segmentation")
             }
         }
     }
@@ -237,6 +233,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
     }
 
     func maxChunks(for audioLength: Int) -> Int {
+        guard audioLength > 0 else { return 0 }
         let chunkLength = Double(Self.chunkLengthInSeconds) * Double(sampleRate)
         if useFullRedundancy {
             let offset = modelChunkStrideOffset

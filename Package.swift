@@ -12,7 +12,7 @@ let package = Package(
     targets: [
         .target(name: "CWorkerIsolation", linkerSettings: [.linkedLibrary("sandbox")]),
         .target(name: "LocalScribeCore"),
-        // Tracked SpeakerKit 1.1.1 snapshot with the tail-reflection fix.
+        // Tracked SpeakerKit 1.1.1 snapshot with tail reflection and inference failure propagation.
         // ArgmaxCore is supplied by the pinned WhisperKit product.
         .target(name: "LocalScribeSpeakerKit", dependencies: [
             .product(name: "WhisperKit", package: "argmax-oss-swift")
@@ -28,7 +28,7 @@ let package = Package(
             .product(name: "MLXLLM", package: "mlx-swift-lm"),
             .product(name: "MLXLMCommon", package: "mlx-swift-lm")], swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "LocalScribeTests", dependencies: ["LocalScribeCore"]),
-        .testTarget(name: "LocalScribeDiarizationTests", dependencies: ["LocalScribeSpeakerKit", "LocalScribeCore"]),
+        .testTarget(name: "LocalScribeDiarizationTests", dependencies: ["LocalScribeSpeakerKit", "LocalScribeCore", "LocalScribeWorker"]),
         .testTarget(name: "LocalScribeUITests", dependencies: ["LocalScribe", "LocalScribeModelService"])
     ]
 )
