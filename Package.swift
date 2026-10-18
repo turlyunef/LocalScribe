@@ -12,7 +12,7 @@ let package = Package(
     targets: [
         .target(name: "CWorkerIsolation", linkerSettings: [.linkedLibrary("sandbox")]),
         .target(name: "LocalScribeCore"),
-        // Tracked SpeakerKit 1.1.1 snapshot with tail reflection and inference failure propagation.
+        // Tracked SpeakerKit 1.1.1 snapshot with tail reflection, inference errors and backpressure fixes.
         // ArgmaxCore is supplied by the pinned WhisperKit product.
         .target(name: "LocalScribeSpeakerKit", dependencies: [
             .product(name: "WhisperKit", package: "argmax-oss-swift")

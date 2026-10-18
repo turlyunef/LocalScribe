@@ -181,8 +181,8 @@ actor PyannoteDiarizerActor {
 
             let snap = try await Self.processClip(
                 expectedChunks: expectedChunks, workerCount: embedderWorkerCount,
-                produce: { continuation in
-                    try await segmenterModel.predict(audioArray: audioClip, outputContinuation: continuation)
+                produce: { send in
+                    try await segmenterModel.predict(audioArray: audioClip, sendOutput: send)
                 },
                 embed: { output in try await embedderModel.embed(segmenterOutput: output) },
                 consume: { embeddings in await clusterer.add(speakerEmbeddings: embeddings) },
@@ -202,23 +202,24 @@ actor PyannoteDiarizerActor {
         await progressReporter.report(completed: 100)
     }
 
-    // LocalScribe: close the stream BEFORE the group waits for cancelled children.
-    // This also covers a producer that throws without finishing its continuation.
+    // LocalScribe: bound the queue without dropping outputs. Abort the channel
+    // BEFORE joining cancelled children, including suspended producer workers.
     static func processClip(
         expectedChunks: Int,
         workerCount: Int,
-        produce: @escaping @Sendable (AsyncStream<SpeakerSegmenterOutput>.Continuation) async throws -> Void,
+        bufferCapacity: Int = 1,
+        produce: @escaping @Sendable (@escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void) async throws -> Void,
         embed: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> [SpeakerEmbedding],
         consume: @escaping @Sendable ([SpeakerEmbedding]) async -> Void,
         progress: @escaping @Sendable (Int) async -> Void = { _ in }
     ) async throws -> EmbeddingBatchCounter.Snapshot {
         let counter = EmbeddingBatchCounter()
-        let (stream, continuation) = AsyncStream.makeStream(of: SpeakerSegmenterOutput.self)
+        let channel = DiarizationChannel<SpeakerSegmenterOutput>(capacity: bufferCapacity)
         try await withTaskCancellationHandler {
             try await withThrowingTaskGroup(of: Void.self) { group in
                 for _ in 0..<max(1, workerCount) {
                     group.addTask {
-                        for await output in stream {
+                        while let output = try await channel.next() {
                             try Task.checkCancellation()
                             let start = CFAbsoluteTimeGetCurrent()
                             let embeddings = try await embed(output)
@@ -233,22 +234,22 @@ actor PyannoteDiarizerActor {
                     }
                 }
                 group.addTask {
-                    defer { continuation.finish() }
                     let start = CFAbsoluteTimeGetCurrent()
-                    try await produce(continuation)
+                    try await produce { try await channel.send($0) }
                     try Task.checkCancellation()
                     await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - start) * 1_000)
+                    channel.finish()
                 }
                 do {
                     for try await _ in group {}
                 } catch {
-                    continuation.finish()
+                    channel.cancel()
                     group.cancelAll()
                     throw error
                 }
             }
         } onCancel: {
-            continuation.finish()
+            channel.cancel()
         }
         try Task.checkCancellation()
         let snapshot = await counter.snapshot()

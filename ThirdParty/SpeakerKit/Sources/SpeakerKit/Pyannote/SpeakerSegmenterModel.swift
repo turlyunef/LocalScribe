@@ -120,11 +120,9 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
 
     public func predict(
         audioArray: [Float],
-        outputContinuation: AsyncStream<SpeakerSegmenterOutput>.Continuation,
+        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
         windowPadding: Int = 0
     ) async throws {
-        defer { outputContinuation.finish() }
-
         guard let model else {
             throw SpeakerKitError.modelUnavailable("Speaker segmenter model is unavailable")
         }
@@ -140,7 +138,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
         let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
-        try await predictChunks(audioArray: audioArray, outputContinuation: outputContinuation,
+        try await predictChunks(audioArray: audioArray, sendOutput: sendOutput,
                                 windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset) { index, waveform in
             guard let audioSamples = AudioProcessor.padOrTrimAudio(
                 fromArray: Self.reflectTail(waveform, toLength: maxChunkLength),
@@ -162,12 +160,11 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
     // A failed prediction must never become a silent/empty feature provider.
     func predictChunks(
         audioArray: [Float],
-        outputContinuation: AsyncStream<SpeakerSegmenterOutput>.Continuation,
+        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
         windowPadding: Int = 0,
         chunkStrideOffset: Int,
         predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
     ) async throws {
-        defer { outputContinuation.finish() }
         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
         guard chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
               windowPadding >= 0, windowPadding <= audioArray.count else {
@@ -196,7 +193,9 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
                         guard output.chunkIndex == chunk.index else {
                             throw SpeakerKitError.invalidModelOutput("Segmenter returned the wrong chunk index")
                         }
-                        if case .terminated = outputContinuation.yield(output) { throw CancellationError() }
+                        // Keep this worker occupied until the bounded downstream
+                        // channel accepts the output; never drop an audio block.
+                        try await sendOutput(output)
                         completed += 1
                     }
                     try Task.checkCancellation()

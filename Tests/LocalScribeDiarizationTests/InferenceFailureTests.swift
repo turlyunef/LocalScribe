@@ -66,9 +66,9 @@ final class InferenceFailureTests: XCTestCase {
         let (firstConsumed, signal) = AsyncStream<Void>.makeStream()
         try await withinDeadline {
             do {
-                _ = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 4, produce: { continuation in
+                _ = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 4, produce: { send in
                     try await segmenter.predictChunks(audioArray: [Float](repeating: 0.1, count: 90),
-                                                       outputContinuation: continuation, chunkStrideOffset: 0) { index, _ in
+                                                       sendOutput: send, chunkStrideOffset: 0) { index, _ in
                         if index == 1 {
                             for await _ in firstConsumed { break }
                             throw FakeInferenceError.predictor
@@ -91,12 +91,12 @@ final class InferenceFailureTests: XCTestCase {
         let (firstConsumed, signal) = AsyncStream<Void>.makeStream()
         try await withinDeadline {
             do {
-                _ = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 4, produce: { continuation in
-                    // Deliberately leave the stream open and producer suspended.
+                _ = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 4, produce: { send in
+                    // Deliberately leave the producer suspended.
                     // Only cancellation/teardown by processClip can stop it.
-                    continuation.yield(try fakeOutput(0))
+                    try await send(try fakeOutput(0))
                     for await _ in firstConsumed { break }
-                    continuation.yield(try fakeOutput(1))
+                    try await send(try fakeOutput(1))
                     do { try await Task.sleep(for: .seconds(30)) }
                     catch { await log.cancelled(); throw error }
                 }, embed: { output in
@@ -130,8 +130,8 @@ final class InferenceFailureTests: XCTestCase {
             try await withinDeadline {
                 do {
                     _ = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 3,
-                        produce: { continuation in
-                            for index in indices { continuation.yield(try fakeOutput(index)) }
+                        produce: { send in
+                            for index in indices { try await send(try fakeOutput(index)) }
                         }, embed: { fakeEmbeddings($0) }, consume: { _ in })
                     XCTFail("Incomplete/invalid block coverage must fail: \(indices)")
                 } catch is SpeakerKitError { /* expected */ }
@@ -145,9 +145,9 @@ final class InferenceFailureTests: XCTestCase {
             let log = InferenceLog()
             try await withinDeadline {
                 let snapshot = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 3,
-                    produce: { continuation in
+                    produce: { send in
                         try await segmenter.predictChunks(audioArray: [Float](repeating: 0, count: 90),
-                                                           outputContinuation: continuation, chunkStrideOffset: 0) { index, _ in
+                                                           sendOutput: send, chunkStrideOffset: 0) { index, _ in
                             try fakeOutput(index, silent: silentIndices.contains(index))
                         }
                     }, embed: { fakeEmbeddings($0) }, consume: { await log.consume($0) },
@@ -165,8 +165,8 @@ final class InferenceFailureTests: XCTestCase {
         XCTAssertEqual(segmenter.maxChunks(for: 0), 0)
         try await withinDeadline {
             let snapshot = try await PyannoteDiarizerActor.processClip(expectedChunks: 0, workerCount: 4,
-                produce: { continuation in
-                    try await segmenter.predictChunks(audioArray: [], outputContinuation: continuation,
+                produce: { send in
+                    try await segmenter.predictChunks(audioArray: [], sendOutput: send,
                                                        chunkStrideOffset: 0) { _, _ in
                         XCTFail("Empty audio has no inference blocks")
                         throw FakeInferenceError.predictor
@@ -202,10 +202,11 @@ final class InferenceFailureTests: XCTestCase {
         let siblingExited = expectation(description: "Sibling prediction cancelled")
         siblingExited.assertForOverFulfill = false
         try await withinDeadline {
-            let (stream, continuation) = AsyncStream<SpeakerSegmenterOutput>.makeStream()
+            let channel = DiarizationChannel<SpeakerSegmenterOutput>(capacity: 1)
+            let send: @Sendable (SpeakerSegmenterOutput) async throws -> Void = { try await channel.send($0) }
             do {
                 try await segmenter.predictChunks(audioArray: [Float](repeating: 0, count: 90),
-                                                   outputContinuation: continuation, chunkStrideOffset: 0) { index, _ in
+                                                   sendOutput: send, chunkStrideOffset: 0) { index, _ in
                     if index == 1 {
                         for await _ in started { break }
                         throw FakeInferenceError.predictor
@@ -217,8 +218,10 @@ final class InferenceFailureTests: XCTestCase {
                 }
                 XCTFail("Prediction failure must propagate")
             } catch FakeInferenceError.predictor { /* expected */ }
-            // The continuation was finished even on error.
-            for await _ in stream {}
+            // No output should have been emitted before this failure.
+            channel.finish()
+            let output = try await channel.next()
+            XCTAssertNil(output)
         }
         await fulfillment(of: [siblingExited], timeout: 1)
     }
@@ -264,9 +267,9 @@ final class InferenceFailureTests: XCTestCase {
                 do {
                     _ = try await pipeline.diarize { _, _, _ in
                         _ = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 1,
-                            produce: { continuation in
+                            produce: { send in
                                 try await segmenter.predictChunks(audioArray: [Float](repeating: 0, count: 90),
-                                                                   outputContinuation: continuation, chunkStrideOffset: 0) { index, _ in
+                                                                   sendOutput: send, chunkStrideOffset: 0) { index, _ in
                                     if failPredictor && index == 1 { throw FakeInferenceError.predictor }
                                     return try fakeOutput(index)
                                 }
@@ -299,8 +302,8 @@ final class InferenceFailureTests: XCTestCase {
         let log = InferenceLog()
         let name = try await pipeline.diarize { _, _, _ in
             _ = try await PyannoteDiarizerActor.processClip(expectedChunks: 3, workerCount: 3,
-                produce: { continuation in
-                    for index in [2, 0, 1] { continuation.yield(try fakeOutput(index, silent: index == 1)) }
+                produce: { send in
+                    for index in [2, 0, 1] { try await send(try fakeOutput(index, silent: index == 1)) }
                 }, embed: { fakeEmbeddings($0) }, consume: { await log.consume($0) })
             return [VoiceInterval(startMs: 0, endMs: 30_000, speakerId: "raw-0"),
                     VoiceInterval(startMs: 60_000, endMs: 90_000, speakerId: "raw-0")]

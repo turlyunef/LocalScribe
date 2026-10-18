@@ -68,7 +68,7 @@ final class TailReflectionTests: XCTestCase {
     func testOldRunKeepsItsFingerprintWhileNewRunInvalidatesCheckpoints() throws {
         let current = RunInfo(sourceHash: "source", profileHash: "legacy-model-profile")
         var previous = current
-        previous.pipelineVersion = "1.0.0-audio2-asr5-live1-diarization2-summary11"
+        previous.pipelineVersion = "1.0.0-audio2-asr5-live1-diarization3-summary11"
         let decoded = try JSONDecoder().decode(RunInfo.self, from: JSONEncoder().encode(previous))
         XCTAssertEqual(decoded.pipelineVersion, previous.pipelineVersion)
         XCTAssertEqual(decoded.fingerprint, Disk.fingerprint(previous.sourceHash + previous.profileHash + previous.pipelineVersion))
@@ -93,7 +93,8 @@ final class TailReflectionTests: XCTestCase {
                       maximum + stride - 1, maximum + stride, maximum + stride + 1] {
             let audio = (0..<count).map { Float($0 % 127) / 1270 }
             let (stream, continuation) = AsyncStream<SpeakerSegmenterOutput>.makeStream()
-            try await segmenter.predict(audioArray: audio, outputContinuation: continuation)
+            try await segmenter.predict(audioArray: audio, sendOutput: { continuation.yield($0) })
+            continuation.finish()
             var outputs: [SpeakerSegmenterOutput] = []
             for await output in stream { outputs.append(output) }
             XCTAssertEqual(outputs.count, segmenter.maxChunks(for: count))

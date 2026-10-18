@@ -1,0 +1,241 @@
+--- a/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
++++ b/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
+@@ -181,8 +181,8 @@
+
+             let snap = try await Self.processClip(
+                 expectedChunks: expectedChunks, workerCount: embedderWorkerCount,
+-                produce: { continuation in
+-                    try await segmenterModel.predict(audioArray: audioClip, outputContinuation: continuation)
++                produce: { send in
++                    try await segmenterModel.predict(audioArray: audioClip, sendOutput: send)
+                 },
+                 embed: { output in try await embedderModel.embed(segmenterOutput: output) },
+                 consume: { embeddings in await clusterer.add(speakerEmbeddings: embeddings) },
+@@ -202,23 +202,24 @@
+         await progressReporter.report(completed: 100)
+     }
+
+-    // LocalScribe: close the stream BEFORE the group waits for cancelled children.
+-    // This also covers a producer that throws without finishing its continuation.
++    // LocalScribe: bound the queue without dropping outputs. Abort the channel
++    // BEFORE joining cancelled children, including suspended producer workers.
+     static func processClip(
+         expectedChunks: Int,
+         workerCount: Int,
+-        produce: @escaping @Sendable (AsyncStream<SpeakerSegmenterOutput>.Continuation) async throws -> Void,
++        bufferCapacity: Int = 1,
++        produce: @escaping @Sendable (@escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void) async throws -> Void,
+         embed: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> [SpeakerEmbedding],
+         consume: @escaping @Sendable ([SpeakerEmbedding]) async -> Void,
+         progress: @escaping @Sendable (Int) async -> Void = { _ in }
+     ) async throws -> EmbeddingBatchCounter.Snapshot {
+         let counter = EmbeddingBatchCounter()
+-        let (stream, continuation) = AsyncStream.makeStream(of: SpeakerSegmenterOutput.self)
++        let channel = DiarizationChannel<SpeakerSegmenterOutput>(capacity: bufferCapacity)
+         try await withTaskCancellationHandler {
+             try await withThrowingTaskGroup(of: Void.self) { group in
+                 for _ in 0..<max(1, workerCount) {
+                     group.addTask {
+-                        for await output in stream {
++                        while let output = try await channel.next() {
+                             try Task.checkCancellation()
+                             let start = CFAbsoluteTimeGetCurrent()
+                             let embeddings = try await embed(output)
+@@ -233,22 +234,22 @@
+                     }
+                 }
+                 group.addTask {
+-                    defer { continuation.finish() }
+                     let start = CFAbsoluteTimeGetCurrent()
+-                    try await produce(continuation)
++                    try await produce { try await channel.send($0) }
+                     try Task.checkCancellation()
+                     await counter.addSegmenterTime((CFAbsoluteTimeGetCurrent() - start) * 1_000)
++                    channel.finish()
+                 }
+                 do {
+                     for try await _ in group {}
+                 } catch {
+-                    continuation.finish()
++                    channel.cancel()
+                     group.cancelAll()
+                     throw error
+                 }
+             }
+         } onCancel: {
+-            continuation.finish()
++            channel.cancel()
+         }
+         try Task.checkCancellation()
+         let snapshot = await counter.snapshot()
+--- a/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
++++ b/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
+@@ -120,11 +120,9 @@
+
+     public func predict(
+         audioArray: [Float],
+-        outputContinuation: AsyncStream<SpeakerSegmenterOutput>.Continuation,
++        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
+         windowPadding: Int = 0
+     ) async throws {
+-        defer { outputContinuation.finish() }
+-
+         guard let model else {
+             throw SpeakerKitError.modelUnavailable("Speaker segmenter model is unavailable")
+         }
+@@ -140,7 +138,7 @@
+         let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
+         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+         let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
+-        try await predictChunks(audioArray: audioArray, outputContinuation: outputContinuation,
++        try await predictChunks(audioArray: audioArray, sendOutput: sendOutput,
+                                 windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset) { index, waveform in
+             guard let audioSamples = AudioProcessor.padOrTrimAudio(
+                 fromArray: Self.reflectTail(waveform, toLength: maxChunkLength),
+@@ -162,12 +160,11 @@
+     // A failed prediction must never become a silent/empty feature provider.
+     func predictChunks(
+         audioArray: [Float],
+-        outputContinuation: AsyncStream<SpeakerSegmenterOutput>.Continuation,
++        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
+         windowPadding: Int = 0,
+         chunkStrideOffset: Int,
+         predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
+     ) async throws {
+-        defer { outputContinuation.finish() }
+         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+         guard chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
+               windowPadding >= 0, windowPadding <= audioArray.count else {
+@@ -196,7 +193,9 @@
+                         guard output.chunkIndex == chunk.index else {
+                             throw SpeakerKitError.invalidModelOutput("Segmenter returned the wrong chunk index")
+                         }
+-                        if case .terminated = outputContinuation.yield(output) { throw CancellationError() }
++                        // Keep this worker occupied until the bounded downstream
++                        // channel accepts the output; never drop an audio block.
++                        try await sendOutput(output)
+                         completed += 1
+                     }
+                     try Task.checkCancellation()
+--- /dev/null
++++ b/Sources/SpeakerKit/Pyannote/DiarizationChannel.swift
+@@ -0,0 +1,119 @@
++// LocalScribe addition to the SpeakerKit snapshot. See accompanying LICENSE.
++
++import Foundation
++import Synchronization
++
++// LocalScribe: a lossless, bounded channel for one clip. The buffer holds at
++// most capacity outputs; each segmenter worker may additionally hold one output
++// in send(), and each embedder worker one in inference. No task is spawned per
++// output. Waiter cancellation also works in the segmenter's nested task group,
++// without aborting consumers before the original prediction error propagates.
++final class DiarizationChannel<Element: Sendable>: Sendable {
++    private enum Status { case open, finished, cancelled }
++    private struct State {
++        var status = Status.open
++        var buffer: [Element] = []
++        var senders: [(id: UUID, element: Element, continuation: CheckedContinuation<Void, any Error>)] = []
++        var receivers: [(id: UUID, continuation: CheckedContinuation<Element?, any Error>)] = []
++    }
++
++    private let capacity: Int
++    private let state = Mutex(State())
++
++    init(capacity: Int) {
++        precondition(capacity > 0)
++        self.capacity = capacity
++    }
++
++    func send(_ element: Element) async throws {
++        let id = UUID()
++        try await withTaskCancellationHandler {
++            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
++                state.withLock { state in
++                    guard !Task.isCancelled, state.status == .open else {
++                        continuation.resume(throwing: CancellationError())
++                        return
++                    }
++                    if !state.receivers.isEmpty {
++                        state.receivers.removeFirst().continuation.resume(returning: element)
++                        continuation.resume()
++                    } else if state.buffer.count < capacity {
++                        state.buffer.append(element)
++                        continuation.resume()
++                    } else {
++                        state.senders.append((id, element, continuation))
++                    }
++                }
++            }
++            try Task.checkCancellation()
++        } onCancel: {
++            self.cancelWaiter(id)
++        }
++    }
++
++    func next() async throws -> Element? {
++        let id = UUID()
++        return try await withTaskCancellationHandler {
++            let element = try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Element?, any Error>) in
++                state.withLock { state in
++                    guard !Task.isCancelled, state.status != .cancelled else {
++                        continuation.resume(throwing: CancellationError())
++                        return
++                    }
++                    if !state.buffer.isEmpty {
++                        let element = state.buffer.removeFirst()
++                        if !state.senders.isEmpty {
++                            let sender = state.senders.removeFirst()
++                            state.buffer.append(sender.element)
++                            sender.continuation.resume()
++                        }
++                        continuation.resume(returning: element)
++                    } else if state.status == .finished {
++                        continuation.resume(returning: nil)
++                    } else {
++                        state.receivers.append((id, continuation))
++                    }
++                }
++            }
++            try Task.checkCancellation()
++            return element
++        } onCancel: {
++            self.cancelWaiter(id)
++        }
++    }
++
++    // Successful production drains buffered outputs before returning EOF.
++    // The owner calls this only after all producer workers have joined.
++    func finish() {
++        state.withLock { state in
++            guard state.status == .open else { return }
++            state.status = .finished
++            for receiver in state.receivers { receiver.continuation.resume(returning: nil) }
++            state.receivers.removeAll()
++        }
++    }
++
++    // Error/cancellation discards pending outputs and wakes both sides before
++    // the owner waits for the structured tasks to exit. Safe to call repeatedly.
++    func cancel() {
++        state.withLock { state in
++            state.status = .cancelled
++            state.buffer.removeAll()
++            for sender in state.senders { sender.continuation.resume(throwing: CancellationError()) }
++            state.senders.removeAll()
++            for receiver in state.receivers { receiver.continuation.resume(throwing: CancellationError()) }
++            state.receivers.removeAll()
++        }
++    }
++
++    private func cancelWaiter(_ id: UUID) {
++        state.withLock { state in
++            if let index = state.senders.firstIndex(where: { $0.id == id }) {
++                state.senders.remove(at: index).continuation.resume(throwing: CancellationError())
++            }
++            if let index = state.receivers.firstIndex(where: { $0.id == id }) {
++                state.receivers.remove(at: index).continuation.resume(throwing: CancellationError())
++            }
++        }
++    }
++}
