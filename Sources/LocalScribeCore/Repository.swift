@@ -2,6 +2,9 @@ import Foundation
 
 public struct RecordingRepository: Sendable {
     public let root: URL
+    // Optional diagnostics count actual repository I/O, without recording content.
+    var observeIO: (@Sendable (IOOperation) -> Void)?
+    enum IOOperation: Hashable, Sendable { case manifestRead, manifestWrite, archiveScan, indexWrite }
     public init(root: URL? = nil) throws {
         self.root = try root ?? FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true).appendingPathComponent("LocalScribe", isDirectory: true)
         try Disk.directory(self.root.appendingPathComponent("recordings")); try Disk.directory(self.root.appendingPathComponent("models"))
@@ -13,16 +16,22 @@ public struct RecordingRepository: Sendable {
         guard manifest.schemaVersion == 1 else { throw ScribeError.message("Эта версия записи создана другим выпуском. Исходные файлы сохранены; обновите приложение.") }
         guard UUID(uuidString:manifest.id) != nil else { throw ScribeError.message("Недопустимый идентификатор записи") }
         try Disk.write(manifest, to: folder(manifest.id).appendingPathComponent("manifest.json"))
-        // This index is only a convenience; manifests remain the source of truth.
-        try? Disk.write(list(), to: root.appendingPathComponent("index.json"))
+        observeIO?(.manifestWrite)
+    }
+    /// Derived metadata only. A missing/stale index never prevents manifest access.
+    public func writeIndex(_ manifests: [Manifest]) throws {
+        try Disk.write(manifests, to: root.appendingPathComponent("index.json"))
+        observeIO?(.indexWrite)
     }
     public func load(_ id: String) throws -> Manifest {
         guard UUID(uuidString:id) != nil else { throw ScribeError.message("Недопустимый идентификатор записи") }
+        observeIO?(.manifestRead)
         let manifest = try Disk.read(Manifest.self,at:folder(id).appendingPathComponent("manifest.json"))
         guard manifest.id == id else { throw ScribeError.message("Идентификатор записи не совпадает с её каталогом") }
         return manifest
     }
     public func list() -> [Manifest] {
+        observeIO?(.archiveScan)
         let dirs = (try? FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("recordings"), includingPropertiesForKeys: nil)) ?? []
         return dirs.compactMap { try? load($0.lastPathComponent) }.sorted { $0.createdAt > $1.createdAt }
     }
@@ -149,12 +158,15 @@ public struct RecordingRepository: Sendable {
     public func delete(_ manifest: Manifest) throws {
         guard UUID(uuidString: manifest.id) != nil else { throw ScribeError.message("Недопустимый идентификатор записи") }
         try FileManager.default.removeItem(at: folder(manifest.id))
-        try? Disk.write(list(), to: root.appendingPathComponent("index.json"))
     }
     /// Call only after capture/worker exit. Audio caches are reproducible; JSON
     /// checkpoints and unfinished capture fragments remain available for recovery.
     public func cleanupTemporaryFiles(_ id: String) throws {
         let manifest = try load(id)
+        try cleanupTemporaryFiles(manifest)
+    }
+    private func cleanupTemporaryFiles(_ manifest: Manifest) throws {
+        let id = manifest.id
         guard manifest.schemaVersion == 1, manifest.sourceComplete,
               !manifest.state.processing, manifest.state != .recording else { return }
         let fm = FileManager.default, recording = folder(id)
@@ -193,18 +205,25 @@ public struct RecordingRepository: Sendable {
         guard try Disk.hash(original) == manifest.sha256 else { return }
         for url in disposable { try fm.removeItem(at: url) }
     }
-    public func recover() throws {
-        for var m in list() {
+    @discardableResult public func recover() throws -> [Manifest] {
+        var manifests = list()
+        for index in manifests.indices {
+            var m = manifests[index]
             guard m.schemaVersion == 1 else { continue }
-            if m.state.processing || m.state == .queued { m.state = .interrupted; try save(m) }
-            if m.captureProcessing != nil { m.captureProcessing = .interrupted; try save(m) }
+            var changed = false
+            if m.state.processing || m.state == .queued { m.state = .interrupted; changed = true }
+            if let state = m.captureProcessing, state != .interrupted { m.captureProcessing = .interrupted; changed = true }
             if m.state == .recording {
                 m.state = .interrupted; m.warnings.append("Запись была прервана. Завершённые фрагменты сохранены; последний фрагмент мог быть утрачен.")
-                try save(m)
+                changed = true
             }
+            if changed { try save(m) }
+            manifests[index] = m
             // Best effort: a cleanup failure must not make the archive unavailable.
-            try? cleanupTemporaryFiles(m.id)
+            try? cleanupTemporaryFiles(m)
         }
+        try? writeIndex(manifests)
+        return manifests
     }
 }
 public struct DuplicateRecording: Error { public let id: String }

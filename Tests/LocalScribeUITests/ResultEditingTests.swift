@@ -110,10 +110,10 @@ final class ResultEditingModelTests: XCTestCase {
         model.beginResultEditing(); XCTAssertNil(model.resultEdit)
         model.busy = false
         var current = manifest; current.pendingRunId = UUID().uuidString
-        try repo.save(current); model.reload(); try await waitForResult(model)
+        try repo.save(current); _ = try await model.archive?.refresh(current.id); await model.reload(); try await waitForResult(model)
         XCTAssertFalse(model.canEditResult)
         current = manifest; current.activeRunId = nil; current.pendingRunId = manifest.activeRunId
-        current.state = .interrupted; try repo.save(current); model.reload(); try await waitForResult(model)
+        current.state = .interrupted; try repo.save(current); _ = try await model.archive?.refresh(current.id); await model.reload(); try await waitForResult(model)
         XCTAssertFalse(model.canEditResult)
     }
 
@@ -126,13 +126,13 @@ final class ResultEditingModelTests: XCTestCase {
         model.resultEdit?.transcript.segments[0].text = "Несохранённый черновик"
         var imported = Manifest(sourceType: "import", title: "Новый импорт", filename: "new.wav")
         imported.sourceComplete = true; try repo.save(imported)
-        model.completeImport(imported)
+        await model.completeImport(imported)
         XCTAssertEqual(model.selection, manifest.id)
         XCTAssertEqual(model.resultEdit?.transcript.segments[0].text, "Несохранённый черновик")
         XCTAssertEqual(model.transcript?.segments[0].text, "Фраза")
         XCTAssertEqual(try repo.load(imported.id).state, .waitingForModels)
         model.resultEdit = nil
-        model.completeImport(imported)
+        await model.completeImport(imported)
         XCTAssertEqual(model.selection, imported.id)
     }
 
@@ -163,15 +163,15 @@ final class ResultEditingModelTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: run.appendingPathComponent("work/audio.wav").path))
         XCTAssertFalse(FileManager.default.fileExists(atPath: run.appendingPathComponent("asr-transcript.json").path))
         for stage in [Stage.preparingAudio, .transcribing, .diarizing] {
-            XCTAssertTrue(try model.stageComplete(stage, run: run, manifest: saved, info: info))
+            XCTAssertTrue(try AppModel.stageComplete(stage, run: run, manifest: saved, info: info))
         }
-        XCTAssertFalse(try model.stageComplete(.summarizing, run: run, manifest: saved, info: info))
+        XCTAssertFalse(try AppModel.stageComplete(.summarizing, run: run, manifest: saved, info: info))
         var bad = try Disk.read(Transcript.self, at: run.appendingPathComponent("transcript.json"))
         bad.fingerprint = "wrong"; try Disk.write(bad, to: run.appendingPathComponent("transcript.json"))
-        XCTAssertFalse(try model.stageComplete(.transcribing, run: run, manifest: saved, info: info))
+        XCTAssertFalse(try AppModel.stageComplete(.transcribing, run: run, manifest: saved, info: info))
         bad.fingerprint = info.fingerprint; bad.segments[0].endMs = saved.durationMs + 1
         try Disk.write(bad, to: run.appendingPathComponent("transcript.json"))
-        XCTAssertThrowsError(try model.stageComplete(.transcribing, run: run, manifest: saved, info: info))
+        XCTAssertThrowsError(try AppModel.stageComplete(.transcribing, run: run, manifest: saved, info: info))
     }
 
     func testStaleEditorCannotOverwriteNewActiveRun() async throws {

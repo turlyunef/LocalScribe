@@ -43,7 +43,7 @@ struct ContentView: View {
                 if let selected = model.selected {
                     HStack(alignment: .firstTextBaseline) {
                         RecordingTitleView(title: selected.displayTitle) { title in
-                            model.renameRecording(selected.id, title: title)
+                            Task { await model.renameRecording(selected.id, title: title) }
                         }
                         .id(selected.id)
                         Spacer()
@@ -58,8 +58,8 @@ struct ContentView: View {
                             canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
                             canDelete: !model.finalizingRecording && model.recordingID != selected.id,
                             showAudio: model.showAudio,
-                            repeatAnalysis: { model.repeatAnalysis(summaryOnly: false) },
-                            recreateSummary: { model.repeatAnalysis(summaryOnly: true, language: $0) },
+                            repeatAnalysis: { Task { await model.repeatAnalysis(summaryOnly: false) } },
+                            recreateSummary: { language in Task { await model.repeatAnalysis(summaryOnly: true, language: language) } },
                             deleteRecording: { Task { await model.deleteSelected() } }
                         )
                     }.padding(20)

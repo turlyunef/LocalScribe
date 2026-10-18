@@ -2,7 +2,7 @@ import XCTest
 import AVFoundation
 @testable import LocalScribeCore
 final class CoreTests: XCTestCase {
-    func testRenamePersistsTitleAndUpdatesArchiveIndex() throws {
+    func testRenamePersistsTitleAndUpdatesArchiveIndex() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let repo = try RecordingRepository(root: root)
@@ -10,7 +10,9 @@ final class CoreTests: XCTestCase {
         let second = Manifest(sourceType: "import", title: "Другая встреча", filename: "meeting.wav")
         try repo.save(first); try repo.save(second)
 
-        try repo.rename(first.id, title: "  Планирование — команда 🎙️ \n")
+        let coordinator = RecordingCoordinator(repository: repo)
+        try await coordinator.rename(first.id, title: "  Планирование — команда 🎙️ \n")
+        await coordinator.flushIndex()
 
         let reopened = try RecordingRepository(root: root)
         XCTAssertEqual(try reopened.load(first.id).displayTitle, "Планирование — команда 🎙️")

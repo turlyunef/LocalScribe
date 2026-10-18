@@ -4,14 +4,15 @@ import XCTest
 @testable import LocalScribeCore
 
 final class CleanupTests: XCTestCase {
-    func testDeletionRemovesStaleRecordingMetadataFromIndex() throws {
+    func testDeletionRemovesStaleRecordingMetadataFromIndex() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let repo = try RecordingRepository(root: root)
         let removed = Manifest(sourceType: "import", title: "Remove metadata", filename: "a.wav")
         let retained = Manifest(sourceType: "import", title: "Keep", filename: "b.wav")
         try repo.save(removed); try repo.save(retained)
-        try repo.delete(removed)
+        let coordinator = RecordingCoordinator(repository: repo)
+        try await coordinator.delete(removed)
         let index = try Disk.read([Manifest].self, at: root.appendingPathComponent("index.json"))
         XCTAssertEqual(index.map(\.id), [retained.id])
     }

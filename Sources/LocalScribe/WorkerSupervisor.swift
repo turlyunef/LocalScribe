@@ -16,7 +16,7 @@ import Darwin
         _ = setpriority(PRIO_DARWIN_PROCESS, UInt32(process.processIdentifier), recordingActive ? PRIO_DARWIN_BG : 0)
     }
     var running: Bool { process?.isRunning == true }
-    func run(_ command: WorkerCommand, executable: URL, diagnosticURL: URL? = nil, onEvent: @escaping @MainActor (WorkerEvent) -> Void) async throws {
+    func run(_ command: WorkerCommand, executable: URL, diagnosticURL: URL? = nil, onEvent: @escaping @MainActor (WorkerEvent) async -> Void) async throws {
         guard process == nil else { throw ScribeError.message("Другой этап ещё работает") }
         let p = Process(), input = Pipe(), output = Pipe(), errors = Pipe()
         defer {

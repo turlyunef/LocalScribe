@@ -95,7 +95,7 @@ final class ResultPresentationTests: XCTestCase {
         model.tab = .transcript
         XCTAssertEqual(model.resultPresentation.renderCount, baseline + 1)
         XCTAssertTrue(model.resultPresentation.result.text.contains("Реплика 10799"))
-        model.renameRecording(manifest.id, title: "Новое имя 🧑🏽‍💻 [проект]")
+        await model.renameRecording(manifest.id, title: "Новое имя 🧑🏽‍💻 [проект]")
         try await ready(model.resultPresentation)
         XCTAssertTrue(model.resultPresentation.result.text.hasPrefix("Новое имя 🧑🏽‍💻 [проект]"))
         assertLinks(model.resultPresentation.result)
