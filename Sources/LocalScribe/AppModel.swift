@@ -453,7 +453,11 @@ import LocalScribeCore
     }
     func showAudio() { guard let selected, let repository else { return }; NSWorkspace.shared.activateFileViewerSelecting([repository.folder(selected.id).appendingPathComponent(selected.originalRelativePath)]) }
     func rendered(_ part: ExportPart, markdown: Bool = false) -> String {
-        guard let selected else { return "" }; return ExportService.render(manifest: selected, transcript: transcript, summary: summary, part: part, markdown: markdown)
+        renderedResult(part, markdown: markdown).text
+    }
+    func renderedResult(_ part: ExportPart, markdown: Bool = false) -> RenderedExport {
+        guard let selected else { return RenderedExport() }
+        return ExportService.renderResult(manifest: selected, transcript: transcript, summary: summary, part: part, markdown: markdown)
     }
     func copy(_ part: ExportPart) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(rendered(part), forType: .string); status = "Скопировано" }
     func export(markdown: Bool, part: ExportPart) {

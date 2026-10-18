@@ -122,4 +122,20 @@ final class RecordingActionsTests: XCTestCase {
             }
         }
     }
+
+    func testActionTooltipsAreAvailableWhenEnabledAndDisabled() async throws {
+        let expected = [
+            "Показать исходный аудиофайл записи в Finder",
+            "Заново распознать речь, определить участников и создать итоги",
+            "Создать новые итоги по готовой расшифровке на выбранном языке",
+            "Удалить запись"
+        ]
+        for enabled in [true, false] {
+            try withActions(canRepeatAnalysis: enabled, canRecreateSummary: enabled, canDelete: enabled) { hosting in
+                for (identifier, help) in zip(identifiers, expected) {
+                    XCTAssertEqual(try action(identifier, in: hosting).accessibilityHelp?(), help)
+                }
+            }
+        }
+    }
 }
