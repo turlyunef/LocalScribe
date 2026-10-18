@@ -10,7 +10,7 @@ struct RecordingActionsView: View {
     var deleteRecording: () -> Void
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             Button("Показать аудио в Finder", action: showAudio)
                 .help("Показать исходный аудиофайл записи в Finder")
                 .accessibilityIdentifier("recording.showAudio")

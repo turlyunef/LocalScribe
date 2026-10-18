@@ -49,6 +49,9 @@ codesign --force --sign "$IDENTITY" "$APP/Contents/Helpers/mlx.metallib"
 codesign --force --sign "$IDENTITY" --options runtime --entitlements Resources/ModelService.entitlements "$SERVICE"
 codesign --force --sign "$IDENTITY" --options runtime --entitlements Resources/App.entitlements "$APP"
 codesign --verify --deep --strict --verbose=2 "$APP"
+# Updating files inside an existing bundle does not update its directory date.
+# Finder and Launch Services use that date to detect changed app metadata/icons.
+touch "$APP"
 mkdir -p build
 cp Package.resolved build/Package.resolved
 { xcodebuild -version; swift --version; sw_vers; shasum -a 256 Package.resolved Resources/models.lock.json; } > build/build-environment.txt

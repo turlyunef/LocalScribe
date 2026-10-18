@@ -16,7 +16,7 @@ import LocalScribeCore
     @Published var summary: Summary?
     @Published var resultEdit: ResultEditDraft?
     @Published private(set) var savingResult = false
-    @Published var error: String?
+    let errorHandler = AppErrorHandler()
     @Published var status = ""
     @Published var modelsStatus = "Проверяем модели…"
     @Published var modelsReady = false
@@ -77,7 +77,7 @@ import LocalScribeCore
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
         catalog = try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json"))
         do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; recordings = repo.list() }
-        catch { repository = nil; self.error = "Не удалось открыть локальное хранилище: \(error.localizedDescription)" }
+        catch { repository = nil; errorHandler.report(message: "Не удалось открыть локальное хранилище: \(error.localizedDescription)") }
         if !startServices { preparingStorage = false; return }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.critical], queue: .main)
         memorySource?.setEventHandler { [weak self] in Task { @MainActor in await self?.pause(reason: "Обработка приостановлена из-за нехватки памяти. Можно продолжить с контрольной точки.") } }
@@ -95,7 +95,7 @@ import LocalScribeCore
                     recordings = try await Task.detached(priority: .utility) {
                         try repository.recover(); return repository.list()
                     }.value
-                } catch { self.error = "Не удалось восстановить локальное хранилище: \(error.localizedDescription)" }
+                } catch { errorHandler.report(message: "Не удалось восстановить локальное хранилище: \(error.localizedDescription)") }
             }
             preparingStorage = false
             if status == "Восстанавливаем локальное хранилище…" { status = "" }
@@ -111,7 +111,7 @@ import LocalScribeCore
             try repository.rename(id, title: title)
             reload()
         } catch {
-            self.error = error.localizedDescription
+            errorHandler.report(error)
         }
     }
     func loadResult() {
@@ -159,7 +159,7 @@ import LocalScribeCore
         do {
             modelLibrary = try await Task.detached(priority: .utility) { try ModelLibrary.load(at: repository.models, catalog: catalog) }.value
             updateModelsStatus()
-        } catch { modelsReady = false; modelsStatus = "Не удалось проверить модели"; self.error = error.localizedDescription }
+        } catch { modelsReady = false; modelsStatus = "Не удалось проверить модели"; errorHandler.report(error) }
     }
     private func updateModelsStatus() {
         modelsReady = activeCatalog != nil
@@ -207,7 +207,7 @@ import LocalScribeCore
             } catch {
                 updateModelsStatus()
                 if Task.isCancelled { modelsStatus += " · загрузка отменена" }
-                else { self.error = error.localizedDescription; modelsStatus += " · загрузка не завершена" }
+                else { errorHandler.report(error); modelsStatus += " · загрузка не завершена" }
             }
         }
     }
@@ -246,7 +246,7 @@ import LocalScribeCore
                 try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
             } catch {
                 updateModelsStatus()
-                if !Task.isCancelled { self.error = error.localizedDescription }
+                if !Task.isCancelled { errorHandler.report(error) }
                 else { modelsStatus += " · импорт отменён" }
             }
         }
@@ -257,7 +257,7 @@ import LocalScribeCore
         do {
             var updated = modelLibrary; try updated.select(profile, catalog: catalog)
             try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
-        } catch { self.error = error.localizedDescription }
+        } catch { errorHandler.report(error) }
     }
     func removeModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels else { return }
@@ -266,7 +266,7 @@ import LocalScribeCore
         alert.addButton(withTitle: "Удалить модель"); alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do { try modelLibrary.remove(profile, at: repository.models, catalog: catalog); updateModelsStatus() }
-        catch { self.error = error.localizedDescription; Task { await verifyModels() } }
+        catch { errorHandler.report(error); Task { await verifyModels() } }
     }
     func chooseImport() {
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
@@ -294,9 +294,9 @@ import LocalScribeCore
                         do {
                             let manifest = try await Task.detached { let info = try Media.probe(url, tools: tools); return try repository.importFile(url, info: info, allowDuplicate: true) }.value
                             completeImport(manifest)
-                        } catch { self.error = error.localizedDescription }
+                        } catch { errorHandler.report(error) }
                     }
-                } catch { self.error = error.localizedDescription }
+                } catch { errorHandler.report(error) }
             }
         }
     }
@@ -310,7 +310,7 @@ import LocalScribeCore
         startingRecording = true
         defer { startingRecording = false }
         await pause(reason: "Обработка приостановлена на время записи. Нажмите «Продолжить», когда будет удобно.")
-        guard await AVCaptureDevice.requestAccess(for: .audio) else { error = "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS."; return }
+        guard await AVCaptureDevice.requestAccess(for: .audio) else { errorHandler.report(message: "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS."); return }
         guard !shuttingDown else { return }
         var m = Manifest(sourceType: "microphone", title: "Запись \(Date().formatted(date: .abbreviated, time: .shortened))", filename: "original.caf")
         m.state = .recording
@@ -325,7 +325,7 @@ import LocalScribeCore
             }
             try capture.start(folder: repository.folder(m.id).appendingPathComponent("capture"))
             recorder = capture; recordingID = m.id; selection = m.id; elapsed = 0; reload()
-        } catch { m.state = .failed; m.lastError = error.localizedDescription; try? repository.save(m); self.error = error.localizedDescription; reload() }
+        } catch { m.state = .failed; m.lastError = error.localizedDescription; try? repository.save(m); errorHandler.report(error); reload() }
     }
     func stopRecording(warning: String? = nil) async {
         guard let id = recordingID, let repository, !stopping else { return }
@@ -336,12 +336,15 @@ import LocalScribeCore
             if frames == 0 {
                 var m = try repository.load(id); m.state = .failed
                 m.lastError = warning ?? "Микрофон ещё не передал звук. Начните новую запись."
-                try repository.save(m); recordingID = nil; self.error = m.lastError; reload(); return
+                try repository.save(m); recordingID = nil; errorHandler.report(message: m.lastError); reload(); return
             }
-            if let warning { var m = try repository.load(id); m.warnings.append(warning); try repository.save(m) }
+            if let warning {
+                var m = try repository.load(id); m.warnings.append(warning); try repository.save(m)
+                errorHandler.report(message: warning)
+            }
             try await finalizeCapture(id); recordingID = nil; enqueue(id)
         } catch {
-            recordingID = nil; recorder = nil; self.error = error.localizedDescription
+            recordingID = nil; recorder = nil; errorHandler.report(error)
             if var m = try? repository.load(id) {
                 let parts = (try? FileManager.default.contentsOfDirectory(at:repository.folder(id).appendingPathComponent("capture"),includingPropertiesForKeys:nil)) ?? []
                 let recoverable = parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }
@@ -377,18 +380,18 @@ import LocalScribeCore
                     let parts = (try? FileManager.default.contentsOfDirectory(at:repository.folder(id).appendingPathComponent("capture"),includingPropertiesForKeys:nil)) ?? []
                     guard parts.contains(where:{ $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }) else {
                         m.state = .failed; m.lastError = "В этой записи нет сохранённого звука. Начните новую запись."
-                        try repository.save(m); reload(); self.error = m.lastError; return
+                        try repository.save(m); reload(); errorHandler.report(message: m.lastError); return
                     }
                     try await finalizeCapture(id)
                 }
                 enqueue(id)
-            } catch { self.error = error.localizedDescription }
+            } catch { errorHandler.report(error) }
         }
     }
     func repeatAnalysis(summaryOnly: Bool, language: String? = nil) {
         guard let repository, let catalog = activeCatalog, var m = selected, canManageModels, modelsReady else { return }
         do { _ = try repository.beginRun(&m, catalog: catalog, summaryLanguage: language, summaryOnly: summaryOnly); reload(); enqueue(m.id) }
-        catch { self.error = error.localizedDescription }
+        catch { errorHandler.report(error) }
     }
     func enqueue(_ id: String) {
         guard let repository, var m = try? repository.load(id), m.sourceComplete, id != activeID else { return }
@@ -401,7 +404,7 @@ import LocalScribeCore
         guard !preparingStorage, !busy, !installing, !verifyingModels, !startingRecording, !shuttingDown, recordingID == nil, modelsReady, let repository, let catalog = activeCatalog else { return }
         busy = true; defer { busy = false; activeID = nil; status = ""; reload() }
         while !queued.isEmpty && recordingID == nil && modelsReady {
-            if ProcessInfo.processInfo.thermalState == .critical { error = "Mac перегрет. Обработку можно продолжить после охлаждения."; break }
+            if ProcessInfo.processInfo.thermalState == .critical { errorHandler.report(message: "Mac перегрет. Обработку можно продолжить после охлаждения."); break }
             let id = queued.removeFirst(); activeID = id
             do {
                 var m = try repository.load(id)
@@ -430,8 +433,16 @@ import LocalScribeCore
                 m.activeRunId = info.id; m.pendingRunId = nil; m.state = m.warnings.isEmpty ? .completed : .completedWithWarnings; m.lastError = nil
                 try repository.save(m)
             } catch {
-                if var m = try? repository.load(id) {
-                    if m.state.processing { m.state = activeID == id ? .failed : .interrupted; m.lastError = (error as? ScribeError)?.localizedDescription ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."; try? repository.save(m) }
+                let message = (error as? ScribeError)?.localizedDescription
+                    ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."
+                // Cancel/pause clears activeID before stopping the worker.
+                if activeID == id, !(error is CancellationError) {
+                    errorHandler.report(message: message)
+                }
+                if var m = try? repository.load(id), m.state.processing {
+                    m.state = activeID == id ? .failed : .interrupted
+                    m.lastError = message
+                    try? repository.save(m)
                 }
             }
             await Task.detached(priority: .utility) { try? repository.cleanupTemporaryFiles(id) }.value
@@ -491,7 +502,7 @@ import LocalScribeCore
         alert.addButton(withTitle: "Удалить запись"); alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         await cancelSelected()
-        do { try repository.delete(selected); selection = nil; reload() } catch { self.error = error.localizedDescription }
+        do { try repository.delete(selected); selection = nil; reload() } catch { errorHandler.report(error) }
     }
     func showAudio() { guard let selected, let repository else { return }; NSWorkspace.shared.activateFileViewerSelecting([repository.folder(selected.id).appendingPathComponent(selected.originalRelativePath)]) }
     func rendered(_ part: ExportPart, markdown: Bool = false) -> String {
@@ -506,7 +517,7 @@ import LocalScribeCore
         guard let selected else { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = selected.displayTitle.replacingOccurrences(of: "/", with: "-") + (markdown ? ".md" : ".txt")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try rendered(part, markdown: markdown).write(to: url, atomically: true, encoding: .utf8) } catch { self.error = "Не удалось экспортировать: \(error.localizedDescription)" }
+        do { try rendered(part, markdown: markdown).write(to: url, atomically: true, encoding: .utf8) } catch { errorHandler.report(message: "Не удалось экспортировать: \(error.localizedDescription)") }
     }
     func shutdown() async {
         shuttingDown = true

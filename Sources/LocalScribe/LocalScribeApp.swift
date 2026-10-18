@@ -23,7 +23,7 @@ import LocalScribeCore
     var body: some Scene {
         WindowGroup {
             ContentView(model: model).frame(minWidth: 850, minHeight: 560)
-                .onAppear { delegate.model = model }
+                .onAppear { delegate.model = model; model.errorHandler.startPresenting() }
         }.defaultSize(width: 1100, height: 740)
         Settings { ModelSettings(model: model).frame(width: 760, height: 760) }
         MenuBarExtra("LocalScribe", systemImage: model.recordingID == nil ? "waveform" : "record.circle.fill") {

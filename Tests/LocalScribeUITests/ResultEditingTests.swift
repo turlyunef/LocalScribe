@@ -174,7 +174,7 @@ final class ResultEditorViewTests: XCTestCase {
         return children + children.flatMap { descendants($0) }
     }
 
-    func testTypingAndSaveUseDraftAndCancelInvokesOnlyCancel() async throws {
+    func testFailedSaveReportsThroughHandlerAndRetryKeepsDraft() async throws {
         _ = NSApplication.shared
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
         let initial = ResultEditDraft(recordingID: UUID().uuidString, runID: UUID().uuidString,
@@ -182,8 +182,14 @@ final class ResultEditorViewTests: XCTestCase {
                 segments: [Segment(id: "s", startMs: 0, endMs: 1000, text: "Исходная фраза", language: "ru")]), summary: nil)
         var saved: ResultEditDraft?
         var cancelled = false
+        var attempts = 0
+        let errors = AppErrorHandler()
         let hosting = NSHostingView(rootView: ResultEditorView(initial: initial,
-            save: { saved = $0 }, cancel: { cancelled = true }))
+            save: {
+                attempts += 1
+                if attempts == 1 { throw ScribeError.message("Не удалось сохранить правки") }
+                saved = $0
+            }, cancel: { cancelled = true }, reportError: errors.report))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 800, height: 700),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = hosting; window.orderFront(nil)
@@ -205,6 +211,15 @@ final class ResultEditorViewTests: XCTestCase {
         editor.selectAll(nil); editor.insertText("Исправлено 😀", replacementRange: editor.selectedRange())
         // Let SwiftUI propagate the NSTextView binding to the Save button.
         try await Task.sleep(for: .milliseconds(100))
+        XCTAssertTrue(try button("edit.save").isAccessibilityEnabled?() ?? false)
+        XCTAssertTrue(try button("edit.save").accessibilityPerformPress?() ?? false)
+        let errorDeadline = Date().addingTimeInterval(3)
+        while errors.messages.isEmpty && Date() < errorDeadline { try await Task.sleep(for: .milliseconds(10)) }
+        XCTAssertEqual(errors.messages, ["Не удалось сохранить правки"])
+        XCTAssertNil(saved)
+        XCTAssertFalse(cancelled)
+        XCTAssertEqual(editor.string, "Исправлено 😀")
+        errors.dismissCurrent()
         XCTAssertTrue(try button("edit.save").isAccessibilityEnabled?() ?? false)
         XCTAssertTrue(try button("edit.save").accessibilityPerformPress?() ?? false)
         let saveDeadline = Date().addingTimeInterval(3)

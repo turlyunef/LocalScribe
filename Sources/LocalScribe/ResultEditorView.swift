@@ -8,11 +8,12 @@ struct ResultEditorView: View {
     @State private var draft: ResultEditDraft
     @State private var part: ExportPart
     @State private var saving = false
-    @State private var error: String?
+    let reportError: (Error) -> Void
 
     init(initial: ResultEditDraft, initialPart: ExportPart = .transcript,
-         save: @escaping (ResultEditDraft) async throws -> Void, cancel: @escaping () -> Void) {
-        self.initial = initial; self.save = save; self.cancel = cancel
+         save: @escaping (ResultEditDraft) async throws -> Void, cancel: @escaping () -> Void,
+         reportError: @escaping (Error) -> Void) {
+        self.initial = initial; self.save = save; self.cancel = cancel; self.reportError = reportError
         _draft = State(initialValue: initial)
         _part = State(initialValue: initialPart == .summary ? .summary : .transcript)
     }
@@ -52,7 +53,6 @@ struct ResultEditorView: View {
                     }
                 }.padding(4)
             }
-            if let error { Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled) }
             HStack {
                 Text("Правки сохраняются новой версией результата.").font(.caption).foregroundStyle(.secondary)
                 Spacer()
@@ -60,11 +60,11 @@ struct ResultEditorView: View {
                 Button("Отмена", action: cancel).keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("edit.cancel")
                 Button("Сохранить") {
-                    saving = true; error = nil
+                    saving = true
                     Task {
                         defer { saving = false }
                         do { try await save(draft) }
-                        catch { self.error = error.localizedDescription }
+                        catch { reportError(error) }
                     }
                 }
                 .keyboardShortcut("s", modifiers: .command).buttonStyle(.borderedProminent)

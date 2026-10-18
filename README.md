@@ -21,6 +21,8 @@ bash scripts/build_app.sh
 
 Исходник иконки — [Resources/AppIcon.png](Resources/AppIcon.png) с прозрачным полем вокруг значка. `bash scripts/build_icon.sh` создаёт [Resources/AppIcon.icns](Resources/AppIcon.icns) со всеми размерами macOS от 16 до 1024 px через системные `sips` и `iconutil`. Упаковщик запускает эту команду автоматически и включает иконку в `.app`.
 
+После упаковки обновляется дата самого `.app`, чтобы macOS обнаружила изменения иконки при замене прежней сборки. Если установленное приложение продолжает показывать стандартный значок, выполните `bash scripts/refresh_app_icon.sh /Applications/LocalScribe.app`: команда проверяет подпись и обновляет регистрацию только LocalScribe в Launch Services.
+
 ## Первый запуск
 
 1. Откройте локально собранный `dist/LocalScribe.app`. Можно переместить его в Applications.

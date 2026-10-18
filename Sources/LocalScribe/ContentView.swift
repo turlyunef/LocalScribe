@@ -39,14 +39,11 @@ struct ContentView: View {
                     Divider()
                 }
                 if let selected = model.selected {
-                    HStack {
-                        VStack(alignment: .leading, spacing: 4) {
-                            RecordingTitleView(title: selected.displayTitle) { title in
-                                model.renameRecording(selected.id, title: title)
-                            }
-                            .id(selected.id)
-                            Text(selected.state.title).font(.subheadline).foregroundStyle(.secondary)
+                    HStack(alignment: .firstTextBaseline) {
+                        RecordingTitleView(title: selected.displayTitle) { title in
+                            model.renameRecording(selected.id, title: title)
                         }
+                        .id(selected.id)
                         Spacer()
                         if selected.state.processing {
                             ProgressView().controlSize(.small)
@@ -64,10 +61,25 @@ struct ContentView: View {
                             deleteRecording: { Task { await model.deleteSelected() } }
                         )
                     }.padding(20)
-                    if let error = selected.lastError { Text(error).font(.callout).foregroundStyle(.orange).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal,20).padding(.bottom,10) }
+                    if let message = selected.lastError {
+                        Button("Показать сообщение об обработке", systemImage: "exclamationmark.bubble") {
+                            model.errorHandler.report(message: message)
+                        }
+                        .help("Открыть подробности последней ошибки или прерывания в отдельном окне")
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.bottom, 10)
+                    }
                     if selected.activeRunId != nil && selected.pendingRunId != nil { Text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.").font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
                     HStack {
-                        Picker("Результат", selection: $model.tab) { Text("Расшифровка").tag(ExportPart.transcript); Text("Итоги").tag(ExportPart.summary) }.pickerStyle(.segmented).frame(width: 270)
+                        Picker(selection: $model.tab) {
+                            Text("Расшифровка").tag(ExportPart.transcript)
+                            Text("Итоги").tag(ExportPart.summary)
+                        } label: {
+                            Text("Результат")
+                                .lineLimit(1)
+                                .fixedSize(horizontal: true, vertical: false)
+                        }
+                        .pickerStyle(.segmented)
+                        .frame(width: 270)
                         if model.tab == .summary, let summary = model.summary { Text(summary.language == "ru" ? "Русский" : "English").font(.caption).foregroundStyle(.secondary) }
                         Spacer()
                         Button("Редактировать", systemImage: "pencil", action: model.beginResultEditing)
@@ -118,10 +130,9 @@ struct ContentView: View {
         }
         .sheet(item: $model.resultEdit) { draft in
             ResultEditorView(initial: draft, initialPart: model.tab, save: model.saveResultEdits,
-                             cancel: { model.resultEdit = nil })
+                             cancel: { model.resultEdit = nil }, reportError: model.errorHandler.report)
         }
         .disabled(model.preparingStorage || model.shuttingDown)
-        .alert("LocalScribe", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) { Button("OK") { model.error = nil }.help("Закрыть сообщение об ошибке") } message: { Text(model.error ?? "") }
     }
 }
 
@@ -275,9 +286,6 @@ struct ModelSettings: View {
                 Text("LocalScribe " + (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0.1") + " · локальная предварительная сборка").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
-        .alert("LocalScribe", isPresented: Binding(get: { model.error != nil }, set: { if !$0 { model.error = nil } })) {
-            Button("OK") { model.error = nil }.help("Закрыть сообщение об ошибке")
-        } message: { Text(model.error ?? "") }
     }
     private func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
     @ViewBuilder private func installedRow(_ profile: ModelProfile) -> some View {
