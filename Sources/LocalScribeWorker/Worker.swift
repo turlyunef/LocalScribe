@@ -6,7 +6,11 @@ import LocalScribeSpeakerKit
 
 @main struct Worker {
     static func terminateGroup(_ code: Int32) -> Never {
-        signal(SIGTERM,SIG_IGN); kill(-getpid(),SIGTERM); exit(code)
+        signal(SIGTERM, SIG_IGN)
+        kill(-getpid(), SIGTERM)
+        // Inference may still be running on another thread. Skip MLX's global
+        // destructors so they cannot race with active CPU/GPU work on forced exit.
+        _exit(code)
     }
     static func main() async {
         if CommandLine.arguments.contains("--versions") {

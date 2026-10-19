@@ -24,8 +24,14 @@ public enum Disk {
         var hash = SHA256()
         while true {
             if checkCancellation { try Task.checkCancellation() }
-            guard let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty else { break }
-            hash.update(data: bytes)
+            // Foundation's read buffers can outlive each iteration in an async
+            // task's autorelease pool. Drain them here to keep large-file hashes bounded.
+            let hasBytes = try autoreleasepool {
+                guard let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty else { return false }
+                hash.update(data: bytes)
+                return true
+            }
+            if !hasBytes { break }
         }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
