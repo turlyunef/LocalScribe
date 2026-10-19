@@ -123,6 +123,69 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertFalse(descendants(editor).contains { text($0) == "Распознавать во время записи" })
     }
 
+    func testAutomaticSummariesCheckboxIsBelowBackgroundRecognitionAndSavesChoice() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(repository: try RecordingRepository(root: root), startServices: false, userDefaults: defaults)
+        let (hosting, window) = host(ModelSettings(model: model), width: 760, height: 1400)
+        defer { window.close() }
+        try await settle(hosting)
+        let checkbox = try element("settings.automaticSummaries", in: hosting)
+        XCTAssertEqual(checkbox.accessibilityRole?(), .checkBox)
+        XCTAssertEqual(checkbox.accessibilityLabel?(), "Создавать автоматически итоги встречи")
+        let object = try XCTUnwrap(checkbox as? NSObject)
+        let value = object.perform(NSSelectorFromString("accessibilityValue"))?.takeUnretainedValue() as? NSNumber
+        XCTAssertEqual(value?.boolValue, true)
+        let frame = try XCTUnwrap(checkbox.accessibilityFrame?())
+        let background = try XCTUnwrap(element("settings.backgroundRecognition", in: hosting).accessibilityFrame?())
+        let hardware = try XCTUnwrap(element("settings.hardware", in: hosting).accessibilityFrame?())
+        XCTAssertGreaterThan(frame.width, 0)
+        XCTAssertLessThanOrEqual(frame.maxY, background.minY)
+        XCTAssertGreaterThanOrEqual(frame.minY, hardware.maxY)
+        XCTAssertTrue(checkbox.accessibilityPerformPress?() ?? false)
+        try await settle(hosting)
+        XCTAssertFalse(model.automaticSummaries)
+        XCTAssertTrue(model.backgroundRecognition)
+        XCTAssertEqual(defaults.object(forKey: "automaticSummaries") as? Bool, false)
+        await model.shutdown()
+    }
+
+    func testDisabledAutomaticSummariesNoticeOnlyReplacesMissingSummary() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        try repo.save(manifest)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        model.selection = manifest.id
+        let (hosting, window) = host(ContentView(model: model), width: 1200)
+        defer { window.close() }
+        try await settle(hosting)
+        model.automaticSummaries = false; model.tab = .summary
+        try await settle(hosting)
+        XCTAssertEqual(text(try element("result.automaticSummariesDisabled", in: hosting)), "Автоматическое создание итогов отключено")
+        for part in [ExportPart.transcript, .summary] {
+            model.tab = part
+            for enabled in [true, false] {
+                model.automaticSummaries = enabled
+                for summary in [nil, Summary(language: "en")] {
+                    model.summary = summary
+                    try await settle(hosting)
+                    XCTAssertEqual(descendants(hosting).contains {
+                        $0.accessibilityIdentifier?() == "result.automaticSummariesDisabled"
+                    }, part == .summary && !enabled && summary == nil)
+                }
+            }
+        }
+        await model.shutdown()
+    }
+
     func testSidebarStatusIsCenteredAboveModelsForBothStates() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

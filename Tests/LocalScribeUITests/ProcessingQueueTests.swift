@@ -39,7 +39,7 @@ final class ProcessingQueueTests: XCTestCase {
         if c['stage'] == 'preparingAudio':
             (run / 'transcript.json').write_text(json.dumps(dict(schemaVersion=1, fingerprint=fingerprint, diarized=True, segments=[])))
         elif c['stage'] == 'summarizing':
-            (run / 'summary.json').write_text(json.dumps(dict(schemaVersion=1, language='ru', overview=[], decisions=[], tasks=[], openQuestions=[])))
+            (run / 'summary.json').write_text(json.dumps(dict(schemaVersion=1, language=info.get('summaryLanguage') or 'ru', overview=[], decisions=[], tasks=[], openQuestions=[])))
         emit('completed')
         """#
         try script.write(to: executable, atomically: true, encoding: .utf8)
@@ -58,7 +58,10 @@ final class ProcessingQueueTests: XCTestCase {
             profiles[index].files = [ModelFile(path: "weights.bin", localPath: "weights.bin", size: Int64(data.count), sha256: try Disk.hash(file))]
         }
         let catalog = ModelCatalog(models: profiles)
-        let model = AppModel(repository: repo, startServices: false, workerExecutable: executable, catalog: catalog)
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let model = AppModel(repository: repo, startServices: false, workerExecutable: executable, userDefaults: defaults, catalog: catalog)
         for profile in profiles { model.modelLibrary.installed(profile, catalog: catalog) }
         try model.modelLibrary.select(profiles[0], catalog: catalog)
         model.modelsReady = true
@@ -120,6 +123,119 @@ final class ProcessingQueueTests: XCTestCase {
         let b = try XCTUnwrap(model.catalog?.models.first { $0.id == "asr-b" })
         model.selectModel(b)
         XCTAssertEqual(model.modelLibrary.selectedByRole["asr"], b.id)
+    }
+    func testDisabledAutomaticSummariesPublishesTranscriptAndAllowsExplicitSummaryInEitherLanguage() async throws {
+        for language in ["ru", "en"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (repo, model, release) = try fixture(root)
+            model.automaticSummaries = false
+            var m = try completed(repo, title: "Transcript only")
+            m.sourceType = "import"; try repo.save(m)
+            try Data().write(to: release)
+            await model.completeImport(m)
+            try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed && model.transcript != nil }
+
+            let completed = try repo.load(m.id)
+            let firstRun = try XCTUnwrap(completed.activeRunId)
+            let transcriptURL = repo.run(m.id, firstRun).appendingPathComponent("transcript.json")
+            let transcriptBytes = try Data(contentsOf: transcriptURL)
+            XCTAssertNil(completed.pendingRunId)
+            XCTAssertEqual(try events(root).map(\.stage), [.preparingAudio])
+            XCTAssertTrue(model.transcript?.diarized == true)
+            XCTAssertNil(model.summary)
+            XCTAssertNil(try repo.results(completed).1)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: repo.run(m.id, firstRun).appendingPathComponent("summary.json").path))
+
+            await model.repeatAnalysis(summaryOnly: true, language: language)
+            try await waitUntil { !model.busy && model.summary?.language == language }
+            let recreated = try repo.load(m.id)
+            XCTAssertEqual(recreated.state, .completed)
+            XCTAssertNotEqual(recreated.activeRunId, firstRun)
+            XCTAssertNil(recreated.pendingRunId)
+            XCTAssertFalse(model.automaticSummaries)
+            XCTAssertEqual(try events(root).map(\.stage), [.preparingAudio, .summarizing])
+            XCTAssertEqual(try Data(contentsOf: transcriptURL), transcriptBytes)
+            let info = try Disk.read(RunInfo.self, at: repo.run(m.id, XCTUnwrap(recreated.activeRunId)).appendingPathComponent("run.json"))
+            XCTAssertEqual(info.transcriptSourceRunID, firstRun)
+            XCTAssertEqual(info.summaryLanguage, language)
+            XCTAssertEqual(try repo.results(recreated).1?.language, language)
+            await model.shutdown()
+        }
+    }
+    func testDisablingAutomaticSummariesDuringProcessingSkipsUpcomingSummary() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, release) = try fixture(root)
+        let m = try completed(repo, title: "Disable during ASR")
+        XCTAssertTrue(model.automaticSummaries)
+        await model.enqueue(m.id)
+        try await waitUntil { model.status == "fixture-ready-" + m.id }
+        model.automaticSummaries = false
+        try Data().write(to: release)
+        try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed }
+        XCTAssertEqual(try events(root).map(\.stage), [.preparingAudio])
+        XCTAssertNil(try repo.results(repo.load(m.id)).1)
+        await model.shutdown()
+    }
+    func testExplicitSummaryBeforeFirstSuccessfulRunIgnoresDisabledPreference() async throws {
+        for language in [nil, "en"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (repo, model, release) = try fixture(root)
+            let (m, previous, checkpoint) = try await interrupted(repo, model: model)
+            try await waitUntil { model.transcript != nil }
+            XCTAssertNil(model.selected?.activeRunId)
+            model.automaticSummaries = false
+            try Data().write(to: release)
+            await model.repeatAnalysis(summaryOnly: true, language: language)
+            try await waitUntil { !model.busy && model.summary?.language == (language ?? "ru") }
+            XCTAssertEqual(try repo.load(m.id).state, .completed)
+            XCTAssertEqual(try events(root).map(\.stage), [.preparingAudio, .summarizing])
+            XCTAssertEqual(try Data(contentsOf: repo.run(m.id, previous.id).appendingPathComponent("transcript.json")), checkpoint)
+            await model.shutdown()
+        }
+    }
+    func testDisabledAutomaticSummariesAlsoSkipsSummaryAfterLiveCaptureAndOnResume() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        model.automaticSummaries = false
+        let (m, info) = try capture(repo, model: model)
+        model.recordingID = m.id; await model.enqueueCapture(m.id)
+        try await waitUntil { model.status == "fixture-ready-" + m.id }
+        try await model.finalizeCapture(m.id, expectedFrames: 16000)
+        model.recordingID = nil; await model.enqueue(m.id)
+        try finishLiveWorker(root, repo: repo, m: m, info: info)
+        try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed }
+        XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+        XCTAssertEqual(try events(root).map(\.stage), [.transcribing, .preparingAudio])
+        XCTAssertNil(try repo.results(repo.load(m.id)).1)
+
+        let (pending, pendingInfo, checkpoint) = try await interrupted(repo, model: model)
+        model.resume(pending.id)
+        try await waitUntil { !model.busy && (try? repo.load(pending.id).state) == .completed }
+        XCTAssertEqual(try repo.load(pending.id).activeRunId, pendingInfo.id)
+        XCTAssertEqual(try events(root).count, 2)
+        XCTAssertEqual(try Data(contentsOf: repo.run(pending.id, pendingInfo.id).appendingPathComponent("transcript.json")), checkpoint)
+        await model.shutdown()
+    }
+    func testDisablingAutomaticSummariesDoesNotPublishCorruptExistingSummary() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let (m, info, _) = try await interrupted(repo, model: model)
+        let summary = repo.run(m.id, info.id).appendingPathComponent("summary.json")
+        let bytes = Data("broken JSON".utf8)
+        try bytes.write(to: summary)
+        model.automaticSummaries = false
+        model.resume(m.id)
+        try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .failed }
+        XCTAssertNil(try repo.load(m.id).activeRunId)
+        XCTAssertEqual(try repo.load(m.id).pendingRunId, info.id)
+        XCTAssertEqual(try Data(contentsOf: summary), bytes)
+        XCTAssertFalse(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
     }
     func testCancelAndPauseInvalidateEnqueueWhileManifestReadIsPending() async throws {
         for cancel in [true, false] {

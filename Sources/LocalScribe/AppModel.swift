@@ -48,6 +48,9 @@ import LocalScribeCore
     @Published var backgroundRecognition: Bool {
         didSet { userDefaults.set(backgroundRecognition, forKey: "backgroundRecognition") }
     }
+    @Published var automaticSummaries: Bool {
+        didSet { userDefaults.set(automaticSummaries, forKey: "automaticSummaries") }
+    }
     private let userDefaults: UserDefaults
     @Published var recordingID: String?
     @Published var startingRecording = false
@@ -105,6 +108,7 @@ import LocalScribeCore
          importProbe: @escaping @Sendable (URL, URL) throws -> AudioInfo = { try Media.probe($0, tools: $1, cancellable: true) }) {
         self.userDefaults = userDefaults
         backgroundRecognition = userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true
+        automaticSummaries = userDefaults.object(forKey: "automaticSummaries") as? Bool ?? true
         workerOverride = workerExecutable
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
@@ -523,7 +527,8 @@ import LocalScribeCore
         guard let archive, let catalog = activeCatalog, var m = selected, canManageModels, modelsReady else { return }
         finalizingRecording = true
         defer { finalizingRecording = false }
-        do { m = try await archive.beginRun(m.id, catalog: catalog, summaryLanguage: language, summaryOnly: summaryOnly); await reload(); await enqueue(m.id) }
+        let summaryLanguage = summaryOnly ? language ?? transcript?.primaryLanguage ?? "ru" : language
+        do { m = try await archive.beginRun(m.id, catalog: catalog, summaryLanguage: summaryLanguage, summaryOnly: summaryOnly); await reload(); await enqueue(m.id) }
         catch { errorHandler.report(error) }
     }
     func enqueueCapture(_ id: String) async {
@@ -601,6 +606,10 @@ import LocalScribeCore
                 let stages: [Stage] = [.preparingAudio,.transcribing,.diarizing,.summarizing]
                 for stage in stages {
                     if activeID != id { throw CancellationError() }
+                    // Explicit recreation records a requested language, even before
+                    // the first successful run; older summary-only runs pin a source.
+                    // Read the preference at the stage boundary, including after live ASR.
+                    if stage == .summarizing, !automaticSummaries, info.summaryLanguage == nil, info.transcriptSourceRunID == nil { continue }
                     m = try await archive.load(id)
                     if try await archive.perform({ [m, info] _ in try Self.stageComplete(stage, run: run, manifest: m, info: info) }) { continue }
                     guard m.sourceComplete else { throw ScribeError.message("Исходник ещё записывается") }
@@ -616,6 +625,13 @@ import LocalScribeCore
                 }
                 guard activeID == id else { throw CancellationError() }
                 let completedRunID = info.id
+                // A transcript-only result is valid, but any existing final JSON
+                // must still pass validation before replacing the previous result.
+                try await archive.perform { [m] repository in
+                    var completed = m; completed.activeRunId = completedRunID
+                    _ = try repository.results(completed)
+                }
+                guard activeID == id else { throw CancellationError() }
                 try await archive.update(id) { m in
                     m.activeRunId = completedRunID; m.pendingRunId = nil; m.captureProcessing = nil
                     m.state = m.warnings.isEmpty ? .completed : .completedWithWarnings; m.lastError = nil

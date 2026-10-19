@@ -100,7 +100,14 @@ struct ContentView: View {
                         .help("Сохранить расшифровку, итоги или всё вместе в файл")
                     }.padding(.horizontal,20).padding(.bottom,12)
                     Divider()
-                    PresentedResultView(presentation: model.resultPresentation, targetID: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = id; model.tab = .transcript })
+                    if model.tab == .summary, model.summary == nil, !model.automaticSummaries {
+                        Text("Автоматическое создание итогов отключено")
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                            .accessibilityIdentifier("result.automaticSummariesDisabled")
+                    } else {
+                        PresentedResultView(presentation: model.resultPresentation, targetID: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = id; model.tab = .transcript })
+                    }
                 } else {
                     ContentUnavailableView {
                         Label("Разговор останется на вашем Mac", systemImage: "waveform")
@@ -336,6 +343,10 @@ struct ModelSettings: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("settings.backgroundRecognition.modelsRequired")
                 }
+                Toggle("Создавать автоматически итоги встречи", isOn: $model.automaticSummaries)
+                    .toggleStyle(.checkbox)
+                    .accessibilityIdentifier("settings.automaticSummaries")
+                    .help("Отключите, чтобы завершать обработку после расшифровки и определения участников. «Пересоздать итоги» с выбором языка доступно при любом значении настройки.")
             }
             Section("Этот Mac") {
                 Text("\(model.hardware.chip) · \(model.hardware.cpuCores) ядер CPU · \(model.hardware.memoryBytes / 1_073_741_824) ГБ RAM")
