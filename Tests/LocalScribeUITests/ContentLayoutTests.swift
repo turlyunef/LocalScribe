@@ -15,8 +15,17 @@ final class ContentLayoutTests: XCTestCase {
         view.subviews + view.subviews.flatMap { subviews($0) }
     }
 
+    private func findElement(_ id: String, in view: NSView) -> AnyObject? {
+        if let element = descendants(view).first(where: { $0.accessibilityIdentifier?() == id }) { return element }
+        // Native List cells expose their SwiftUI content through their hosting views.
+        for subview in subviews(view) {
+            if let element = descendants(subview).first(where: { $0.accessibilityIdentifier?() == id }) { return element }
+        }
+        return nil
+    }
+
     private func element(_ id: String, in view: NSView) throws -> AnyObject {
-        try XCTUnwrap(descendants(view).first { $0.accessibilityIdentifier?() == id }, id)
+        try XCTUnwrap(findElement(id, in: view), id)
     }
 
     private func text(_ element: AnyObject) -> String? {
@@ -48,6 +57,131 @@ final class ContentLayoutTests: XCTestCase {
         // Let SwiftUI update both its layout and accessibility tree.
         try await Task.sleep(for: .milliseconds(100))
         view.layoutSubtreeIfNeeded()
+    }
+
+    private func assertActionAlignment(_ primaryID: String, in view: NSView) throws {
+        let identifiers = [primaryID, "recording.showAudio", "recording.repeatAnalysis",
+                           "recording.recreateSummary", "recording.delete"]
+        let frames = try identifiers.map { try XCTUnwrap(element($0, in: view).accessibilityFrame?()) }
+        for frame in frames {
+            XCTAssertGreaterThan(frame.width, 0)
+            XCTAssertEqual(frame.midY, frames[0].midY, accuracy: 2)
+        }
+        for (left, right) in zip(frames, frames.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.maxX, right.minX)
+        }
+        XCTAssertEqual(frames[0].height, frames[1].height, accuracy: 2)
+    }
+
+    func testQueueNumbersAndPromotionButtonUpdateWithoutReloadingRecordings() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repo = try RecordingRepository(root: root)
+        let manifests = try (1...3).map { index in
+            var m = Manifest(sourceType: "import", title: "Запись \(index)", filename: "meeting.wav")
+            m.sourceComplete = true
+            try repo.save(m)
+            return m
+        }
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        // Hold the worker before it starts; enqueue still uses the real coordinator.
+        model.installing = true
+        model.modelsReady = true
+        for m in manifests { await model.enqueue(m.id) }
+        let originalRecordingOrder = model.recordings.map(\.id)
+        model.selection = manifests[2].id
+        let (hosting, window) = host(ContentView(model: model), width: 1400)
+        defer { window.close() }
+        try await settle(hosting)
+
+        for (index, m) in manifests.enumerated() {
+            let number = try element("recording.queuePosition.\(m.id)", in: hosting)
+            XCTAssertEqual(text(number), "Место в очереди: \(index + 1)")
+            let numberFrame = try XCTUnwrap(number.accessibilityFrame?())
+            let statusFrame = try XCTUnwrap(element("recording.status.\(m.id)", in: hosting).accessibilityFrame?())
+            XCTAssertLessThan(numberFrame.maxX, statusFrame.minX)
+            XCTAssertEqual(numberFrame.midY, statusFrame.midY, accuracy: 2)
+            XCTAssertEqual(numberFrame.height, statusFrame.height, accuracy: 2)
+        }
+        let button = try element("recording.moveToFront", in: hosting)
+        XCTAssertEqual(text(button), "Поднять на верх очереди")
+        XCTAssertFalse(descendants(hosting).contains { $0.accessibilityIdentifier?() == "recording.resume" })
+        for width: CGFloat in [1100, 1400] {
+            window.setContentSize(NSSize(width: width, height: 700))
+            try await settle(hosting)
+            try assertActionAlignment("recording.moveToFront", in: hosting)
+        }
+        XCTAssertTrue(button.accessibilityPerformPress?() ?? false)
+        try await settle(hosting)
+        for (index, m) in manifests.enumerated() {
+            XCTAssertEqual(text(try element("recording.queuePosition.\(m.id)", in: hosting)),
+                           "Место в очереди: \([2, 3, 1][index])")
+        }
+        XCTAssertEqual(model.queuePosition(for: manifests[2].id), 1)
+        XCTAssertEqual(model.recordings.map(\.id), originalRecordingOrder)
+
+        await model.cancelSelected()
+        try await settle(hosting)
+        XCTAssertNil(findElement("recording.moveToFront", in: hosting))
+        XCTAssertNil(findElement("recording.queuePosition.\(manifests[2].id)", in: hosting))
+        XCTAssertEqual(text(try element("recording.queuePosition.\(manifests[0].id)", in: hosting)), "Место в очереди: 1")
+        XCTAssertEqual(text(try element("recording.queuePosition.\(manifests[1].id)", in: hosting)), "Место в очереди: 2")
+
+        // A microphone waiting for background ASR occupies the same queue.
+        try await model.archive?.update(manifests[1].id) { m in
+            m.state = .recording; m.sourceComplete = false; m.captureProcessing = .queued
+        }
+        await model.reload()
+        model.recordingID = manifests[1].id
+        model.selection = manifests[1].id
+        try await settle(hosting)
+        let captureNumber = try element("recording.queuePosition.\(manifests[1].id)", in: hosting)
+        XCTAssertEqual(text(captureNumber), "Место в очереди: 2")
+        let captureFrame = try XCTUnwrap(captureNumber.accessibilityFrame?())
+        let captureStatus = try XCTUnwrap(element("recording.captureStatus.\(manifests[1].id)", in: hosting).accessibilityFrame?())
+        XCTAssertLessThan(captureFrame.maxX, captureStatus.minX)
+        XCTAssertEqual(captureFrame.midY, captureStatus.midY, accuracy: 2)
+        XCTAssertTrue(try element("recording.moveToFront", in: hosting).accessibilityPerformPress?() ?? false)
+        try await settle(hosting)
+        XCTAssertEqual(text(try element("recording.queuePosition.\(manifests[1].id)", in: hosting)), "Место в очереди: 1")
+        model.recordingID = nil
+        await model.shutdown()
+    }
+
+    func testResumeAlignmentAndPromotionIsHiddenForRecordsOutsideQueue() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repo = try RecordingRepository(root: root)
+        var m = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        m.sourceComplete = true
+        try repo.save(m)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        await model.reload()
+        model.selection = m.id
+        let (hosting, window) = host(ContentView(model: model), width: 1400)
+        defer { window.close() }
+        for state in [JobState.recorded, .interrupted, .failed, .cancelled, .waitingForModels,
+                      .completed, .completedWithWarnings, .transcribing, .recording, .queued] {
+            try await model.archive?.update(m.id) { $0.state = state }
+            await model.reload()
+            try await settle(hosting)
+            XCTAssertNil(findElement("recording.moveToFront", in: hosting), "No queue controls for \(state) without a queued job")
+            XCTAssertNil(findElement("recording.queuePosition.\(m.id)", in: hosting))
+            if [.recorded, .interrupted, .failed, .cancelled, .waitingForModels].contains(state) {
+                for width: CGFloat in [1100, 1400] {
+                    window.setContentSize(NSSize(width: width, height: 700))
+                    try await settle(hosting)
+                    try assertActionAlignment("recording.resume", in: hosting)
+                }
+            }
+        }
+        await model.shutdown()
     }
 
     func testBackgroundRecognitionIsStandardCheckboxAboveHardwareInSettings() async throws {

@@ -124,6 +124,95 @@ final class ProcessingQueueTests: XCTestCase {
         model.selectModel(b)
         XCTAssertEqual(model.modelLibrary.selectedByRole["asr"], b.id)
     }
+    func testPromotingQueuedRecordingUpdatesPositionsAndActualWorkerOrder() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, release) = try fixture(root)
+        let active = try completed(repo, title: "Active")
+        await model.enqueue(active.id)
+        try await waitUntil { model.status == "fixture-ready-" + active.id }
+        let waiting = try (1...3).map { try completed(repo, title: "Waiting \($0)") }
+        for m in waiting { await model.enqueue(m.id) }
+        XCTAssertNil(model.queuePosition(for: active.id))
+        XCTAssertEqual(waiting.map { model.queuePosition(for: $0.id) }, [1, 2, 3])
+        let promoted = waiting[2]
+        let manifestURL = repo.folder(promoted.id).appendingPathComponent("manifest.json")
+        let manifestBytes = try Data(contentsOf: manifestURL)
+
+        model.moveToFrontOfQueue(promoted.id)
+        model.moveToFrontOfQueue(promoted.id) // Repeating the action is a no-op.
+        model.moveToFrontOfQueue(active.id)
+        model.moveToFrontOfQueue(UUID().uuidString)
+        XCTAssertEqual(waiting.map { model.queuePosition(for: $0.id) }, [2, 3, 1])
+        XCTAssertEqual(try Data(contentsOf: manifestURL), manifestBytes)
+        XCTAssertTrue(model.supervisor.running)
+        XCTAssertEqual(try events(root).map(\.jobId), [active.id])
+
+        let appended = try completed(repo, title: "Appended after promotion")
+        await model.enqueue(appended.id)
+        XCTAssertEqual(model.queuePosition(for: appended.id), 4)
+        try Data().write(to: release)
+        try await waitUntil { !model.busy && (try? repo.load(appended.id).state) == .completed }
+        XCTAssertEqual(try events(root).filter { $0.stage == .preparingAudio }.map(\.jobId),
+                       [active.id, promoted.id, waiting[0].id, waiting[1].id, appended.id])
+        for m in [active] + waiting + [appended] { XCTAssertNil(model.queuePosition(for: m.id)) }
+        model.moveToFrontOfQueue(promoted.id)
+        XCTAssertNil(model.queuePosition(for: promoted.id))
+        await model.shutdown()
+    }
+    func testCancellingAndPausingRemoveQueuePositions() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let active = try completed(repo, title: "Active")
+        await model.enqueue(active.id)
+        try await waitUntil { model.status == "fixture-ready-" + active.id }
+        let waiting = try (1...3).map { try completed(repo, title: "Waiting \($0)") }
+        for m in waiting { await model.enqueue(m.id) }
+        model.moveToFrontOfQueue(waiting[2].id)
+        model.selection = waiting[0].id
+        await model.cancelSelected()
+        model.moveToFrontOfQueue(waiting[0].id)
+        XCTAssertEqual(waiting.map { model.queuePosition(for: $0.id) }, [nil, 2, 1])
+        XCTAssertEqual(try repo.load(waiting[0].id).state, .cancelled)
+        XCTAssertTrue(model.supervisor.running)
+
+        await model.pause(reason: "Test pause")
+        for m in [active] + waiting { XCTAssertNil(model.queuePosition(for: m.id)) }
+        XCTAssertFalse(model.busy)
+        XCTAssertFalse(model.supervisor.running)
+        await model.shutdown()
+    }
+    func testPromotedLiveCaptureKeepsPriorityWhenAudioIsSaved() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let active = try completed(repo, title: "Active")
+        await model.enqueue(active.id)
+        try await waitUntil { model.status == "fixture-ready-" + active.id }
+        let waiting = try completed(repo, title: "Waiting")
+        await model.enqueue(waiting.id)
+        let (m, info) = try capture(repo, model: model)
+        model.recordingID = m.id
+        await model.enqueueCapture(m.id)
+        XCTAssertEqual(model.queuePosition(for: m.id), 2)
+        model.moveToFrontOfQueue(m.id)
+        XCTAssertEqual(model.queuePosition(for: m.id), 1)
+        XCTAssertEqual(model.queuePosition(for: waiting.id), 2)
+        XCTAssertEqual(model.recordingID, m.id)
+        XCTAssertEqual(try repo.load(m.id).state, .recording)
+
+        try await model.finalizeCapture(m.id, expectedFrames: 16000)
+        model.recordingID = nil
+        await model.enqueue(m.id)
+        XCTAssertEqual(model.queuePosition(for: m.id), 1)
+        XCTAssertEqual(try repo.load(m.id).pendingRunId, info.id)
+        try finishLiveWorker(root, repo: repo, m: m, info: info)
+        try await waitUntil { !model.busy && (try? repo.load(waiting.id).state) == .completed }
+        XCTAssertEqual(try events(root).map(\.jobId), [active.id, active.id, m.id, m.id, m.id, waiting.id, waiting.id])
+        XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+        await model.shutdown()
+    }
     func testDisabledAutomaticSummariesPublishesTranscriptAndAllowsExplicitSummaryInEitherLanguage() async throws {
         for language in ["ru", "en"] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

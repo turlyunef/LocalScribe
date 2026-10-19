@@ -73,7 +73,7 @@ import LocalScribeCore
     private let installer = ModelInstaller()
     private let downloader = ModelDownloadClient()
     private var recorder: MicrophoneRecorder?
-    private var queued: [String] = []
+    @Published private var queued: [String] = []
     private var enqueuing: [String: UUID] = [:]
     private var queueGeneration: UInt64 = 0
     private var activeID: String?
@@ -530,6 +530,17 @@ import LocalScribeCore
         let summaryLanguage = summaryOnly ? language ?? transcript?.primaryLanguage ?? "ru" : language
         do { m = try await archive.beginRun(m.id, catalog: catalog, summaryLanguage: summaryLanguage, summaryOnly: summaryOnly); await reload(); await enqueue(m.id) }
         catch { errorHandler.report(error) }
+    }
+    func queuePosition(for id: String) -> Int? {
+        queued.firstIndex(of: id).map { $0 + 1 }
+    }
+    func moveToFrontOfQueue(_ id: String) {
+        guard !preparingStorage, !shuttingDown, id != activeID,
+              let index = queued.firstIndex(of: id), index > 0 else { return }
+        var reordered = queued
+        reordered.remove(at: index)
+        reordered.insert(id, at: 0)
+        queued = reordered
     }
     func enqueueCapture(_ id: String) async {
         guard let archive else { return }

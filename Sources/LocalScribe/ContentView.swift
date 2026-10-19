@@ -13,10 +13,23 @@ struct ContentView: View {
                     VStack(alignment: .leading, spacing: 5) {
                         Text(recording.displayTitle).lineLimit(2).fontWeight(.medium)
                         Text("\(timecode(recording.durationMs)) · \(recording.createdAt.formatted(date: .abbreviated, time: .omitted))").font(.caption).foregroundStyle(.secondary)
-                        Label(recording.state.title, systemImage: recording.state == .recording ? "record.circle.fill" : recording.state == .completed ? "checkmark.circle" : "waveform").font(.caption).foregroundStyle(recording.state == .recording ? .red : .secondary)
+                        HStack(spacing: 5) {
+                            if recording.state == .queued, let position = model.queuePosition(for: recording.id) {
+                                queuePositionText(position, recordingID: recording.id)
+                            }
+                            Label(recording.state.title, systemImage: recording.state == .recording ? "record.circle.fill" : recording.state == .completed ? "checkmark.circle" : "waveform")
+                                .foregroundStyle(recording.state == .recording ? .red : .secondary)
+                                .accessibilityIdentifier("recording.status.\(recording.id)")
+                        }.font(.caption)
                         if let processing = recording.captureProcessing, recording.state == .recording {
-                            Label(processing == .transcribing ? "Речь распознаётся в фоне" : processing == .queued ? "Распознавание в очереди" : "Распознавание приостановлено; запись идёт", systemImage: "waveform")
-                                .font(.caption2).foregroundStyle(.secondary)
+                            HStack(spacing: 5) {
+                                if processing == .queued, let position = model.queuePosition(for: recording.id) {
+                                    queuePositionText(position, recordingID: recording.id)
+                                }
+                                Label(processing == .transcribing ? "Речь распознаётся в фоне" : processing == .queued ? "Распознавание в очереди" : "Распознавание приостановлено; запись идёт", systemImage: "waveform")
+                                    .foregroundStyle(.secondary)
+                                    .accessibilityIdentifier("recording.captureStatus.\(recording.id)")
+                            }.font(.caption2)
                         }
                     }.padding(.vertical, 5).tag(recording.id)
                 }
@@ -41,18 +54,28 @@ struct ContentView: View {
                     Divider()
                 }
                 if let selected = model.selected {
-                    HStack(alignment: .firstTextBaseline) {
+                    HStack {
                         RecordingTitleView(title: selected.displayTitle) { title in
                             Task { await model.renameRecording(selected.id, title: title) }
                         }
                         .id(selected.id)
                         Spacer()
-                        if selected.state.processing {
-                            ProgressView().controlSize(.small)
-                            Button("Отменить") { Task { await model.cancelSelected() } }.help("Отменить обработку выбранной записи")
-                        } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
-                            Button("Продолжить") { model.resume(selected.id) }.disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady).help("Продолжить обработку выбранной записи с контрольной точки")
-                        }
+                        Group {
+                            if selected.state.processing {
+                                ProgressView()
+                                Button("Отменить") { Task { await model.cancelSelected() } }.help("Отменить обработку выбранной записи")
+                            } else if model.queuePosition(for: selected.id) != nil,
+                                      selected.state == .queued || selected.state == .recording && selected.captureProcessing == .queued {
+                                Button("Поднять на верх очереди") { model.moveToFrontOfQueue(selected.id) }
+                                    .help("Обработать выбранную запись следующей после текущего задания")
+                                    .accessibilityIdentifier("recording.moveToFront")
+                            } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
+                                Button("Продолжить") { model.resume(selected.id) }
+                                    .disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady)
+                                    .help("Продолжить обработку выбранной записи с контрольной точки")
+                                    .accessibilityIdentifier("recording.resume")
+                            }
+                        }.controlSize(.small)
                         RecordingActionsView(
                             canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
                             canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
@@ -142,6 +165,13 @@ struct ContentView: View {
                              cancel: { model.resultEdit = nil }, reportError: model.errorHandler.report)
         }
         .disabled(model.preparingStorage || model.shuttingDown)
+    }
+
+    private func queuePositionText(_ position: Int, recordingID: String) -> some View {
+        Text("\(position)")
+            .foregroundStyle(.red)
+            .accessibilityLabel("Место в очереди: \(position)")
+            .accessibilityIdentifier("recording.queuePosition.\(recordingID)")
     }
 }
 
