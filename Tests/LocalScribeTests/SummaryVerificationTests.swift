@@ -10,18 +10,44 @@ private func reviewTokens(_ request: SummaryReviewRequest) -> Int {
 
 private actor ReviewMock {
     var requests: [SummaryReviewRequest] = []
+    var validations: [Bool] = []
     let respond: @Sendable (SummaryReviewRequest) -> String?
     init(_ respond: @escaping @Sendable (SummaryReviewRequest) -> String?) { self.respond = respond }
     func complete(_ request: SummaryReviewRequest) -> String? {
         requests.append(request)
         return respond(request)
     }
+    func didValidate(_ valid: Bool) { validations.append(valid) }
     nonisolated var model: SummaryReviewModel {
-        SummaryReviewModel(tokenCount: { reviewTokens($0) }, complete: { await self.complete($0) })
+        SummaryReviewModel(tokenCount: { reviewTokens($0) }, complete: { await self.complete($0) },
+                           didValidate: { _, valid in await self.didValidate(valid) })
     }
 }
 
 final class SummaryVerificationTests: XCTestCase {
+    func testDiagnosticsIdentifyRetriesAndInvalidQuotesWithoutChangingVerdicts() async throws {
+        let source = Segment(id: "s0", startMs: 0, endMs: 1000, text: "I will check the release.", language: "en")
+        let finding = Finding(id: "t", text: "Check the release", evidenceSegmentIds: [source.id])
+        let mock = ReviewMock { request in
+            if request.attempt == 0 {
+                return #"{"supported":true,"sourceSegmentId":"s0","quote":"invented quotation","ownerSupported":false,"deadlineSupported":false}"#
+            }
+            return #"{"supported":true,"sourceSegmentId":"s0","quote":"I will check the release.","ownerSupported":false,"deadlineSupported":false}"#
+        }
+        let result = try await SummaryVerification.checkEvidence(finding, kind: "task", evidence: [source], model: mock.model)
+        XCTAssertEqual(result, finding)
+        let requests = await mock.requests
+        XCTAssertEqual(requests.map(\.attempt), [0, 1])
+        XCTAssertTrue(requests.allSatisfy { $0.purpose == .evidence })
+        let validations = await mock.validations
+        XCTAssertEqual(validations, [false, true])
+        let amendment = ReviewMock { _ in #"{"effect":"none","sourceSegmentId":null,"quote":null}"# }
+        _ = try await SummaryVerification.checkAmendment(candidate: "candidate", original: [source], later: [source], model: amendment.model)
+        let amendmentRequests = await amendment.requests
+        XCTAssertEqual(amendmentRequests.count, 1)
+        XCTAssertEqual(amendmentRequests[0].purpose, .amendment)
+        XCTAssertEqual(amendmentRequests[0].attempt, 0)
+    }
     private func sources(count: Int, length: Int = 2000) -> [Segment] {
         (0..<count).map { index in
             Segment(id: "s\(index)", startMs: index * 1000, endMs: (index + 1) * 1000,

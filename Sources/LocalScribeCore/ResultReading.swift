@@ -105,7 +105,7 @@ extension RecordingRepository {
         // transcript/summary. Generated runs retained ASR or summary checkpoints.
         // Never infer manual provenance from transcriptSourceRunID alone.
         guard let sourceID = info.transcriptSourceRunID, sourceID != info.id,
-              !["asr-transcript.json", "diarization.json", "summary-parts", "llm-audit.json"].contains(where: { exists(path, $0) }),
+              !["asr-transcript.json", "diarization.json", "summary-parts", "llm-audit.json", "metrics-summary.json"].contains(where: { exists(path, $0) }),
               let source = try? Disk.read(RunInfo.self, at: run(manifest.id, sourceID).appendingPathComponent("run.json")),
               source.schemaVersion == 1, source.id == sourceID,
               source.sourceHash == manifest.sha256, source.fingerprint == info.fingerprint else { return false }

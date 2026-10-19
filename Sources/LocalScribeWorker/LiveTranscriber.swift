@@ -10,10 +10,11 @@ struct LiveTranscriber {
     let models: URL
     let tools: URL
     let emit: @Sendable (String, String, String?) -> Void
+    var metrics: ASRMetricsRecorder? = nil
 
     func perform() async throws -> String {
         emit("progress", "Загружаем модель фонового распознавания…", nil)
-        let recognizer = try await SpeechRecognizer(info: info, models: models, warning: { [emit] in emit("warning", $0, nil) })
+        let recognizer = try await SpeechRecognizer(info: info, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
         let folder = recording.appendingPathComponent("capture")
         let work = run.appendingPathComponent("work/live")
         try Disk.directory(work)
@@ -55,6 +56,7 @@ struct LiveTranscriber {
                 let saved = try Disk.read(LiveASRPart.self, at: path)
                 try saved.validate(info: info, index: parts.count, startMs: offset, availableMs: available, fragments: inputs)
                 guard saved.part.endMs == end, saved.readEndMs == readEnd else { throw ScribeError.message("Изменились границы фоновой контрольной точки") }
+                metrics?.checkpoint(milliseconds: end - offset)
                 parts.append(saved.part)
             } else {
                 emit("progress", "Фоновое распознавание · \(timecode(offset))–\(timecode(end))", nil)

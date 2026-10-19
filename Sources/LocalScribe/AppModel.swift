@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 import AVFoundation
-import Metal
 import LocalScribeCore
 
 @MainActor final class AppModel: ObservableObject {
@@ -28,23 +27,23 @@ import LocalScribeCore
     @Published var modelLibrary = ModelLibrary()
     @Published var downloadProgress: ModelInstallProgress?
     @Published var downloadBatch = ""
-    let hardware: ModelHardware = {
-        let gpu = MTLCreateSystemDefaultDevice()
-        var size = 0
-        sysctlbyname("machdep.cpu.brand_string", nil, &size, nil, 0)
-        var name = [CChar](repeating: 0, count: max(1, size))
-        sysctlbyname("machdep.cpu.brand_string", &name, &size, nil, 0)
-        #if arch(arm64)
-        let appleSilicon = true
-        #else
-        let appleSilicon = false
-        #endif
-        return ModelHardware(chip: String(cString: name), memoryBytes: ProcessInfo.processInfo.physicalMemory,
-                             cpuCores: ProcessInfo.processInfo.processorCount, gpuWorkingSetBytes: gpu?.recommendedMaxWorkingSetSize ?? 0,
-                             appleSilicon: appleSilicon, supportsMetal: gpu != nil)
-    }()
+    let hardware: ModelHardware
     var canManageModels: Bool { !savingResult && resultEdit == nil && !preparingStorage && !installing && !verifyingModels && !busy && queued.isEmpty && !resourcesPaused && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
-    var activeCatalog: ModelCatalog? { catalog.flatMap { modelLibrary.activeCatalog(from: $0) } }
+    var activeCatalog: ModelCatalog? {
+        guard let catalog, let selected = modelLibrary.activeCatalog(from: catalog),
+              selected.models.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return nil }
+        return selected
+    }
+    func isRecommended(_ profile: ModelProfile) -> Bool {
+        guard let catalog, let role = profile.purpose else { return false }
+        return hardware.recommendedProfile(for: role, in: catalog)?.id == profile.id
+    }
+    func initialModelID(for role: ModelRole) -> String {
+        guard let catalog else { return "" }
+        if let selected = catalog.models.first(where: { $0.id == modelLibrary.selectedByRole[role.rawValue] && $0.purpose == role }),
+           hardware.compatibility(for: selected).isCompatible { return selected.id }
+        return hardware.recommendedProfile(for: role, in: catalog)?.id ?? ""
+    }
     @Published var backgroundRecognition: Bool {
         didSet { userDefaults.set(backgroundRecognition, forKey: "backgroundRecognition") }
     }
@@ -104,9 +103,10 @@ import LocalScribeCore
     var tools: URL { resources.appendingPathComponent("tools") }
     var worker: URL { workerOverride ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
     init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
-         userDefaults: UserDefaults = .standard, catalog providedCatalog: ModelCatalog? = nil,
+         userDefaults: UserDefaults = .standard, catalog providedCatalog: ModelCatalog? = nil, hardware: ModelHardware = .current,
          importProbe: @escaping @Sendable (URL, URL) throws -> AudioInfo = { try Media.probe($0, tools: $1, cancellable: true) }) {
         self.userDefaults = userDefaults
+        self.hardware = hardware
         backgroundRecognition = userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true
         automaticSummaries = userDefaults.object(forKey: "automaticSummaries") as? Bool ?? true
         workerOverride = workerExecutable
@@ -220,32 +220,42 @@ import LocalScribeCore
         verifyingModels = true; modelsStatus = "Проверяем целостность моделей…"
         defer { verifyingModels = false; if !queued.isEmpty { Task { await processQueue() } } }
         do {
-            modelLibrary = try await Task.detached(priority: .utility) { try ModelLibrary.load(at: repository.models, catalog: catalog) }.value
+            let hardware = hardware
+            modelLibrary = try await Task.detached(priority: .utility) { try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware) }.value
             updateModelsStatus()
         } catch { modelsReady = false; modelsStatus = "Не удалось проверить модели"; errorHandler.report(error) }
     }
     private func updateModelsStatus() {
         modelsReady = activeCatalog != nil
-        modelsStatus = modelsReady ? "Модели готовы · обработка без интернета" : "Загрузите модели для всех этапов обработки"
+        let incompatible = catalog?.models.filter { modelLibrary.isSelected($0) }.compactMap { hardware.warning(for: $0) } ?? []
+        modelsStatus = !incompatible.isEmpty ? "Выберите совместимую модель. " + incompatible.joined(separator: " ") :
+            (modelsReady ? "Модели готовы · обработка без интернета" : "Загрузите модели для всех этапов обработки")
     }
     func profilesToInstall(asrID: String, summaryID: String) -> [ModelProfile] {
-        guard let catalog else { return [] }
-        let asr = catalog.models.first { $0.id == asrID && $0.purpose == .asr }
-        let ids = [asr?.tokenizerID ?? "tokenizer", asrID, "diarization", summaryID]
-        return ids.compactMap { id in catalog.models.first { $0.id == id && !modelLibrary.isInstalled($0) } }
+        guard let catalog,
+              let asr = catalog.models.first(where: { $0.id == asrID && $0.purpose == .asr }),
+              let summary = catalog.models.first(where: { $0.id == summaryID && $0.purpose == .summary }),
+              let tokenizer = catalog.models.first(where: { $0.id == (asr.tokenizerID ?? "tokenizer") && $0.purpose == .tokenizer }),
+              let diarization = catalog.models.first(where: { $0.id == "diarization" && $0.purpose == .diarization }) else { return [] }
+        let profiles = [tokenizer, asr, diarization, summary]
+        guard profiles.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return [] }
+        return profiles.filter { !modelLibrary.isInstalled($0) }
     }
-    private func confirmHardware(_ profiles: [ModelProfile], action: String) -> Bool {
-        let warnings = profiles.compactMap { hardware.warning(for: $0) }
-        guard !warnings.isEmpty else { return true }
-        let alert = NSAlert(); alert.alertStyle = .warning
-        alert.messageText = "Модель может быть слишком тяжёлой для этого Mac"
-        alert.informativeText = hardware.chip + " · \(hardware.cpuCores) ядер CPU\n\n" + warnings.joined(separator: "\n\n")
-        alert.addButton(withTitle: action); alert.addButton(withTitle: "Отмена")
-        return alert.runModal() == .alertFirstButtonReturn
+    private func compatibleProfiles(_ requested: [ModelProfile]) -> [ModelProfile]? {
+        do {
+            guard let catalog else { return nil }
+            return try requested.map { request in
+                guard let profile = catalog.models.first(where: { $0.id == request.id }) else {
+                    throw ScribeError.message("Модель отсутствует в закреплённом каталоге")
+                }
+                try hardware.requireCompatibility(for: profile)
+                return profile
+            }
+        } catch { errorHandler.report(error); return nil }
     }
     func installModels(_ profiles: [ModelProfile]) {
         guard let repository, let catalog, canManageModels, !profiles.isEmpty,
-              confirmHardware(profiles, action: "Всё равно загрузить") else { return }
+              let profiles = compatibleProfiles(profiles) else { return }
         installing = true; downloadProgress = nil
         installTask = Task {
             defer {
@@ -263,7 +273,7 @@ import LocalScribeCore
                     downloader.releaseDownload()
                     // Publish only after every file passed its size and SHA-256 checks.
                     var updated = modelLibrary
-                    updated.installed(profile, catalog: catalog)
+                    updated.installed(profile, catalog: catalog, hardware: hardware)
                     try updated.save(at: repository.models); modelLibrary = updated
                 }
                 updateModelsStatus()
@@ -291,7 +301,7 @@ import LocalScribeCore
     }
     func cancelInstall() { installTask?.cancel(); downloader.cancel() }
     func importModel(_ profile: ModelProfile) {
-        guard let repository, let catalog, canManageModels, confirmHardware([profile], action: "Всё равно импортировать") else { return }
+        guard let repository, let catalog, canManageModels, let profile = compatibleProfiles([profile])?.first else { return }
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.message = "Выберите папку модели \(profile.displayName) из закреплённого каталога"
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -305,7 +315,7 @@ import LocalScribeCore
             }
             do {
                 try await installer.install(profile, root: repository.models, localSource: url) { progress in Task { @MainActor in self.receiveProgress(progress) } }
-                var updated = modelLibrary; updated.installed(profile, catalog: catalog)
+                var updated = modelLibrary; updated.installed(profile, catalog: catalog, hardware: hardware)
                 try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
             } catch {
                 updateModelsStatus()
@@ -316,19 +326,19 @@ import LocalScribeCore
     }
     func selectModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels, !modelLibrary.isSelected(profile),
-              confirmHardware([profile], action: "Всё равно выбрать") else { return }
+              let profile = compatibleProfiles([profile])?.first else { return }
         do {
-            var updated = modelLibrary; try updated.select(profile, catalog: catalog)
+            var updated = modelLibrary; try updated.select(profile, catalog: catalog, hardware: hardware)
             try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
         } catch { errorHandler.report(error) }
     }
     func removeModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels else { return }
         let alert = NSAlert(); alert.messageText = "Удалить \(profile.displayName)?"
-        alert.informativeText = "Будут удалены только файлы этой модели. Аудио, расшифровки и итоги сохранятся. Если модель выбрана, будет использована последняя установленная из оставшихся моделей того же назначения."
+        alert.informativeText = "Будут удалены только файлы этой модели. Аудио, расшифровки и итоги сохранятся. Если модель выбрана, будет использована последняя установленная из оставшихся совместимых моделей того же назначения."
         alert.addButton(withTitle: "Удалить модель"); alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { try modelLibrary.remove(profile, at: repository.models, catalog: catalog); updateModelsStatus() }
+        do { try modelLibrary.remove(profile, at: repository.models, catalog: catalog, hardware: hardware); updateModelsStatus() }
         catch { errorHandler.report(error); Task { await verifyModels() } }
     }
     func chooseImport() {
@@ -579,6 +589,11 @@ import LocalScribeCore
         }
         await reload()
     }
+    private func requireHardware(for role: ModelRole, info: RunInfo, catalog: ModelCatalog) throws {
+        let pinned = try catalog.pinned(to: info)
+        guard let profile = pinned.models.first(where: { $0.purpose == role }) else { throw ScribeError.message("Модель этапа отсутствует") }
+        try hardware.requireCompatibility(for: profile)
+    }
     func processQueue() async {
         guard !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
               let repository, let archive, let catalog else { return }
@@ -603,7 +618,16 @@ import LocalScribeCore
                 let livePending = info.liveCapture == true && info.sourceHash == "capture:" + info.id
                 let run = repository.run(id,info.id)
                 if livePending {
-                    m = try await archive.update(id) { $0.captureProcessing = .transcribing }
+                    try requireHardware(for: .asr, info: info, catalog: catalog)
+                    m = try await archive.update(id) { m in
+                        // A saved capture can start its live ASR after waiting in
+                        // the queue. Its main state now describes processing.
+                        if m.state == .recording {
+                            m.captureProcessing = .transcribing
+                        } else {
+                            m.state = .transcribing; m.captureProcessing = nil
+                        }
+                    }
                     await reload()
                     guard activeID == id else { throw CancellationError() }
                     var command = WorkerCommand(jobId: id, runId: info.id, stage: .transcribing, recordingPath: repository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
@@ -624,6 +648,8 @@ import LocalScribeCore
                     m = try await archive.load(id)
                     if try await archive.perform({ [m, info] _ in try Self.stageComplete(stage, run: run, manifest: m, info: info) }) { continue }
                     guard m.sourceComplete else { throw ScribeError.message("Исходник ещё записывается") }
+                    let role: ModelRole? = stage == .transcribing ? .asr : stage == .diarizing ? .diarization : stage == .summarizing ? .summary : nil
+                    if let role { try requireHardware(for: role, info: info, catalog: catalog) }
                     guard activeID == id else { throw CancellationError() }
                     m = try await archive.update(id) { $0.state = JobState(rawValue: stage.rawValue)! }
                     await reload()

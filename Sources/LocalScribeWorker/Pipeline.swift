@@ -9,11 +9,12 @@ actor Pipeline {
     let emit: @Sendable (String, String, String?) -> Void
     let recording: URL; let run: URL; let models: URL; let tools: URL
     let manifest: Manifest; let info: RunInfo
+    let hardware: ModelHardware
     var wave: URL { run.appendingPathComponent("work/audio.wav") }
     private func modelFolder(_ role: ModelRole) throws -> URL { models.appendingPathComponent(try info.modelID(for: role)) }
-    init(command: WorkerCommand, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
+    init(command: WorkerCommand, hardware: ModelHardware = .current, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
         guard UUID(uuidString: command.jobId) != nil, UUID(uuidString: command.runId) != nil else { throw ScribeError.message("Некорректный идентификатор задания") }
-        self.command = command; self.emit = emit
+        self.command = command; self.emit = emit; self.hardware = hardware
         recording = URL(fileURLWithPath: command.recordingPath); run = recording.appendingPathComponent("runs/\(command.runId)")
         models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: command.toolsPath)
         manifest = try Disk.read(Manifest.self, at: recording.appendingPathComponent("manifest.json"))
@@ -34,8 +35,26 @@ actor Pipeline {
         }
     }
     func perform() async throws -> String {
+        let metrics = command.stage == .transcribing ? ASRMetricsRecorder(run: run, liveCapture: command.liveCapture == true) : nil
+        do {
+            let artifact = try await performStage(asrMetrics: metrics)
+            metrics?.finish(status: "completed")
+            return artifact
+        } catch {
+            metrics?.finish(status: error is CancellationError ? "cancelled" : "failed")
+            throw error
+        }
+    }
+    private func performStage(asrMetrics: ASRMetricsRecorder?) async throws -> String {
+        let role: ModelRole? = command.stage == .transcribing ? .asr : command.stage == .diarizing ? .diarization : command.stage == .summarizing ? .summary : nil
+        if let role {
+            let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
+            let pinned = try catalog.pinned(to: info)
+            guard let profile = pinned.models.first(where: { $0.purpose == role }) else { throw ScribeError.message("Модель этапа отсутствует") }
+            try hardware.requireCompatibility(for: profile)
+        }
         if command.liveCapture == true {
-            return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit).perform()
+            return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit, metrics: asrMetrics).perform()
         }
         switch command.stage {
         case .preparingAudio:
@@ -43,7 +62,7 @@ actor Pipeline {
             if let warning = try Media.prepare(recording.appendingPathComponent(manifest.originalRelativePath), to: wave, tools: tools) { emit("warning", warning, nil) }
             try Disk.write(["fingerprint": info.fingerprint], to: run.appendingPathComponent("prepared.json"))
             return "prepared.json"
-        case .transcribing: return try await transcribe()
+        case .transcribing: return try await transcribe(metrics: asrMetrics)
         case .diarizing: return try await diarize()
         case .summarizing:
             let transcript = try Disk.read(Transcript.self, at: run.appendingPathComponent("transcript.json"))
@@ -54,8 +73,8 @@ actor Pipeline {
             return "summary.json"
         }
     }
-    func transcribe() async throws -> String {
-        let recognizer = try await SpeechRecognizer(info: info, models: models, warning: { [emit] in emit("warning", $0, nil) })
+    func transcribe(metrics: ASRMetricsRecorder? = nil) async throws -> String {
+        let recognizer = try await SpeechRecognizer(info: info, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
         let count = max(1, Int(ceil(Double(manifest.durationMs) / 300_000)))
         var parts: [ASRPart] = []
         for index in 0..<count {
@@ -63,6 +82,7 @@ actor Pipeline {
             let path = run.appendingPathComponent("asr/part-\(index).json")
             if let saved = try? Disk.read(ASRPart.self, at: path), saved.fingerprint == info.fingerprint, saved.index == index, saved.startMs == coreStart, saved.endMs == coreEnd {
                 try Transcript(fingerprint: info.fingerprint, diarized: false, segments: saved.segments).validate(durationMs: manifest.durationMs)
+                metrics?.checkpoint(milliseconds: coreEnd - coreStart)
                 parts.append(saved); continue
             }
             emit("progress", "Распознаём речь — часть \(index + 1) из \(count)", nil)

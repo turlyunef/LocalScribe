@@ -19,8 +19,18 @@ profiles = [
     ('asr-turbo', 'asr', 'Whisper large-v3-turbo', 'argmaxinc/whisperkit-coreml', 'openai_whisper-large-v3-v20240930/', 'MIT', 8, 4, 'tokenizer'),
     ('summary-4b', 'summary', 'Qwen3.5 · 4B · 4-bit', 'mlx-community/Qwen3.5-4B-4bit', '', 'Apache-2.0', 8, 5, None),
     ('summary-27b', 'summary', 'Qwen3.5 · 27B · 4-bit', 'mlx-community/Qwen3.5-27B-4bit', '', 'Apache-2.0', 32, 24, None),
-    ('tokenizer-multilingual', 'tokenizer', 'Токенизатор Whisper small / medium', 'openai/whisper-small', '', 'Apache-2.0', 0, 0, None),
+    ('tokenizer-multilingual', 'tokenizer', 'Токенизатор Whisper base / small / medium', 'openai/whisper-small', '', 'Apache-2.0', 0, 0, None),
+    ('asr-base', 'asr', 'Whisper base', 'argmaxinc/whisperkit-coreml', 'openai_whisper-base/', 'MIT', 8, 1, 'tokenizer-multilingual'),
+    ('summary-2b', 'summary', 'Qwen3.5 · 2B · 4-bit', 'mlx-community/Qwen3.5-2B-4bit', '', 'Apache-2.0', 8, 3, None),
+    ('summary-9b-8bit', 'summary', 'Qwen3.5 · 9B · 8-bit', 'mlx-community/Qwen3.5-9B-8bit', '', 'Apache-2.0', 24, 16, None),
+    ('summary-27b-6bit', 'summary', 'Qwen3.5 · 27B · 6-bit', 'mlx-community/Qwen3.5-27B-6bit', '', 'Apache-2.0', 48, 32, None),
+    ('summary-27b-8bit', 'summary', 'Qwen3.5 · 27B · 8-bit', 'mlx-community/Qwen3.5-27B-8bit', '', 'Apache-2.0', 64, 40, None),
+    ('summary-122b', 'summary', 'Qwen3.5 · 122B-A10B · 4-bit', 'mlx-community/Qwen3.5-122B-A10B-4bit', '', 'Apache-2.0', 128, 88, None),
 ]
+RANKS = {key: rank for keys in (
+    ['asr-base', 'asr-small', 'asr-medium', 'asr-turbo', 'asr'],
+    ['summary-2b', 'summary-4b', 'summary', 'summary-9b-8bit', 'summary-27b', 'summary-27b-6bit', 'summary-27b-8bit', 'summary-122b'],
+) for rank, key in enumerate(keys, 1)}
 
 CACHE = ROOT / '.build/model-metadata'
 CACHE.mkdir(parents=True, exist_ok=True)
@@ -73,6 +83,7 @@ for key, role, name, repo, prefix, license, ram, working, tokenizer in profiles:
         if not files: raise ValueError(f'No files for {key}')
         model = {'id': key, 'repository': repo, 'revision': revision, 'license': license, 'files': files}
     model.update(role=role, name=name, recommendedMemoryGB=ram, workingMemoryGB=working)
+    if key in RANKS: model['recommendationRank'] = RANKS[key]
     if tokenizer: model['tokenizerID'] = tokenizer
     catalog['models'].append(model)
     print(key, model['revision'], len(model['files']), sum(f['size'] for f in model['files']), flush=True)

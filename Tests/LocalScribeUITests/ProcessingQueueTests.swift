@@ -26,7 +26,7 @@ final class ProcessingQueueTests: XCTestCase {
             for number in range(12):
                 emit('warning', 'Test warning ' + str(number))
         emit('progress', 'fixture-ready-' + c['jobId'])
-        while not (root / 'release').exists():
+        while not (root / 'release').exists() or (root / ('hold-' + c['jobId'])).exists():
             time.sleep(0.02)
         if c.get('liveCapture'):
             if (root / 'live-success').exists():
@@ -483,6 +483,8 @@ final class ProcessingQueueTests: XCTestCase {
         model.recordingID = m.id; await model.enqueueCapture(m.id)
         try await waitUntil { model.status == "fixture-ready-" + m.id }
 
+        XCTAssertEqual(model.recordings.first { $0.id == m.id }?.state, .recording)
+        XCTAssertEqual(model.recordings.first { $0.id == m.id }?.captureProcessing, .transcribing)
         // The same stop path used after the microphone closes its last CAF.
         try await model.finalizeCapture(m.id, expectedFrames: 16000)
         model.recordingID = nil; await model.enqueue(m.id)
@@ -518,6 +520,45 @@ final class ProcessingQueueTests: XCTestCase {
         try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed }
         XCTAssertEqual(try events(root).map(\.jobId), [first.id, first.id, m.id, m.id, m.id])
         XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+    }
+    func testSavedQueuedCapturePublishesProcessingStatusWhenItsWorkerStarts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let first = try completed(repo, title: "First")
+        await model.enqueue(first.id)
+        try await waitUntil { model.status == "fixture-ready-" + first.id }
+        let (m, info) = try capture(repo, model: model)
+        model.recordingID = m.id; await model.enqueueCapture(m.id)
+        try await model.finalizeCapture(m.id, expectedFrames: 16000)
+        model.recordingID = nil; await model.enqueue(m.id)
+        let waiting = try completed(repo, title: "Waiting")
+        await model.enqueue(waiting.id)
+        model.selection = m.id
+        XCTAssertEqual(model.selected?.state, .queued)
+        XCTAssertEqual(model.queuePosition(for: m.id), 1)
+        XCTAssertEqual(model.queuePosition(for: waiting.id), 2)
+
+        // Let the old job finish, but hold the live worker after its first progress.
+        let hold = root.appendingPathComponent("hold-" + m.id)
+        try Data().write(to: hold)
+        try finishLiveWorker(root, repo: repo, m: m, info: info)
+        try await waitUntil { model.status == "fixture-ready-" + m.id }
+        XCTAssertTrue(model.supervisor.running)
+        XCTAssertEqual(try repo.load(m.id).state, .transcribing)
+        XCTAssertNil(try repo.load(m.id).captureProcessing)
+        XCTAssertEqual(model.selected?.state, .transcribing)
+        XCTAssertEqual(model.recordings.filter { $0.state.processing }.map(\.id), [m.id])
+        XCTAssertNil(model.queuePosition(for: m.id))
+        XCTAssertEqual(model.queuePosition(for: waiting.id), 1)
+        XCTAssertEqual(model.recordings.first { $0.id == waiting.id }?.state, .queued)
+        await model.resultPresentation.task?.value
+        XCTAssertTrue(model.resultPresentation.result.text.contains("Статус: Распознаём речь"))
+
+        try FileManager.default.removeItem(at: hold)
+        try await waitUntil { !model.busy && (try? repo.load(waiting.id).state) == .completed }
+        XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+        await model.shutdown()
     }
     func testFailedSavedCaptureCanActuallyResumeItsExistingRun() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

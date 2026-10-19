@@ -22,6 +22,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     public var recommendedMemoryGB: Int?
     public var workingMemoryGB: Int?
     public var tokenizerID: String?
+    public var recommendationRank: Int?
     public var purpose: ModelRole? { role ?? ModelRole(rawValue: id) }
     public var displayName: String { name ?? repository.components(separatedBy: "/").last ?? id }
     public var bytes: Int64 { files.reduce(0) { $0 + $1.size } }

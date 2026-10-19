@@ -11,109 +11,182 @@ final class MicrophoneCaptureWriterTests: XCTestCase {
         try body(folder, XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)))
     }
 
-    // Finite Float32 values including signed zero, subnormals and both signs.
-    // Comparing bytes also catches changes which Float equality would hide.
-    private func sample(_ index: Int) -> Float {
-        let bits: [UInt32] = [0, 0x8000_0000, 1, 0x8000_0001, 0x3f00_0000, 0xbf00_0000, 0x3f7f_ffff, 0xbf7f_ffff]
-        if index % 19 < bits.count { return Float(bitPattern: bits[index % 19]) }
-        return Float((index * 73) % 65537 - 32768) / 32768
+    private func sample(_ index: Int, rate: Double) -> Float {
+        // A continuous quiet tone plus changing speech-band content across CAF boundaries.
+        let time = Double(index) / rate
+        return Float(0.0005 * sin(2 * .pi * 300 * time) + 0.2 * sin(2 * .pi * 1700 * time))
     }
+
+    private func sample(_ index: Int) -> Float { sample(index, rate: 48_000) }
 
     private func bytes(_ buffer: AVAudioPCMBuffer) -> Data {
         Data(bytes: buffer.floatChannelData![0], count: Int(buffer.frameLength) * MemoryLayout<Float>.size)
     }
 
-    private func append(_ lengths: [Int], to writer: MicrophoneCaptureWriter, format: AVAudioFormat) throws -> Data {
+    private func append(frames: Int, chunk: Int, to writer: MicrophoneCaptureWriter, format: AVAudioFormat,
+                        signal: ((Int) -> Float)? = nil) throws {
         let input = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: MicrophoneCaptureWriter.bufferCapacity))
-        var expected = Data(), position = 0
-        for length in lengths {
-            input.frameLength = AVAudioFrameCount(length)
-            for index in 0..<length { input.floatChannelData![0][index] = sample(position + index) }
+        var position = 0
+        while position < frames {
+            let count = min(chunk, frames - position)
+            input.frameLength = AVAudioFrameCount(count)
+            for i in 0..<count { input.floatChannelData![0][i] = signal?(position + i) ?? sample(position + i, rate: format.sampleRate) }
             let before = bytes(input)
             try writer.append(input)
-            XCTAssertEqual(input.frameLength, AVAudioFrameCount(length))
-            XCTAssertEqual(bytes(input), before, "The pooled buffer must stay unchanged until it is returned")
-            expected.append(before); position += length
-            // Simulate the callback reusing the very same pooled buffer.
+            XCTAssertEqual(input.frameLength, AVAudioFrameCount(count))
+            XCTAssertEqual(bytes(input), before)
             input.floatChannelData![0].update(repeating: 0.875, count: Int(input.frameCapacity))
+            position += count
         }
-        return expected
     }
 
-    private func verify(_ folder: URL, lengths: [Int64], expected: Data) throws {
-        let files = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).sorted { $0.lastPathComponent < $1.lastPathComponent }
-        XCTAssertEqual(files.map(\.lastPathComponent), lengths.indices.map { String(format: "part-%06d.caf", $0) })
-        var actual = Data()
-        for (file, length) in zip(files, lengths) {
-            let reader = try AVAudioFile(forReading: file)
-            XCTAssertEqual(reader.length, length)
-            XCTAssertEqual(reader.processingFormat.channelCount, 1)
-            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: reader.processingFormat, frameCapacity: 8192))
-            var frames: Int64 = 0
-            while frames < reader.length {
-                try reader.read(into: buffer)
-                XCTAssertGreaterThan(buffer.frameLength, 0)
-                if buffer.frameLength == 0 { break }
-                actual.append(bytes(buffer)); frames += Int64(buffer.frameLength)
+    private func read(_ url: URL) throws -> [Int16] {
+        let reader = try AVAudioFile(forReading: url, commonFormat: .pcmFormatInt16, interleaved: false)
+        XCTAssertEqual(reader.fileFormat.sampleRate, 16_000)
+        XCTAssertEqual(reader.fileFormat.channelCount, 1)
+        XCTAssertEqual(reader.fileFormat.streamDescription.pointee.mBitsPerChannel, 16)
+        XCTAssertEqual(reader.fileFormat.commonFormat, .pcmFormatInt16)
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: reader.processingFormat, frameCapacity: 8192))
+        var result = [Int16]()
+        while reader.framePosition < reader.length {
+            try reader.read(into: buffer)
+            result += UnsafeBufferPointer(start: buffer.int16ChannelData![0], count: Int(buffer.frameLength))
+        }
+        return result
+    }
+
+    private func parts(_ folder: URL) throws -> [URL] {
+        try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
+            .filter { !$0.lastPathComponent.contains(".partial.") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    func testConversionIsContinuousAcrossPooledBuffersAndCAFBoundaries() throws {
+        for rate in [8000.0, 16_000.0, 44_100.0, 48_000.0, 96_000.0] {
+            try fixture(sampleRate: rate) { folder, format in
+                var results = [[Int16]]()
+                for chunk in [1024, 8192] {
+                    let capture = folder.appendingPathComponent("capture-\(chunk)")
+                    try Disk.directory(capture)
+                    let writer = try MicrophoneCaptureWriter(folder: capture, format: format)
+                    try append(frames: Int(rate * 20.125), chunk: chunk, to: writer, format: format)
+                    try writer.close()
+                    let files = try parts(capture)
+                    XCTAssertEqual(try files.map { try AVAudioFile(forReading: $0).length }, [160_000, 160_000, 2000])
+                    let samples = try files.flatMap { try read($0) }
+                    XCTAssertEqual(writer.totalFrames, 322_000)
+                    XCTAssertEqual(samples.count, 322_000)
+                    results.append(samples)
+                    let original = folder.appendingPathComponent("original-\(chunk).caf")
+                    let (frames, sampleRate) = try Media.assembleCapture(capture, destination: original)
+                    XCTAssertEqual(frames, writer.totalFrames); XCTAssertEqual(sampleRate, 16_000)
+                    XCTAssertEqual(try read(original), samples)
+                    let info = RunInfo(sourceHash: "capture", profileHash: "test")
+                    let seal = CaptureSeal(info: info, sourceHash: try Disk.hash(original), fragments: try CaptureIntegrity.fragments(at: capture))
+                    try CaptureIntegrity.verify(seal, info: info, folder: capture, original: original)
+                    XCTAssertFalse(try FileManager.default.contentsOfDirectory(atPath: capture.path).contains { $0.contains(".partial.") })
+                }
+                XCTAssertTrue(results[0] == results[1], "Conversion must not depend on callback boundaries at \(rate) Hz")
             }
-            XCTAssertEqual(frames, length)
         }
-        XCTAssertEqual(actual, expected)
     }
 
-    func testPooledBufferReuseAndRepeatedSplitsPreservePCM() throws {
+    func testQuietToneHasNoShiftOrDropoutsAtFragmentBoundaries() throws {
         for rate in [44_100.0, 48_000.0] {
             try fixture(sampleRate: rate) { folder, format in
                 let writer = try MicrophoneCaptureWriter(folder: folder, format: format)
-                // 8192 does not divide either 10-second boundary; shorter buffers
-                // and a zero-length buffer exercise changes in frameLength.
-                var lengths = [0, 1, 1024, 8192, 17]
-                lengths += Array(repeating: 8192, count: Int(rate * 21) / 8192)
-                let expected = try append(lengths, to: writer, format: format)
-                let total = Int64(lengths.reduce(0, +)), part = Int64(rate * 10)
-                XCTAssertEqual(writer.totalFrames, total)
+                try append(frames: Int(rate * 20.125), chunk: 1024, to: writer, format: format) {
+                    Float(0.0005 * sin(2 * .pi * 400 * Double($0) / rate))
+                }
                 try writer.close()
-                try verify(folder, lengths: [part, part, total - 2 * part], expected: expected)
+                let samples = try parts(folder).flatMap { try read($0) }
+                for center in [1600, 160_000, 320_000, 321_900] {
+                    for i in (center - 40)..<(center + 40) {
+                        let expected = 0.0005 * sin(2 * .pi * 400 * Double(i) / 16_000)
+                        XCTAssertEqual(Double(samples[i]) / 32768, expected, accuracy: 2.0 / 32768)
+                    }
+                }
             }
         }
     }
 
-    func testExactBoundaryPublishesClosedCAFAndRemovesEmptyTail() throws {
-        try fixture { folder, format in
-            let writer = try MicrophoneCaptureWriter(folder: folder, format: format)
-            let lengths = Array(repeating: 8192, count: 58) + [4864]
-            let expected = try append(lengths, to: writer, format: format)
-            let closed = folder.appendingPathComponent("part-000000.caf")
-            XCTAssertEqual(try AVAudioFile(forReading: closed).length, 480_000)
-            XCTAssertTrue(FileManager.default.fileExists(atPath: folder.appendingPathComponent("part-000001.partial.caf").path))
-            try writer.close()
-            try verify(folder, lengths: [480_000], expected: expected)
-        }
-    }
-
-    func testShortAndEmptyCapture() throws {
-        for lengths in [[], [0], [1], [1024, 17]] as [[Int]] {
+    func testShortEmptyAndRepeatedClose() throws {
+        for frames in [0, 1, 17, 1024, 4800, 480_000] {
             try fixture { folder, format in
                 let writer = try MicrophoneCaptureWriter(folder: folder, format: format)
-                let expected = try append(lengths, to: writer, format: format)
-                try writer.close()
-                let total = Int64(lengths.reduce(0, +))
-                XCTAssertEqual(writer.totalFrames, total)
-                try verify(folder, lengths: total == 0 ? [] : [total], expected: expected)
+                try append(frames: frames, chunk: 1024, to: writer, format: format)
+                try writer.close(); try writer.close()
+                let files = try parts(folder)
+                let actual = try files.flatMap { try read($0) }
+                XCTAssertEqual(actual.count, Int((Double(frames) / 3).rounded()))
+                XCTAssertEqual(writer.totalFrames, Int64(actual.count))
+                XCTAssertEqual(files.count, actual.isEmpty ? 0 : 1)
             }
         }
     }
 
-    func testThreeHourLimitClipsFinalBufferAndIgnoresLaterInput() throws {
-        // CAF accepts a 1 Hz processing rate: this exercises the real three-hour
-        // limit and all 1080 part boundaries without writing gigabytes of PCM.
-        try fixture(sampleRate: 1) { folder, format in
-            let writer = try MicrophoneCaptureWriter(folder: folder, format: format)
-            XCTAssertEqual(writer.totalFrameLimit, 10_800)
-            let expected = try append([8192, 8192, 1], to: writer, format: format)
-            XCTAssertEqual(writer.totalFrames, 10_800)
+    func testDurationLimitClipsInputAndDrainsConverterTail() throws {
+        try fixture(sampleRate: 44_100) { folder, format in
+            let writer = try MicrophoneCaptureWriter(folder: folder, format: format, maximumDuration: 20)
+            XCTAssertEqual(writer.totalFrameLimit, 320_000)
+            try append(frames: 900_000, chunk: 8192, to: writer, format: format)
+            XCTAssertTrue(writer.reachedLimit)
             try writer.close()
-            try verify(folder, lengths: Array(repeating: 10, count: 1080), expected: Data(expected.prefix(10_800 * MemoryLayout<Float>.size)))
+            XCTAssertEqual(writer.totalFrames, 320_000)
+            XCTAssertEqual(try parts(folder).map { try AVAudioFile(forReading: $0).length }, [160_000, 160_000])
+        }
+    }
+
+    func testRecoveryIncludesOnlyClosedPCM16Fragments() throws {
+        try fixture { folder, format in
+            let capture = folder.appendingPathComponent("capture")
+            try Disk.directory(capture)
+            let writer = try MicrophoneCaptureWriter(folder: capture, format: format)
+            try append(frames: 48_000 * 12, chunk: 1024, to: writer, format: format)
+            let original = folder.appendingPathComponent("recovered.caf")
+            let (frames, rate) = try Media.assembleCapture(capture, destination: original)
+            XCTAssertEqual(frames, 160_000); XCTAssertEqual(rate, 16_000)
+            XCTAssertEqual(try read(original), try read(capture.appendingPathComponent("part-000000.caf")))
+            try writer.close()
+        }
+    }
+
+    func testPCM16QuantizationAndClippingAtNative16kHz() throws {
+        try fixture(sampleRate: 16_000) { folder, format in
+            let writer = try MicrophoneCaptureWriter(folder: folder, format: format)
+            let values: [Float] = [-1.5, -1, -0.0005, 0, 0.0005, 0.5, 1, 1.5]
+            try append(frames: 1600, chunk: 17, to: writer, format: format) { values[$0 % values.count] }
+            try writer.close()
+            let samples = try parts(folder).flatMap { try read($0) }
+            XCTAssertEqual(samples.count, 1600)
+            for (index, value) in samples.enumerated() {
+                let expected = min(32767, max(-32768, Double(values[index % values.count]) * 32768))
+                XCTAssertEqual(Double(value), expected, accuracy: 1)
+            }
+        }
+    }
+
+    func testAssemblyPreservesLegacyFloat32SamplesAndFiles() throws {
+        try fixture { folder, format in
+            let capture = folder.appendingPathComponent("capture")
+            try Disk.directory(capture)
+            let part = capture.appendingPathComponent("part-000000.caf")
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024))
+            buffer.frameLength = 1024
+            for i in 0..<1024 { buffer.floatChannelData![0][i] = sample(i) }
+            do {
+                let file = try AVAudioFile(forWriting: part, settings: format.settings)
+                try file.write(from: buffer)
+            }
+            let hash = try Disk.hash(part)
+            let original = folder.appendingPathComponent("original.caf")
+            _ = try Media.assembleCapture(capture, destination: original)
+            let reader = try AVAudioFile(forReading: original)
+            XCTAssertEqual(reader.fileFormat.commonFormat, .pcmFormatFloat32)
+            XCTAssertEqual(reader.fileFormat.sampleRate, 48_000)
+            let actual = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: reader.processingFormat, frameCapacity: 1024))
+            try reader.read(into: actual)
+            XCTAssertEqual(bytes(actual), bytes(buffer))
+            XCTAssertEqual(try Disk.hash(part), hash)
         }
     }
 

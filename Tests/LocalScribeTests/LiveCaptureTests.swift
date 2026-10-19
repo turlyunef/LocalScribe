@@ -3,16 +3,17 @@ import AVFoundation
 @testable import LocalScribeCore
 
 final class LiveCaptureTests: XCTestCase {
-    private func writeAudio(_ url: URL, seconds: Double, value: Float = 0.125) throws {
+    private func writeAudio(_ url: URL, seconds: Double, value: Float = 0.125, pcm16: Bool = false) throws {
         try Disk.directory(url.deletingLastPathComponent())
         let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(seconds * 16000))!
         buffer.frameLength = buffer.frameCapacity
         for i in 0..<Int(buffer.frameLength) { buffer.floatChannelData![0][i] = value }
-        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        let storage = pcm16 ? AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16000, channels: 1, interleaved: false)! : format
+        let file = try AVAudioFile(forWriting: url, settings: storage.settings)
         try file.write(from: buffer)
     }
-    private func fixture(_ root: URL, seconds: Double = 30.125) throws -> (RecordingRepository, Manifest, RunInfo, CaptureSeal) {
+    private func fixture(_ root: URL, seconds: Double = 30.125, pcm16: Bool = false) throws -> (RecordingRepository, Manifest, RunInfo, CaptureSeal) {
         let repo = try RecordingRepository(root: root)
         var m = Manifest(sourceType: "microphone", title: "Live", filename: "original.caf")
         m.state = .recording
@@ -21,7 +22,7 @@ final class LiveCaptureTests: XCTestCase {
         var offset = 0.0, index = 0
         while offset < seconds {
             let length = min(10, seconds - offset)
-            try writeAudio(folder.appendingPathComponent(String(format: "part-%06d.caf", index)), seconds: length)
+            try writeAudio(folder.appendingPathComponent(String(format: "part-%06d.caf", index)), seconds: length, pcm16: pcm16)
             offset += length; index += 1
         }
         // An unfinished writer file must never enter the seal or original.
@@ -64,6 +65,23 @@ final class LiveCaptureTests: XCTestCase {
         XCTAssertEqual(try repo.load(m.id).activeRunId, m.activeRunId)
         XCTAssertEqual(try repo.bindLiveTranscript(m.id, info: info).fingerprint, final.fingerprint)
     }
+    func testPCM16LiveCaptureBindsAndResumesWithoutChangingCheckpoint() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, m, info, seal) = try fixture(root, pcm16: true)
+        let original = repo.folder(m.id).appendingPathComponent(m.originalRelativePath)
+        XCTAssertEqual(try AVAudioFile(forReading: original).fileFormat.commonFormat, .pcmFormatInt16)
+        try writeParts(repo: repo, m: m, info: info, seal: seal)
+        let checkpoint = repo.run(m.id, info.id).appendingPathComponent("live/part-0.json")
+        let hash = try Disk.hash(checkpoint)
+        let final = try repo.bindLiveTranscript(m.id, info: info)
+        XCTAssertEqual(try repo.bindLiveTranscript(m.id, info: info).fingerprint, final.fingerprint)
+        XCTAssertEqual(try Disk.hash(checkpoint), hash)
+        XCTAssertEqual(try Disk.hash(original), seal.sourceHash)
+        let transcript = try Disk.read(Transcript.self, at: repo.run(m.id, info.id).appendingPathComponent("asr-transcript.json"))
+        XCTAssertEqual(transcript.segments.last?.endMs, 30_125)
+    }
+
     func testChangedFragmentOrOriginalCannotBeBound() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

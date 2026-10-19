@@ -35,11 +35,38 @@ private struct SavedAmendment: Decodable {
     let fingerprint: String
     let result: SummaryAmendmentVerdict
 }
+private struct SavedSummary: Decodable {
+    let fingerprint: String
+    let summary: Summary
+}
 
 private enum UnexpectedSummaryCall: Error { case review, amendment }
 
 @MainActor
 final class SummaryEngineTests: XCTestCase {
+    func testModelLoadFailureResetsMetricsWithoutPublishingSummaryOrSDKError() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var oldMetrics = SummaryMetrics()
+        oldMetrics.status = "completed"
+        oldMetrics.update(.tasks) { $0.requests = 99; $0.outputTokens = 9000 }
+        try Disk.write(oldMetrics, to: root.appendingPathComponent("metrics-summary.json"))
+        let modelFolder = root.appendingPathComponent("private-model-path-must-not-be-logged")
+        let engine = SummaryEngine(modelFolder: modelFolder, run: root) { _, _, _ in }
+        do {
+            try await engine.summarize(transcript(), language: "en")
+            XCTFail("Missing local model must fail")
+        } catch { }
+        let metrics = try Disk.read(SummaryMetrics.self, at: root.appendingPathComponent("metrics-summary.json"))
+        XCTAssertEqual(metrics.status, "failed")
+        XCTAssertTrue(metrics.phases.isEmpty, "A new invocation must not accumulate previous requests")
+        XCTAssertGreaterThanOrEqual(metrics.elapsedSeconds, metrics.modelLoadSeconds)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("summary.json").path))
+        let json = try String(contentsOf: root.appendingPathComponent("metrics-summary.json"), encoding: .utf8)
+        XCTAssertFalse(json.contains("private-model-path"))
+        XCTAssertFalse(json.contains("I will check item"))
+    }
+
     private func transcript(count: Int = 8) -> Transcript {
         Transcript(fingerprint: "fixture", diarized: true, segments: (0..<count).map { index in
             Segment(id: "s\(index)", startMs: index * 1000, endMs: (index + 1) * 1000,
@@ -54,10 +81,7 @@ final class SummaryEngineTests: XCTestCase {
 
     private func verify(_ engine: SummaryEngine, _ findings: [Finding], kind: String = "task", source: SummarySourceIndex,
                         model: SummaryReviewModel) async throws -> [Finding] {
-        // Default JSONEncoder key order is unspecified. Fix it only in the fixture
-        // so resumed checkpoint tests exercise matching fingerprints deterministically.
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        return try await engine.verify(findings, kind: kind, source: source, model: model, language: "en", sourceHash: "source-hash", encoder: encoder) { _ in
+        return try await engine.verify(findings, kind: kind, source: source, model: model, language: "en", sourceHash: "source-hash") { _ in
             throw UnexpectedSummaryCall.amendment
         }
     }
@@ -96,6 +120,45 @@ final class SummaryEngineTests: XCTestCase {
         }
         XCTAssertTrue(empty.lines.isEmpty)
         XCTAssertTrue(empty.laterGroups(after: finding).isEmpty)
+    }
+
+    func testDefaultEncoderWritesCanonicalCheckpointsAndReusesThem() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = await SummarySourceIndex(transcript(count: 2)) { _ in 100 }
+        let finding = Finding(id: "t", text: "Check item 0", evidenceSegmentIds: ["s0"])
+        let positive = supported(0)
+        let model = EngineReviewLog { request in
+            request.purpose == .evidence ? positive : #"{"effect":"none","sourceSegmentId":null,"quote":null}"#
+        }
+        let first = SummaryEngine(modelFolder: root, run: root) { _, _, _ in }
+        _ = try await first.verify([finding], kind: "task", source: source, model: model.model, language: "en", sourceHash: "fixture") { _ in
+            throw UnexpectedSummaryCall.amendment
+        }
+        // Repeating within one process can hide process-seeded JSON key ordering.
+        // Require canonical fingerprints as well as reuse within this process.
+        let canonical = JSONEncoder(); canonical.outputFormatting = [.sortedKeys]
+        let encoded = String(decoding: try canonical.encode(finding), as: UTF8.self)
+        let context = source.context(source.evidenceContext(for: finding))
+        let saved = try Disk.read(SavedSummary.self, at: root.appendingPathComponent("summary-parts/verify-task-0.json"))
+        XCTAssertEqual(saved.fingerprint, Disk.fingerprint("fixture" + encoded + context + "task"))
+        let candidate = String(decoding: try canonical.encode([finding]), as: UTF8.self)
+        let later = source.context(source.laterGroups(after: finding)[0])
+        let amendment = try Disk.read(SavedAmendment.self, at: root.appendingPathComponent("summary-parts/amend-task-0-0.json"))
+        XCTAssertEqual(amendment.fingerprint, Disk.fingerprint("fixture" + candidate + context + later + "task"))
+        let paths = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("summary-parts"), includingPropertiesForKeys: nil)
+        let original = try paths.map { try Data(contentsOf: $0) }
+        let noReviews = EngineReviewLog { _ in throw UnexpectedSummaryCall.review }
+        for _ in 0..<5 {
+            let resumed = SummaryEngine(modelFolder: root, run: root) { _, _, _ in }
+            let result = try await resumed.verify([finding], kind: "task", source: source, model: noReviews.model, language: "en", sourceHash: "fixture") { _ in
+                throw UnexpectedSummaryCall.amendment
+            }
+            XCTAssertEqual(result, [finding])
+        }
+        let requests = await noReviews.requests
+        XCTAssertTrue(requests.isEmpty)
+        XCTAssertEqual(try paths.map { try Data(contentsOf: $0) }, original)
     }
 
     func testRejectedFindingSkipsLaterReviewsAndContinuesToNextFinding() async throws {

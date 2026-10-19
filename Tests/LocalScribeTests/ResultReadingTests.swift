@@ -141,8 +141,12 @@ final class ResultReadingTests: XCTestCase {
             edit.manualEdits = false; try Disk.write(edit, to: editURL)
             XCTAssertThrowsError(try repo.results(edited)) // summary-only runs also have a source run
             edit.manualEdits = nil; try Disk.write(edit, to: editURL)
-            try Disk.write(["generated": true], to: editURL.deletingLastPathComponent().appendingPathComponent("llm-audit.json"))
-            XCTAssertThrowsError(try repo.results(edited))
+            for name in ["llm-audit.json", "metrics-summary.json"] {
+                let marker = editURL.deletingLastPathComponent().appendingPathComponent(name)
+                try Disk.write(["generated": true], to: marker)
+                XCTAssertThrowsError(try repo.results(edited))
+                try FileManager.default.removeItem(at: marker)
+            }
         }
     }
 

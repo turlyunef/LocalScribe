@@ -24,7 +24,7 @@ struct CaptureWriterProbe {
             for _ in 0..<bufferCount {
                 try autoreleasepool {
                     try writer.append(input)
-                    if writer.totalFrames - lastMeter >= 4800 {
+                    if writer.totalFrames - lastMeter >= Int64(MicrophoneCaptureWriter.sampleRate / 10) {
                         lastMeter = writer.totalFrames
                         peakSum += MicrophoneCaptureWriter.peak(in: input)
                     }

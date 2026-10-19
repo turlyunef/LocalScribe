@@ -162,16 +162,18 @@ public enum Media {
     }
     public static func assembleCaptureParts(_ parts: [URL], destination: URL) throws -> (Int64, Double) {
         guard let first = parts.first else { throw ScribeError.message("Нет завершённых фрагментов записи") }
-        let format = try AVAudioFile(forReading: first).processingFormat
+        let firstFile = try AVAudioFile(forReading: first)
+        let format = firstFile.processingFormat
+        let fileFormat = firstFile.fileFormat
         let temp = destination.appendingPathExtension("assembling.caf")
         if FileManager.default.fileExists(atPath: temp.path) { try FileManager.default.removeItem(at: temp) }
         defer { try? FileManager.default.removeItem(at: temp) }
         var total: Int64 = 0
         do {
-            let out = try AVAudioFile(forWriting: temp, settings: format.settings)
+            let out = try AVAudioFile(forWriting: temp, settings: fileFormat.settings)
             for part in parts {
                 let input = try AVAudioFile(forReading: part)
-                guard input.processingFormat == format else { throw ScribeError.message("Формат микрофона изменился") }
+                guard input.processingFormat == format, input.fileFormat == fileFormat else { throw ScribeError.message("Формат микрофона изменился") }
                 let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192)!
                 while input.framePosition < input.length { try input.read(into: buffer); try out.write(from: buffer); total += Int64(buffer.frameLength) }
             }

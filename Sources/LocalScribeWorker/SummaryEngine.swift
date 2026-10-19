@@ -18,24 +18,56 @@ actor SummaryEngine {
     let modelFolder: URL; let run: URL
     let emit: @Sendable (String, String, String?) -> Void
     private var reportedOptionalGrounding = false
+    private var metrics: SummaryMetrics?
+    private var metricsStarted = 0.0
     init(modelFolder: URL, run: URL, emit: @escaping @Sendable (String, String, String?) -> Void) { self.modelFolder = modelFolder; self.run = run; self.emit = emit }
 
     func summarize(_ transcript: Transcript, language: String) async throws {
+        metricsStarted = ProcessInfo.processInfo.systemUptime
+        metrics = SummaryMetrics()
+        saveMetrics()
+        do {
+            try await summarizeImpl(transcript, language: language)
+            metrics?.status = "completed"
+            saveMetrics()
+        } catch {
+            metrics?.status = error is CancellationError ? "cancelled" : "failed"
+            saveMetrics()
+            throw error
+        }
+    }
+    private func summarizeImpl(_ transcript: Transcript, language: String) async throws {
         Memory.cacheLimit = 256 * 1024 * 1024
-        Memory.memoryLimit = 8 * 1024 * 1024 * 1024
-        let container = try await LLMModelFactory.shared.loadContainer(configuration: .init(directory: modelFolder))
+        let budget = ModelHardware.current.modelBudgetBytes
+        guard budget > 0, budget <= UInt64(Int.max) else { throw ScribeError.message("Не удалось подтвердить бюджет памяти для итогов") }
+        Memory.memoryLimit = Int(budget)
+        let container: ModelContainer
+        let loadStarted = ProcessInfo.processInfo.systemUptime
+        do {
+            defer {
+                metrics?.modelLoadSeconds = ProcessInfo.processInfo.systemUptime - loadStarted
+                saveMetrics()
+            }
+            container = try await LLMModelFactory.shared.loadContainer(configuration: .init(directory: modelFolder))
+        }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let sourceHash = Disk.fingerprint(String(data: try encoder.encode(transcript), encoding: .utf8)! + language + "prompt-v13")
+        let sourceHash = Disk.fingerprint(String(data: try encoder.encode(transcript), encoding: .utf8)! + language + "prompt-v15-resource-policy1")
+        let sourceStarted = ProcessInfo.processInfo.systemUptime
         let source = await SummarySourceIndex(transcript) { line in
             await container.perform { $0.tokenizer.encode(text: line).count }
         }
         let groups = try SummarySource.groups(transcript.segments, tokenCounts: source.tokenCounts)
+        metrics?.sourcePreparationSeconds = ProcessInfo.processInfo.systemUptime - sourceStarted
+        saveMetrics()
         var extractions: [Summary] = []
         for (index, group) in groups.enumerated() {
             emit("progress", "Составляем итоги — часть \(index+1) из \(groups.count)", nil)
             let path = run.appendingPathComponent("summary-parts/part-\(index).json")
             let fingerprint = Disk.fingerprint(sourceHash + group.map(\.id).joined())
-            if let saved = try? Disk.read(SummaryCheckpoint.self, at: path), saved.fingerprint == fingerprint, (try? saved.summary.validate(against: transcript)) != nil { extractions.append(saved.summary); continue }
+            if let saved = try? Disk.read(SummaryCheckpoint.self, at: path), saved.fingerprint == fingerprint, (try? saved.summary.validate(against: transcript)) != nil {
+                metrics?.groupCheckpointHits += 1
+                extractions.append(saved.summary); continue
+            }
             // Review every section independently: overview coverage does not prove that
             // decisions, tasks or unresolved questions have been extracted from a turn.
             // Keep chronological context in every language pass, including acceptance
@@ -50,7 +82,9 @@ actor SummaryEngine {
                 let partPath = self.run.appendingPathComponent(relativePath)
                 let source = Transcript(fingerprint: transcript.fingerprint, diarized: transcript.diarized, segments: pass.segments)
                 if let saved = try? Disk.read(SummaryCheckpoint.self, at: partPath), saved.fingerprint == partFingerprint,
-                   saved.summary.language == language, (try? saved.summary.validate(against: source)) != nil { return saved.summary }
+                   saved.summary.language == language, (try? saved.summary.validate(against: source)) != nil {
+                    await self.checkpointHit(.extraction(section)); return saved.summary
+                }
                 let value = try await self.generate(container, content: content, language: language, transcript: source,
                     instruction: "\(section.instruction) The focus turns are in \(spokenLanguage). Understand their original language and use the neighbouring source turns to resolve replies and references. Include facts supported by at least one focus segment; cite every turn needed to establish the fact. Write text in the requested output language. Do not infer missing names or deadlines.", section: section)
                 try Disk.write(SummaryCheckpoint(fingerprint: partFingerprint, summary: value), to: partPath)
@@ -81,7 +115,9 @@ actor SummaryEngine {
                 let content = String(data: try encoder.encode(findings), encoding: .utf8)!
                 let fingerprint = Disk.fingerprint(sourceHash + content + "reduce\(level)")
                 let path = run.appendingPathComponent("summary-parts/reduce-\(level)-\(index).json")
-                if let saved = try? Disk.read(SummaryCheckpoint.self, at: path), saved.fingerprint == fingerprint, (try? saved.summary.validate(against: transcript)) != nil { reduced += saved.summary.overview; continue }
+                if let saved = try? Disk.read(SummaryCheckpoint.self, at: path), saved.fingerprint == fingerprint, (try? saved.summary.validate(against: transcript)) != nil {
+                    checkpointHit(.reduction); reduced += saved.summary.overview; continue
+                }
                 let value = try await generate(container, content: content, language: language, transcript: transcript, instruction: "Consolidate these topic findings into at most 5 overview points. Retain the original evidenceSegmentIds. Keep decisions/tasks/openQuestions empty: these are preserved in a separate ledger.")
                 try Disk.write(SummaryCheckpoint(fingerprint: fingerprint, summary: value), to: path); reduced += value.overview
             }
@@ -101,7 +137,9 @@ actor SummaryEngine {
             let path = self.run.appendingPathComponent(relativePath)
             self.emit("progress", "Проверяем ответы на открытые вопросы — вопрос \(pass.questionIndex+1), часть \(pass.partIndex+1)", nil)
             if let saved = try? Disk.read(QuestionCheckpoint.self, at: path), saved.fingerprint == fingerprint,
-               let verdict = try? saved.result.validated(later: pass.later) { return verdict }
+               let verdict = try? saved.result.validated(later: pass.later) {
+                await self.checkpointHit(.questionResolution); return verdict
+            }
             let verdict = try await self.checkQuestionResolution(container, candidate: candidate, original: original, later: pass.later, laterText: later)
             try Disk.write(QuestionCheckpoint(fingerprint: fingerprint, result: verdict), to: path)
             self.emit("checkpoint", "", relativePath)
@@ -128,14 +166,16 @@ actor SummaryEngine {
         return input.filter { seen.insert($0.text.lowercased().trimmingCharacters(in: .whitespacesAndNewlines) + $0.evidenceSegmentIds.sorted().joined()).inserted }
     }
     private func verify(_ findings: [Finding], kind: String, source: SummarySourceIndex, container: ModelContainer, language: String, sourceHash: String) async throws -> [Finding] {
-        try await verify(findings, kind: kind, source: source, model: reviewModel(container), language: language, sourceHash: sourceHash) { content in
+        try await verify(findings, kind: kind, source: source, model: reviewModel(container, kind: kind), language: language, sourceHash: sourceHash) { content in
             try await self.generate(container, content: content, language: language, transcript: source.transcript,
-                instruction: "Apply this explicit amendment to this single verified \(kind). Return exactly one corrected item in \(kind == "task" ? "tasks" : "decisions"), preserving original and amendment evidenceSegmentIds. Other arrays empty. Do not substitute unrelated actions.")
+                instruction: "Apply this explicit amendment to this single verified \(kind). Return exactly one corrected item in \(kind == "task" ? "tasks" : "decisions"), preserving original and amendment evidenceSegmentIds. Other arrays empty. Do not substitute unrelated actions.", phase: .applyAmendment)
         }
     }
     func verify(_ findings: [Finding], kind: String, source: SummarySourceIndex, model: SummaryReviewModel, language: String, sourceHash: String,
-                encoder: JSONEncoder = JSONEncoder(),
                 applyAmendment: @Sendable (String) async throws -> Summary) async throws -> [Finding] {
+        // Both the fingerprint and amendment candidate must be stable across worker
+        // processes. Default JSON key ordering can otherwise repeat valid reviews.
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let transcript = source.transcript
         var verified: [Finding] = []
         for (index, finding) in findings.enumerated() {
@@ -146,7 +186,9 @@ actor SummaryEngine {
             let fingerprint = Disk.fingerprint(sourceHash + encoded + context + kind)
             let path = run.appendingPathComponent("summary-parts/verify-\(kind)-\(index).json")
             let result: Summary
-            if let saved = try? Disk.read(SummaryCheckpoint.self, at: path), saved.fingerprint == fingerprint, (try? saved.summary.validate(against: transcript)) != nil { result = saved.summary }
+            if let saved = try? Disk.read(SummaryCheckpoint.self, at: path), saved.fingerprint == fingerprint, (try? saved.summary.validate(against: transcript)) != nil {
+                checkpointHit(kind == "task" ? .taskEvidence : .decisionEvidence); result = saved.summary
+            }
             else {
                 var checked = Summary(language: language)
                 if let value = try await SummaryVerification.checkEvidence(finding, kind: kind, evidence: evidence, model: model) {
@@ -172,7 +214,9 @@ actor SummaryEngine {
                 let reviewPath = run.appendingPathComponent("summary-parts/amend-\(kind)-\(index)-\(partIndex).json")
                 emit("progress", "Проверяем поздние уточнения — \(partIndex+1) из \(laterGroups.count)", nil)
                 let amendment: SummaryAmendmentVerdict
-                if let saved = try? Disk.read(AmendmentCheckpoint.self,at:reviewPath), saved.fingerprint == reviewFingerprint { amendment = saved.result }
+                if let saved = try? Disk.read(AmendmentCheckpoint.self,at:reviewPath), saved.fingerprint == reviewFingerprint {
+                    checkpointHit(kind == "task" ? .taskAmendment : .decisionAmendment); amendment = saved.result
+                }
                 else {
                     amendment = try await SummaryVerification.checkAmendment(candidate: candidateText, original: reviewEvidence, later: laterGroup, model: model)
                     try Disk.write(AmendmentCheckpoint(fingerprint:reviewFingerprint,result:amendment),to:reviewPath)
@@ -220,27 +264,79 @@ actor SummaryEngine {
         try Disk.write(LLMAudit(inputTokens: inputTokens, reservedOutputTokens: reservedOutputTokens,
             contextLimit: 8192, thinkingDisabled: true, stoppedAtEOS: true), to: path)
     }
-    private func reviewModel(_ container: ModelContainer) -> SummaryReviewModel {
+    private func saveMetrics() {
+        guard metrics != nil else { return }
+        metrics?.elapsedSeconds = ProcessInfo.processInfo.systemUptime - metricsStarted
+        // Diagnostics must not replace a successfully verified result with an error.
+        try? Disk.write(metrics, to: run.appendingPathComponent("metrics-summary.json"))
+    }
+    private func checkpointHit(_ phase: SummaryMetricPhase) {
+        metrics?.update(phase) { $0.checkpointHits += 1 }
+    }
+    private func invalidResponse(_ phase: SummaryMetricPhase) {
+        metrics?.update(phase) { $0.validationFailures += 1 }
+        saveMetrics()
+    }
+    nonisolated private func reviewPhase(_ request: SummaryReviewRequest, kind: String) -> SummaryMetricPhase {
+        switch request.purpose {
+        case .evidence: return kind == "task" ? .taskEvidence : .decisionEvidence
+        case .amendment: return kind == "task" ? .taskAmendment : .decisionAmendment
+        }
+    }
+    private func countReviewTokens(_ container: ModelContainer, request: SummaryReviewRequest) async throws -> Int {
+        let started = ProcessInfo.processInfo.systemUptime
+        defer {
+            metrics?.planningTokenizations += 1
+            metrics?.planningSeconds += ProcessInfo.processInfo.systemUptime - started
+        }
+        let input = try await container.prepare(input: UserInput(chat: [.system(request.system), .user(request.user)], additionalContext: ["enable_thinking": false]))
+        return input.text.tokens.size
+    }
+    private func reviewModel(_ container: ModelContainer, kind: String) -> SummaryReviewModel {
         SummaryReviewModel(tokenCount: { request in
-            let input = try await container.prepare(input: UserInput(chat: [.system(request.system), .user(request.user)], additionalContext: ["enable_thinking": false]))
-            return input.text.tokens.size
+            try await self.countReviewTokens(container, request: request)
         }, complete: { request in
-            try await self.completeReview(container, request: request)
+            try await self.completeReview(container, request: request, phase: self.reviewPhase(request, kind: kind))
+        }, didValidate: { request, valid in
+            if !valid { await self.invalidResponse(self.reviewPhase(request, kind: kind)) }
         })
     }
-    private func completeReview(_ container: ModelContainer, request: SummaryReviewRequest) async throws -> String? {
+    private func completion(_ container: ModelContainer, input: LMInput, outputLimit: Int, phase: SummaryMetricPhase,
+                            attempt: Int, preparedSince: Double) async throws -> (output: String, finished: Bool) {
+        let started = ProcessInfo.processInfo.systemUptime
+        metrics?.update(phase) { $0.start(inputTokens: input.text.tokens.size, outputLimit: outputLimit,
+                                        attempt: attempt, preparationSeconds: started - preparedSince) }
+        saveMetrics()
+        var info: GenerateCompletionInfo?
+        var failed = false
+        defer {
+            let seconds = ProcessInfo.processInfo.systemUptime - started
+            metrics?.update(phase) { $0.finish(seconds: seconds, info: info, failed: failed) }
+            saveMetrics()
+        }
+        do {
+            let stream = try await container.generate(input: input, parameters: GenerateParameters(maxTokens: outputLimit, temperature: 0, prefillStepSize: 256))
+            var output = ""
+            for await value in stream {
+                if case .chunk(let text) = value { output += text }
+                if case .info(let value) = value { info = value }
+            }
+            return (output, info?.stopReason == .stop)
+        } catch {
+            failed = true
+            throw error
+        }
+    }
+    private func completeReview(_ container: ModelContainer, request: SummaryReviewRequest, phase: SummaryMetricPhase) async throws -> String? {
+        let preparedSince = ProcessInfo.processInfo.systemUptime
         let input = try await container.prepare(input: UserInput(chat: [.system(request.system), .user(request.user)], additionalContext: ["enable_thinking": false]))
         let count = input.text.tokens.size
         guard count + request.outputTokens <= SummaryReviewRequest.contextLimit else { throw ScribeError.message("Превышен контекст проверки итогов") }
         let suffix = Array(input.text.tokens.asArray(Int.self).suffix(64))
         guard await container.perform({ $0.tokenizer.decode(tokens: suffix) }).hasSuffix("<think>\n\n</think>\n\n") else { throw ScribeError.message("Не подтверждён отключённый thinking") }
-        let stream = try await container.generate(input: input, parameters: GenerateParameters(maxTokens: request.outputTokens, temperature: 0, prefillStepSize: 256))
-        var output = "", finished = false
-        for await value in stream {
-            if case .chunk(let text) = value { output += text }
-            if case .info(let info) = value { finished = info.stopReason == .stop }
-        }
-        try traceOutput(output, key: request.system + request.user, attempt: 0)
+        let (output, finished) = try await completion(container, input: input, outputLimit: request.outputTokens,
+            phase: phase, attempt: request.attempt, preparedSince: preparedSince)
+        try traceOutput(output, key: request.system + request.user, attempt: request.attempt)
         guard finished else { return nil }
         try recordAudit(inputTokens: count, reservedOutputTokens: request.outputTokens)
         return output
@@ -254,27 +350,28 @@ actor SummaryEngine {
         let content = "OPEN QUESTION:\n\(candidate)\nORIGINAL EVIDENCE AND NEIGHBOURS:\n\(original)\nLATER SOURCE:\n\(laterText)"
         for attempt in 0..<2 {
             let user = content + (attempt == 0 ? "" : "\nReturn only valid JSON. Resolved/uncertain requires an exact original-language quote and ID from LATER SOURCE. Otherwise use none with null quote and sourceSegmentId.")
+            let preparedSince = ProcessInfo.processInfo.systemUptime
             let input = try await container.prepare(input: UserInput(chat: [.system(system), .user(user)], additionalContext: ["enable_thinking": false]))
             let count = input.text.tokens.size
             guard count + 512 <= 8192 else { throw ScribeError.message("Превышен контекст проверки ответа на открытый вопрос") }
             let suffix = Array(input.text.tokens.asArray(Int.self).suffix(64))
             guard await container.perform({ $0.tokenizer.decode(tokens: suffix) }).hasSuffix("<think>\n\n</think>\n\n") else { throw ScribeError.message("Не подтверждён отключённый thinking") }
-            let stream = try await container.generate(input: input, parameters: GenerateParameters(maxTokens: 512, temperature: 0, prefillStepSize: 256))
-            var output = "", finished = false
-            for await value in stream {
-                if case .chunk(let text) = value { output += text }
-                if case .info(let info) = value { finished = info.stopReason == .stop }
-            }
+            let (output, finished) = try await completion(container, input: input, outputLimit: 512,
+                phase: .questionResolution, attempt: attempt, preparedSince: preparedSince)
             try traceOutput(output, key: "question-resolution-" + candidate + content, attempt: attempt)
-            guard finished,
-                  let decoded = try? JSONDecoder().decode(SummaryQuestionVerdict.self, from: Data(output.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
-                  let verdict = try? decoded.validated(later: later) else { continue }
+            guard finished else { continue }
+            guard let decoded = try? JSONDecoder().decode(SummaryQuestionVerdict.self, from: Data(output.trimmingCharacters(in: .whitespacesAndNewlines).utf8)),
+                  let verdict = try? decoded.validated(later: later) else {
+                invalidResponse(.questionResolution); continue
+            }
             try recordAudit(inputTokens: count, reservedOutputTokens: 512)
             return verdict
         }
         throw ScribeError.message("Не удалось проверить поздний ответ на открытый вопрос; результат не объявлен полным")
     }
-    func generate(_ container: ModelContainer, content: String, language: String, transcript: Transcript, instruction: String, section: SummarySection? = nil) async throws -> Summary {
+    func generate(_ container: ModelContainer, content: String, language: String, transcript: Transcript, instruction: String,
+                  section: SummarySection? = nil, phase: SummaryMetricPhase? = nil) async throws -> Summary {
+        let phase = phase ?? .extraction(section)
         let nullable: [String:Any] = ["type":["string","null"]]
         let findingSchema: [String:Any] = ["type":"object","additionalProperties":false,
             "required":["id","text","evidenceSegmentIds","ownerSpeakerId","ownerName","dueText","uncertain"],
@@ -302,22 +399,15 @@ actor SummaryEngine {
         var correction = ""
         for attempt in 0..<2 {
             let user = content + correction
+            let preparedSince = ProcessInfo.processInfo.systemUptime
             let input = try await container.prepare(input: UserInput(chat: [.system(schema), .user(user)], additionalContext: ["enable_thinking": false]))
             guard input.text.tokens.size + 2000 <= 8192 else { throw ScribeError.message("Превышен лимит 8192 токенов. Часть итогов не усечена; требуется уменьшение входа.") }
             let inputTokenCount = input.text.tokens.size
             let suffix = Array(input.text.tokens.asArray(Int.self).suffix(64))
             let renderedSuffix = await container.perform { $0.tokenizer.decode(tokens:suffix) }
             guard renderedSuffix.hasSuffix("<think>\n\n</think>\n\n") else { throw ScribeError.message("Токенизатор не подтвердил отключённый thinking в chat template") }
-            let parameters = GenerateParameters(maxTokens: 2000, temperature: 0, prefillStepSize: 256)
-            let stream = try await container.generate(input: input, parameters: parameters)
-            var output = "", finished = false
-            for await generation in stream {
-                switch generation {
-                case .chunk(let text): output += text
-                case .info(let info): finished = info.stopReason == .stop
-                default: break
-                }
-            }
+            let (output, finished) = try await completion(container, input: input, outputLimit: 2000,
+                phase: phase, attempt: attempt, preparedSince: preparedSince)
             try traceOutput(output, key: content + instruction, attempt: attempt)
             guard finished else { if attempt == 0 { continue }; throw ScribeError.message("Модель достигла лимита ответа. Усечённые итоги не сохранены.") }
             try recordAudit(inputTokens: inputTokenCount, reservedOutputTokens: 2000)
@@ -332,10 +422,15 @@ actor SummaryEngine {
                 guard summary.language == language else { throw ScribeError.message("Неверный язык итогов") }
                 try summary.validate(against: transcript); return summary
             } catch DecodingError.typeMismatch(_, let context) {
+                invalidResponse(phase)
                 correction = "\nValidation failed: wrong JSON type at \(context.codingPath.map(\.stringValue).joined(separator:".")). \(section == nil ? "overview, decisions, tasks and openQuestions must ALL be arrays of finding objects" : "the requested section must be an array of finding objects"). Return corrected JSON."
             } catch let error as ScribeError {
+                invalidResponse(phase)
                 correction = "\nValidation failed: \(error.localizedDescription). Use null for anonymous ownerName and for a deadline not quoted verbatim in cited source. Correct all fields and return valid JSON."
-            } catch { correction = "\nThe previous answer failed JSON schema validation. Return all required fields and correct types, no fences or extra text." }
+            } catch {
+                invalidResponse(phase)
+                correction = "\nThe previous answer failed JSON schema validation. Return all required fields and correct types, no fences or extra text."
+            }
         }
         throw ScribeError.message("Итоги не прошли проверку JSON и оснований после повторной попытки. Расшифровка сохранена.")
     }

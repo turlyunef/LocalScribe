@@ -50,7 +50,7 @@ final class MicrophoneRecorder {
     }
     @MainActor func start(folder: URL) throws {
         try Disk.directory(folder)
-        try Disk.requireSpace(5_000_000_000, at: folder)
+        try Disk.requireSpace(1_200_000_000, at: folder)
         deviceID = try builtInInput()
         let input = engine.inputNode
         guard let unit = input.audioUnit, AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0, &deviceID, UInt32(MemoryLayout<AudioDeviceID>.size)) == noErr else { throw ScribeError.message("Не удалось выбрать встроенный микрофон") }
@@ -144,16 +144,16 @@ final class MicrophoneRecorder {
         guard !requestedStop, let captureWriter else { return }
         try captureWriter.append(input)
         let totalFrames = captureWriter.totalFrames
-        if totalFrames - lastMeter >= Int64(format.sampleRate/10) {
+        if totalFrames - lastMeter >= Int64(MicrophoneCaptureWriter.sampleRate/10) {
             let meterFrames = totalFrames - lastMeter
             lastMeter = totalFrames
             let peak = MicrophoneCaptureWriter.peak(in: input)
             quietFrames = peak < 0.001 ? quietFrames + meterFrames : 0
             let level = min(1, max(0, (20*log10(Double(max(peak, 1e-6))) + 60)/60))
-            let message = peak >= 0.99 ? "Слишком громкий звук" : quietFrames >= Int64(format.sampleRate*15) ? "Звук почти не поступает" : nil
-            onMeter?(level, Double(totalFrames)/format.sampleRate, message)
+            let message = peak >= 0.99 ? "Слишком громкий звук" : quietFrames >= Int64(MicrophoneCaptureWriter.sampleRate*15) ? "Звук почти не поступает" : nil
+            onMeter?(level, Double(totalFrames)/MicrophoneCaptureWriter.sampleRate, message)
         }
-        if totalFrames == captureWriter.totalFrameLimit { requestStop("Достигнут предел 3 часа. Запись сохранена.") }
+        if captureWriter.reachedLimit { requestStop("Достигнут предел 3 часа. Запись сохранена.") }
     }
     private func requestStop(_ reason: String) {
         poolLock.lock(); let first = !stopped; stopped = true; poolLock.unlock()

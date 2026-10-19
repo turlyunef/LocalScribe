@@ -309,11 +309,18 @@ struct ResultTextView: NSViewRepresentable {
 
 struct ModelSettings: View {
     @ObservedObject var model: AppModel
-    @State private var asrID = "asr"
-    @State private var summaryID = "summary"
+    @State private var asrID = ""
+    @State private var summaryID = ""
     @State private var showFiles = false
+    @State private var manuallyChosenRoles: Set<ModelRole> = []
     private var profiles: [ModelProfile] { model.catalog?.models ?? [] }
     private var downloads: [ModelProfile] { model.profilesToInstall(asrID: asrID, summaryID: summaryID) }
+    private var downloadSelectionCompatible: Bool {
+        let selected = profiles.filter { $0.id == asrID || $0.id == summaryID || $0.purpose == .diarization }
+        return selected.contains { $0.id == asrID && $0.purpose == .asr } &&
+            selected.contains { $0.id == summaryID && $0.purpose == .summary } &&
+            selected.allSatisfy { model.hardware.compatibility(for: $0).isCompatible }
+    }
     var body: some View {
         Form {
             Section("Модели для автономной работы") {
@@ -327,16 +334,8 @@ struct ModelSettings: View {
                 }
             }
             Section("Загрузить модели") {
-                Picker("Распознавание", selection: $asrID) {
-                    ForEach(profiles.filter { $0.purpose == .asr }) { profile in
-                        Text("\(profile.displayName) · \(size(profile.bytes))").tag(profile.id)
-                    }
-                }
-                Picker("Итоги", selection: $summaryID) {
-                    ForEach(profiles.filter { $0.purpose == .summary }) { profile in
-                        Text("\(profile.displayName) · \(size(profile.bytes))").tag(profile.id)
-                    }
-                }
+                modelPicker("Распознавание", role: .asr, selection: $asrID)
+                modelPicker("Итоги", role: .summary, selection: $summaryID)
                 ForEach(profiles.filter { $0.id == asrID || $0.id == summaryID }) { profile in
                     if let warning = model.hardware.warning(for: profile) {
                         Label(warning, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
@@ -344,13 +343,14 @@ struct ModelSettings: View {
                 }
                 HStack {
                     Button("Загрузить выбранные") { model.installModels(downloads) }.buttonStyle(.borderedProminent).disabled(downloads.isEmpty).help("Скачать выбранные модели и необходимые зависимости")
-                    Text(downloads.isEmpty ? "Уже установлены" : "Всего: \(size(downloads.reduce(0) { $0 + $1.bytes }))").font(.caption).foregroundStyle(.secondary)
+                    Text(!downloadSelectionCompatible ? "Нет совместимого комплекта" : downloads.isEmpty ? "Уже установлены" : "Всего: \(size(downloads.reduce(0) { $0 + $1.bytes }))").font(.caption).foregroundStyle(.secondary)
                 }
                 Text("Нужные токенизатор и модель участников загрузятся автоматически. После успешной установки новая модель станет выбранной; ранее загруженные останутся на диске.")
                     .font(.caption).foregroundStyle(.secondary)
-                Menu("Импортировать из папки…") {
-                    ForEach(profiles) { profile in Button(profile.displayName) { model.importModel(profile) }.help("Выбрать папку с файлами модели \(profile.displayName)") }
-                }.help("Установить модель из локальной папки")
+                ModelPopup(options: profiles.map(menuOption), selection: .constant(""), prompt: "Импортировать из папки…", imports: true) { id in
+                    if let profile = profiles.first(where: { $0.id == id }) { model.importModel(profile) }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityIdentifier("settings.models.import")
             }.disabled(!model.canManageModels)
             Section("Загруженные модели") {
                 if model.modelLibrary.installedAt.isEmpty { Text("Пока нет загруженных моделей").foregroundStyle(.secondary) }
@@ -381,7 +381,7 @@ struct ModelSettings: View {
             Section("Этот Mac") {
                 Text("\(model.hardware.chip) · \(model.hardware.cpuCores) ядер CPU · \(model.hardware.memoryBytes / 1_073_741_824) ГБ RAM")
                     .accessibilityIdentifier("settings.hardware")
-                Text("Бюджет GPU (Metal): \(String(format: "%.1f ГБ", Double(model.hardware.gpuWorkingSetBytes) / 1_073_741_824)). Модели запускаются по очереди; оценка памяти относится к одному этапу, а не к сумме всех скачанных моделей.")
+                Text("Доступно моделям с резервом системы: \(String(format: "%.1f ГБ", Double(model.hardware.modelBudgetBytes) / 1_073_741_824)). Бюджет GPU (Metal): \(String(format: "%.1f ГБ", Double(model.hardware.gpuWorkingSetBytes) / 1_073_741_824)). Модели запускаются по очереди; оценка памяти относится к одному этапу, а не к сумме всех скачанных моделей.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section("Локальные данные") {
@@ -390,15 +390,45 @@ struct ModelSettings: View {
                 Text("LocalScribe " + (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0.1") + " · локальная предварительная сборка").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
+            .onAppear { initializeSelection() }
+            .onChange(of: profiles.map(\.id)) { _, _ in initializeSelection() }
+            .onChange(of: model.modelLibrary.selectedByRole) { _, _ in initializeSelection() }
+    }
+    private func initializeSelection() {
+        if !manuallyChosenRoles.contains(.asr) { asrID = model.initialModelID(for: .asr) }
+        if !manuallyChosenRoles.contains(.summary) { summaryID = model.initialModelID(for: .summary) }
+    }
+    private func menuOption(_ profile: ModelProfile) -> ModelMenuOption {
+        ModelMenuOption(profile: profile, hardware: model.hardware, recommended: model.isRecommended(profile))
+    }
+    private func modelPicker(_ title: String, role: ModelRole, selection: Binding<String>) -> some View {
+        HStack {
+            Text(title)
+            ModelPopup(options: profiles.filter { $0.purpose == role }.map(menuOption), selection: Binding(
+                get: { selection.wrappedValue },
+                set: { value in manuallyChosenRoles.insert(role); selection.wrappedValue = value }
+            ))
+                .accessibilityLabel(title)
+                .accessibilityIdentifier("settings.models.\(role.rawValue)")
+        }
     }
     private func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
     @ViewBuilder private func installedRow(_ profile: ModelProfile) -> some View {
         HStack(alignment: .top) {
             if profile.purpose == .asr || profile.purpose == .summary {
-                Toggle(profile.displayName, isOn: Binding(get: { model.modelLibrary.isSelected(profile) }, set: { checked in if checked { model.selectModel(profile) } }))
-                    .toggleStyle(.checkbox).disabled(!model.canManageModels).help("Использовать \(profile.displayName) для новых заданий")
+                Toggle(isOn: Binding(get: { model.modelLibrary.isSelected(profile) }, set: { checked in if checked { model.selectModel(profile) } })) {
+                    Text(profile.displayName + (model.isRecommended(profile) ? " · Максимально рекомендуется" : ""))
+                        .fontWeight(model.isRecommended(profile) ? .bold : .regular)
+                }
+                .toggleStyle(.checkbox)
+                .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible)
+                .foregroundStyle(model.hardware.compatibility(for: profile).isCompatible ? Color.primary : Color.secondary)
+                .help(model.hardware.warning(for: profile) ?? "Использовать \(profile.displayName) для новых заданий")
+                .accessibilityIdentifier("settings.models.installed.\(profile.id)")
+                .accessibilityHint(model.hardware.warning(for: profile) ?? "Модель совместима с этим Mac")
             } else {
                 Label(profile.displayName, systemImage: model.modelLibrary.isSelected(profile) ? "checkmark.circle.fill" : "circle")
+                    .foregroundStyle(model.hardware.compatibility(for: profile).isCompatible ? Color.primary : Color.secondary)
             }
             Spacer()
             if model.hardware.warning(for: profile) != nil {
