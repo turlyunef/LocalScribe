@@ -60,7 +60,8 @@ final class ContentLayoutTests: XCTestCase {
     }
 
     private func assertActionAlignment(_ primaryID: String, in view: NSView) throws {
-        let identifiers = [primaryID, "recording.showAudio", "recording.repeatAnalysis",
+        let queueActions = primaryID == "recording.moveToFront" ? [primaryID, "recording.cancel"] : [primaryID]
+        let identifiers = queueActions + ["recording.showAudio", "recording.repeatAnalysis",
                            "recording.recreateSummary", "recording.delete"]
         let frames = try identifiers.map { try XCTUnwrap(element($0, in: view).accessibilityFrame?()) }
         for frame in frames {
@@ -108,6 +109,7 @@ final class ContentLayoutTests: XCTestCase {
         }
         let button = try element("recording.moveToFront", in: hosting)
         XCTAssertEqual(text(button), "Поднять на верх очереди")
+        XCTAssertEqual(text(try element("recording.cancel", in: hosting)), "Отменить")
         XCTAssertFalse(descendants(hosting).contains { $0.accessibilityIdentifier?() == "recording.resume" })
         for width: CGFloat in [1100, 1400] {
             window.setContentSize(NSSize(width: width, height: 700))
@@ -123,9 +125,18 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertEqual(model.queuePosition(for: manifests[2].id), 1)
         XCTAssertEqual(model.recordings.map(\.id), originalRecordingOrder)
 
-        await model.cancelSelected()
+        XCTAssertTrue(try element("recording.cancel", in: hosting).accessibilityPerformPress?() ?? false)
+        // The action belongs to the displayed recording even if selection changes
+        // before its asynchronous task runs.
+        model.selection = manifests[0].id
+        try await settle(hosting)
+        XCTAssertEqual(try repo.load(manifests[2].id).state, .cancelled)
+        XCTAssertEqual(try repo.load(manifests[0].id).state, .queued)
+        model.selection = manifests[2].id
         try await settle(hosting)
         XCTAssertNil(findElement("recording.moveToFront", in: hosting))
+        XCTAssertNil(findElement("recording.cancel", in: hosting))
+        XCTAssertNotNil(findElement("recording.resume", in: hosting))
         XCTAssertNil(findElement("recording.queuePosition.\(manifests[2].id)", in: hosting))
         XCTAssertEqual(text(try element("recording.queuePosition.\(manifests[0].id)", in: hosting)), "Место в очереди: 1")
         XCTAssertEqual(text(try element("recording.queuePosition.\(manifests[1].id)", in: hosting)), "Место в очереди: 2")
@@ -147,6 +158,17 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertTrue(try element("recording.moveToFront", in: hosting).accessibilityPerformPress?() ?? false)
         try await settle(hosting)
         XCTAssertEqual(text(try element("recording.queuePosition.\(manifests[1].id)", in: hosting)), "Место в очереди: 1")
+        // Resource pressure can temporarily mark a queued microphone as interrupted.
+        try await model.archive?.update(manifests[1].id) { $0.captureProcessing = .interrupted }
+        await model.reload()
+        try await settle(hosting)
+        XCTAssertTrue(try element("recording.cancel", in: hosting).accessibilityPerformPress?() ?? false)
+        try await settle(hosting)
+        XCTAssertEqual(model.recordingID, manifests[1].id)
+        XCTAssertEqual(try repo.load(manifests[1].id).state, .recording)
+        XCTAssertEqual(try repo.load(manifests[1].id).captureProcessing, .cancelled)
+        XCTAssertNil(model.queuePosition(for: manifests[1].id))
+        XCTAssertNil(findElement("recording.cancel", in: hosting))
         model.recordingID = nil
         await model.shutdown()
     }
@@ -173,6 +195,7 @@ final class ContentLayoutTests: XCTestCase {
             try await settle(hosting)
             XCTAssertNil(findElement("recording.moveToFront", in: hosting), "No queue controls for \(state) without a queued job")
             XCTAssertNil(findElement("recording.queuePosition.\(m.id)", in: hosting))
+            XCTAssertEqual(findElement("recording.cancel", in: hosting) != nil, state.processing)
             if [.recorded, .interrupted, .failed, .cancelled, .waitingForModels].contains(state) {
                 for width: CGFloat in [1100, 1400] {
                     window.setContentSize(NSSize(width: width, height: 700))

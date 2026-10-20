@@ -124,6 +124,279 @@ final class ProcessingQueueTests: XCTestCase {
         model.selectModel(b)
         XCTAssertEqual(model.modelLibrary.selectedByRole["asr"], b.id)
     }
+    func testPauseInvalidatesResumeBeforeItEnqueues() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let state = Mutex((enabled: false, blocked: false))
+        let (repo, model, _) = try fixture(root, observeIO: { operation in
+            guard operation == .manifestRead else { return }
+            let block = state.withLock { value in
+                guard value.enabled, !value.blocked else { return false }
+                value.blocked = true; return true
+            }
+            if block { gate.wait() }
+        })
+        let (m, info, checkpoint) = try await interrupted(repo, model: model)
+        try await waitUntil { model.transcript != nil }
+        state.withLock { $0.enabled = true }
+        model.resume(m.id)
+        try await waitUntil { state.withLock { $0.blocked } }
+        let release = Task { @MainActor in gate.signal() }
+        await model.pause(reason: "Audit sleep pause")
+        _ = await release.value
+        try await waitUntil { !model.finalizingRecording }
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertFalse(model.supervisor.running, "Pause must invalidate resume work that began before it")
+        XCTAssertNil(model.queuePosition(for: m.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("events.jsonl").path))
+        XCTAssertEqual(try repo.load(m.id).pendingRunId, info.id)
+        XCTAssertEqual(try Data(contentsOf: repo.run(m.id, info.id).appendingPathComponent("transcript.json")), checkpoint)
+        model.resume(m.id)
+        try await waitUntil { model.status == "fixture-ready-" + m.id }
+        try Data().write(to: root.appendingPathComponent("release"))
+        try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed }
+        XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+        await model.shutdown()
+    }
+
+    func testEnqueueDuringPauseIsInterruptedAndCanResume() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let active = try completed(repo, title: "Active before pause")
+        let late = try completed(repo, title: "Arrived during pause")
+        await model.enqueue(active.id)
+        try await waitUntil { model.status == "fixture-ready-" + active.id }
+        let pause = Task { await model.pause(reason: "Audit sleep pause") }
+        try await waitUntil { (try? repo.load(active.id).state) == .interrupted }
+        await model.enqueue(late.id)
+        await pause.value
+        try await Task.sleep(for: .milliseconds(300))
+        let saved = try repo.load(late.id)
+        XCTAssertEqual(saved.state, .interrupted)
+        XCTAssertEqual(saved.lastError, "Audit sleep pause")
+        XCTAssertFalse(model.busy)
+        XCTAssertNil(model.queuePosition(for: late.id))
+        XCTAssertEqual(try events(root).map(\.jobId), [active.id])
+        model.resume(late.id)
+        try await waitUntil { model.status == "fixture-ready-" + late.id }
+        try Data().write(to: root.appendingPathComponent("release"))
+        try await waitUntil { !model.busy && (try? repo.load(late.id).state) == .completed }
+        await model.shutdown()
+    }
+
+    func testMixedBacklogCapturesRepeatedCancellationAndResume() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let first = try completed(repo, title: "Old first")
+        let second = try completed(repo, title: "Old second")
+        await model.enqueue(first.id)
+        try await waitUntil { model.status == "fixture-ready-" + first.id }
+        let firstRun = try XCTUnwrap(repo.load(first.id).pendingRunId)
+        await model.enqueue(second.id)
+        var captures: [(Manifest, RunInfo)] = []
+        for _ in 0..<3 {
+            let (m, info) = try capture(repo, model: model)
+            captures.append((m, info))
+            model.recordingID = m.id
+            await model.enqueueCapture(m.id)
+            try await model.finalizeCapture(m.id, expectedFrames: 16000)
+            model.recordingID = nil
+            await model.enqueue(m.id)
+        }
+        XCTAssertEqual(captures.map { model.queuePosition(for: $0.0.id) }, [2, 3, 4])
+        model.selection = captures[1].0.id
+        await model.cancelSelected()
+        XCTAssertEqual(captures.map { model.queuePosition(for: $0.0.id) }, [2, nil, 3])
+        model.selection = first.id
+        await model.cancelSelected()
+        try await waitUntil { model.status == "fixture-ready-" + second.id }
+        model.resume(first.id)
+        try await waitUntil { !model.finalizingRecording && model.queuePosition(for: first.id) == 3 }
+        model.resume(captures[1].0.id)
+        try await waitUntil { !model.finalizingRecording && model.queuePosition(for: captures[1].0.id) == 4 }
+        // Repeated enqueue must not duplicate a resumed job or change its position.
+        await model.enqueue(captures[1].0.id)
+        XCTAssertEqual(model.queuePosition(for: captures[1].0.id), 4)
+        model.selection = second.id
+        await model.cancelSelected()
+        try await waitUntil { model.status == "fixture-ready-" + captures[0].0.id }
+        model.selection = first.id
+        await model.cancelSelected()
+        model.resume(first.id)
+        try await waitUntil { !model.finalizingRecording && model.queuePosition(for: first.id) == 3 }
+        model.resume(second.id)
+        try await waitUntil { !model.finalizingRecording && model.queuePosition(for: second.id) == 4 }
+        let hold = root.appendingPathComponent("hold-" + captures[0].0.id)
+        try Data().write(to: hold)
+        for (m, info) in captures { try finishLiveWorker(root, repo: repo, m: m, info: info) }
+        try FileManager.default.removeItem(at: hold)
+        try await waitUntil { !model.busy && (try? repo.load(second.id).state) == .completed }
+        for (m, info) in captures {
+            XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+            XCTAssertEqual(try repo.load(m.id).state, .completed)
+            XCTAssertNil(model.queuePosition(for: m.id))
+        }
+        XCTAssertEqual(try repo.load(first.id).activeRunId, firstRun)
+        XCTAssertEqual(try repo.load(second.id).state, .completed)
+        let liveOrder = try events(root).filter { $0.liveCapture == true }.map(\.jobId)
+        XCTAssertEqual(liveOrder, [captures[0].0.id, captures[2].0.id, captures[1].0.id])
+        await model.shutdown()
+    }
+    func testMemoryPauseWithCancellationsAndLivePromotion() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let first = try completed(repo, title: "Active")
+        let second = try completed(repo, title: "Waiting")
+        await model.enqueue(first.id)
+        try await waitUntil { model.status == "fixture-ready-" + first.id }
+        let firstRun = try XCTUnwrap(repo.load(first.id).pendingRunId)
+        await model.enqueue(second.id)
+        let (saved, savedInfo) = try capture(repo, model: model)
+        model.recordingID = saved.id; await model.enqueueCapture(saved.id)
+        try await model.finalizeCapture(saved.id, expectedFrames: 16000)
+        model.recordingID = nil; await model.enqueue(saved.id)
+        let (live, liveInfo) = try capture(repo, model: model)
+        model.recordingID = live.id; await model.enqueueCapture(live.id)
+        model.pauseForCaptureResources(memoryPressure: true)
+        try await waitUntil { !model.busy && !model.supervisor.running }
+        XCTAssertEqual(model.recordingID, live.id)
+        model.selection = second.id; await model.cancelSelected()
+        model.resume(second.id)
+        try await waitUntil { !model.finalizingRecording && model.queuePosition(for: second.id) == 4 }
+        model.selection = first.id; await model.cancelSelected()
+        model.resume(first.id)
+        try await waitUntil { !model.finalizingRecording && model.queuePosition(for: first.id) == 4 }
+        model.moveToFrontOfQueue(live.id)
+        XCTAssertEqual([live.id, saved.id, second.id, first.id].map { model.queuePosition(for: $0) }, [1, 2, 3, 4])
+        model.resumeAfterMemoryPressure()
+        try await waitUntil { model.status == "fixture-ready-" + live.id }
+        XCTAssertEqual(model.recordingID, live.id)
+        XCTAssertEqual(try repo.load(live.id).state, .recording)
+        try await model.finalizeCapture(live.id, expectedFrames: 16000)
+        model.recordingID = nil; await model.enqueue(live.id)
+        let hold = root.appendingPathComponent("hold-" + live.id)
+        try Data().write(to: hold)
+        try finishLiveWorker(root, repo: repo, m: saved, info: savedInfo)
+        try finishLiveWorker(root, repo: repo, m: live, info: liveInfo)
+        try FileManager.default.removeItem(at: hold)
+        try await waitUntil { !model.busy && (try? repo.load(first.id).state) == .completed }
+        XCTAssertEqual(try repo.load(first.id).activeRunId, firstRun)
+        XCTAssertEqual(try repo.load(saved.id).activeRunId, savedInfo.id)
+        XCTAssertEqual(try repo.load(live.id).activeRunId, liveInfo.id)
+        XCTAssertEqual(try repo.load(second.id).state, .completed)
+        XCTAssertEqual(try events(root).filter { $0.liveCapture == true }.map(\.jobId), [live.id, saved.id])
+        await model.shutdown()
+    }
+
+    func testCancellingQueuedCaptureSurvivesSavingAndResumesSameRun() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, release) = try fixture(root)
+        let active = try completed(repo, title: "Old active recording")
+        await model.enqueue(active.id)
+        try await waitUntil { model.status == "fixture-ready-" + active.id }
+        let (m, info) = try capture(repo, model: model)
+        let fragments = try CaptureIntegrity.fragments(at: repo.folder(m.id).appendingPathComponent("capture"))
+        let part = LiveASRPart(part: ASRPart(fingerprint: info.fingerprint, index: 0, startMs: 0, endMs: 1000, segments: []),
+                               readStartMs: 0, readEndMs: 1000, fragments: fragments)
+        let checkpointURL = repo.run(m.id, info.id).appendingPathComponent("live/part-0.json")
+        try Disk.write(part, to: checkpointURL)
+        let checkpoint = try Data(contentsOf: checkpointURL)
+        model.recordingID = m.id; await model.enqueueCapture(m.id)
+        XCTAssertEqual(model.queuePosition(for: m.id), 1)
+        model.selection = active.id
+        await model.cancel(m.id)
+        XCTAssertTrue(model.supervisor.running)
+        XCTAssertEqual(try repo.load(active.id).state, .preparingAudio)
+        XCTAssertEqual(model.recordingID, m.id)
+        XCTAssertEqual(try repo.load(m.id).state, .recording)
+        XCTAssertEqual(try repo.load(m.id).captureProcessing, .cancelled)
+        XCTAssertNil(model.queuePosition(for: m.id))
+        await model.enqueueCapture(m.id)
+        XCTAssertNil(model.queuePosition(for: m.id))
+        try await model.finalizeCapture(m.id, expectedFrames: 16000)
+        model.recordingID = nil; await model.enqueue(m.id)
+        XCTAssertEqual(try repo.load(m.id).state, .cancelled)
+        XCTAssertEqual(try repo.load(m.id).pendingRunId, info.id)
+        XCTAssertNil(model.queuePosition(for: m.id))
+        let original = repo.folder(m.id).appendingPathComponent(m.originalRelativePath)
+        let sourceHash = try Disk.hash(original)
+        XCTAssertEqual(try repo.load(m.id).sha256, sourceHash)
+        XCTAssertEqual(try Data(contentsOf: checkpointURL), checkpoint)
+        try Data().write(to: root.appendingPathComponent("live-success"))
+        try Data().write(to: release)
+        try await waitUntil { !model.busy && (try? repo.load(active.id).state) == .completed }
+        XCTAssertEqual(try events(root).map(\.jobId), [active.id, active.id])
+        XCTAssertEqual(try repo.load(m.id).state, .cancelled)
+        model.resume(m.id)
+        try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed }
+        XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+        XCTAssertEqual(try Disk.hash(original), sourceHash)
+        XCTAssertEqual(try Data(contentsOf: checkpointURL), checkpoint)
+        await model.shutdown()
+    }
+
+    func testCancellingRequeuedLiveCaptureDuringResourcePauseRemainsCancelled() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let (m, info) = try capture(repo, model: model)
+        model.recordingID = m.id; await model.enqueueCapture(m.id)
+        try await waitUntil { model.status == "fixture-ready-" + m.id }
+        model.pauseForCaptureResources(memoryPressure: true)
+        try await waitUntil {
+            model.queuePosition(for: m.id) == 1 && (try? repo.load(m.id).captureProcessing) == .interrupted
+        }
+        await model.cancel(m.id)
+        try await waitUntil { !model.busy && !model.supervisor.running }
+        XCTAssertEqual(try repo.load(m.id).captureProcessing, .cancelled)
+        XCTAssertEqual(model.recordingID, m.id)
+        model.resumeAfterMemoryPressure()
+        try await model.finalizeCapture(m.id, expectedFrames: 16000)
+        model.recordingID = nil; await model.enqueue(m.id)
+        XCTAssertEqual(try repo.load(m.id).state, .cancelled)
+        XCTAssertEqual(try repo.load(m.id).pendingRunId, info.id)
+        XCTAssertNil(model.queuePosition(for: m.id))
+        XCTAssertEqual(try events(root).count, 1)
+        await model.shutdown()
+    }
+
+    func testLiveCaptureArrivingDuringPauseKeepsMicrophoneAndCanResumeAfterSaving() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let active = try completed(repo, title: "Active before pause")
+        await model.enqueue(active.id)
+        try await waitUntil { model.status == "fixture-ready-" + active.id }
+        let pause = Task { await model.pause(reason: "Test sleep pause") }
+        try await waitUntil { (try? repo.load(active.id).state) == .interrupted }
+        let (m, info) = try capture(repo, model: model)
+        model.recordingID = m.id; await model.enqueueCapture(m.id)
+        model.resume(active.id) // Explicit requests during the pause cannot bypass it.
+        await pause.value
+        XCTAssertFalse(model.busy)
+        XCTAssertFalse(model.supervisor.running)
+        XCTAssertFalse(model.finalizingRecording)
+        XCTAssertEqual(model.recordingID, m.id)
+        XCTAssertEqual(try repo.load(m.id).state, .recording)
+        XCTAssertEqual(try repo.load(m.id).captureProcessing, .interrupted)
+        XCTAssertNil(model.queuePosition(for: m.id))
+        XCTAssertNil(model.queuePosition(for: active.id))
+        try await model.finalizeCapture(m.id, expectedFrames: 16000)
+        model.recordingID = nil
+        model.resume(m.id)
+        try await waitUntil { model.status == "fixture-ready-" + m.id }
+        try finishLiveWorker(root, repo: repo, m: m, info: info)
+        try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed }
+        XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
+        await model.shutdown()
+    }
+
     func testPromotingQueuedRecordingUpdatesPositionsAndActualWorkerOrder() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

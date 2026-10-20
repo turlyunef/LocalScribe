@@ -25,6 +25,16 @@ import LocalScribeCore
             ContentView(model: model).frame(minWidth: 850, minHeight: 560)
                 .onAppear { delegate.model = model; model.errorHandler.startPresenting() }
         }.defaultSize(width: 1100, height: 740)
+        .commands {
+            CommandGroup(replacing: .appInfo) {
+                Button("О LocalScribe") {
+                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                        .applicationVersion: AppInfo.version,
+                        .credits: NSAttributedString(string: "Локальная запись, расшифровка и подведение итогов встреч на вашем Mac.")
+                    ])
+                }
+            }
+        }
         Settings { ModelSettings(model: model).frame(width: 760, height: 760) }
         MenuBarExtra("LocalScribe", systemImage: model.recordingID == nil ? "waveform" : "record.circle.fill") {
             if model.recordingID != nil {

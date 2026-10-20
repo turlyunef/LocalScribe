@@ -81,6 +81,8 @@ import LocalScribeCore
     private var memoryLimited = false
     private var captureLimited = false
     private var suspendingQueue = false
+    // Sleep/shutdown pauses own admission barriers independently of row cancellation.
+    private var queuePauses: [UUID: String] = [:]
     private var resourcePauseTask: Task<Void, Never>?
     private var memorySource: DispatchSourceMemoryPressure?
     private var sleepObserver: NSObjectProtocol?
@@ -484,7 +486,11 @@ import LocalScribeCore
         // Apply only capture fields to the latest manifest, preserving renames/warnings.
         let m = try await archive.update(id) { m in
             m.durationMs = Int(Double(frames)/rate*1000); m.sampleRate = rate; m.channels = 1; m.sha256 = hash; m.sourceComplete = true
-            m.state = state
+            if m.state == .cancelled || m.captureProcessing == .cancelled {
+                m.state = .cancelled; m.captureProcessing = nil
+            } else {
+                m.state = state
+            }
         }
         try await archive.perform { repository in
             let liveRun = m.pendingRunId.flatMap { pending -> URL? in
@@ -504,7 +510,8 @@ import LocalScribeCore
         }
     }
     func resume(_ id: String) {
-        guard !preparingStorage, !shuttingDown, !finalizingRecording, id != recordingID, id != activeID else { return }
+        guard !preparingStorage, !shuttingDown, !finalizingRecording, queuePauses.isEmpty, id != recordingID, id != activeID else { return }
+        let generation = queueGeneration
         finalizingRecording = true
         Task {
             defer { finalizingRecording = false }
@@ -520,6 +527,7 @@ import LocalScribeCore
                         let parts = (try? FileManager.default.contentsOfDirectory(at: repository.folder(id).appendingPathComponent("capture"), includingPropertiesForKeys: nil)) ?? []
                         return (!m.sourceComplete || needsSeal, parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") })
                     }
+                    guard generation == queueGeneration, !shuttingDown else { return }
                     if needsAssembly {
                         guard hasParts else {
                             let message = "В этой записи нет сохранённого звука. Начните новую запись."
@@ -529,7 +537,8 @@ import LocalScribeCore
                         try await finalizeCapture(id)
                     }
                 }
-                await enqueue(id)
+                guard generation == queueGeneration, !shuttingDown else { return }
+                await enqueue(id, allowCancelled: true)
             } catch { errorHandler.report(error) }
         }
     }
@@ -554,32 +563,47 @@ import LocalScribeCore
     }
     func enqueueCapture(_ id: String) async {
         guard let archive else { return }
-        let generation = queueGeneration
+        let generation = queueGeneration, pauseReason = queuePauses.values.first
         let valid = await archive.perform { repository in
-            guard let manifest = try? repository.load(id), manifest.state == .recording,
+            guard let manifest = try? repository.load(id), manifest.state == .recording, manifest.captureProcessing != .cancelled,
                   let pending = manifest.pendingRunId,
                   let info = try? Disk.read(RunInfo.self, at: repository.run(id, pending).appendingPathComponent("run.json")) else { return false }
             return info.liveCapture == true
         }
         guard valid, generation == queueGeneration, activeID != id, !shuttingDown else { return }
+        if let reason = queuePauses.values.first ?? pauseReason {
+            await interruptEnqueue(id, reason: reason); return
+        }
         if !queued.contains(id) { queued.append(id) }
         Task { await processQueue() }
     }
-    func enqueue(_ id: String) async {
+    private func interruptEnqueue(_ id: String, reason: String) async {
+        _ = try? await archive?.update(id) { m in
+            if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
+            m.lastError = reason
+        }
+        await reload()
+    }
+    func enqueue(_ id: String, allowCancelled: Bool = false) async {
         guard let archive, enqueuing[id] == nil else { return }
         let request = UUID(), generation = queueGeneration
+        let pauseReason = queuePauses.values.first
         enqueuing[id] = request
         defer {
             if enqueuing[id] == request { enqueuing.removeValue(forKey: id) }
             if !busy { Task { await processQueue() } }
         }
         guard let m = try? await archive.load(id), m.sourceComplete, id != activeID,
+              allowCancelled || m.state != .cancelled,
               generation == queueGeneration, enqueuing[id] == request else { return }
         if shuttingDown {
             _ = try? await archive.update(id) { m in
                 m.state = .interrupted; m.lastError = "Приложение закрыто. Можно продолжить обработку."
             }
             await reload(); return
+        }
+        if let reason = queuePauses.values.first ?? pauseReason {
+            await interruptEnqueue(id, reason: reason); return
         }
         let canQueue = m.pendingRunId != nil || modelsReady
         // Reserve FIFO position before suspending for persistence.
@@ -595,10 +619,10 @@ import LocalScribeCore
         try hardware.requireCompatibility(for: profile)
     }
     func processQueue() async {
-        guard !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
+        guard !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
               let repository, let archive, let catalog else { return }
         busy = true; defer { busy = false; activeID = nil; status = "" }
-        while queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && resourcePauseTask == nil && !shuttingDown {
+        while queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
                 status = "Обработка ожидает охлаждения Mac"
                 try? await Task.sleep(for: .seconds(2)); continue
@@ -680,6 +704,9 @@ import LocalScribeCore
                 if !(resourcesPaused && queued.contains(id)) {
                     let isRecording = recordingID == id, ownsJob = activeID == id
                     _ = try? await archive.update(id) { m in
+                        // A queued job can be cancelled while its previous worker
+                        // is still unwinding a resource pause.
+                        guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
                         if isRecording || !m.sourceComplete && m.state == .recording {
                             // Processing failure never changes microphone ownership/state.
                             m.captureProcessing = ownsJob ? .failed : .interrupted
@@ -760,13 +787,15 @@ import LocalScribeCore
     }
     func pause(reason: String) async {
         queueGeneration &+= 1
-        suspendingQueue = true
-        defer { suspendingQueue = false }
+        let pauseID = UUID()
+        queuePauses[pauseID] = reason
+        defer { queuePauses.removeValue(forKey: pauseID) }
         let ids = queued + (activeID.map { [$0] } ?? [])
         queued.removeAll(); activeID = nil
         if let archive {
             for id in Set(ids) {
                 _ = try? await archive.update(id) { m in
+                    guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
                     if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
                     m.lastError = reason
                 }
@@ -777,7 +806,11 @@ import LocalScribeCore
         await reload()
     }
     func cancelSelected() async {
-        guard let id = selection, let archive else { return }
+        guard let id = selection else { return }
+        await cancel(id)
+    }
+    func cancel(_ id: String) async {
+        guard let archive else { return }
         enqueuing.removeValue(forKey: id)
         queued.removeAll { $0 == id }
         if activeID == id {
@@ -839,7 +872,7 @@ import LocalScribeCore
         let captureFolder = temporary.appendingPathComponent("capture")
         let reportURL = base.appendingPathComponent("microphone-probe-result.json")
         defer { try? FileManager.default.removeItem(at:temporary) }
-        var report = ["status":"running","phase":"permission","version":"0.1.1"]
+        var report = ["status":"running","phase":"permission","version":AppInfo.version]
         try? Disk.write(report,to:reportURL)
         let capture = MicrophoneRecorder()
         var reason: String?, lastElapsed = 0.0
@@ -865,10 +898,10 @@ import LocalScribeCore
             let (assembled,rate) = try Media.assembleCapture(captureFolder,destination:temporary.appendingPathComponent("assembled.caf"))
             guard frames == assembled, Double(frames)/rate >= 11, parts.count >= 2 else { throw ScribeError.message("Запись не сохранила ожидаемые фрагменты") }
             if inject { guard capture.engineRestartCount >= 1 else { throw ScribeError.message("Восстановление аудиодвижка не проверено") } }
-            report = ["status":"passed","version":"0.1.1","frames":String(frames),"sampleRate":String(rate),"seconds":String(Double(frames)/rate),"completedParts":String(parts.count),"configurationEvents":String(capture.configurationEventCount),"engineRestarts":String(capture.engineRestartCount),"meterSeconds":String(lastElapsed),"injectedEvents":String(inject),"audio":"deleted; no archive or models"]
+            report = ["status":"passed","version":AppInfo.version,"frames":String(frames),"sampleRate":String(rate),"seconds":String(Double(frames)/rate),"completedParts":String(parts.count),"configurationEvents":String(capture.configurationEventCount),"engineRestarts":String(capture.engineRestartCount),"meterSeconds":String(lastElapsed),"injectedEvents":String(inject),"audio":"deleted; no archive or models"]
         } catch {
             _ = try? await capture.stop()
-            report = ["status":"failed","version":"0.1.1","error":error.localizedDescription,"configurationEvents":String(capture.configurationEventCount),"engineRestarts":String(capture.engineRestartCount),"audio":"deleted; no archive or models"]
+            report = ["status":"failed","version":AppInfo.version,"error":error.localizedDescription,"configurationEvents":String(capture.configurationEventCount),"engineRestarts":String(capture.engineRestartCount),"audio":"deleted; no archive or models"]
         }
         try? Disk.write(report,to:reportURL)
         NSApplication.shared.terminate(nil)
@@ -936,7 +969,7 @@ import LocalScribeCore
                 guard progress.completedUnitCount > 0 else { throw ScribeError.message("XPC-загрузчик не передал прогресс в байтах") }
                 try Disk.write(["status":"passed", "bytes":String(bytes.count), "progressBytes":String(progress.completedUnitCount)], to: diagnostics.appendingPathComponent("model-download-probe-result.json"))
             }
-            try Disk.write(["status":"passed","events":events.joined(separator:","),"version":"0.1.0","check":"signed parent -> inherited network-denied worker -> bundled ffmpeg; XPC downloader file descriptor"], to: diagnostics.appendingPathComponent("sandbox-probe-result.json"))
+            try Disk.write(["status":"passed","events":events.joined(separator:","),"version":AppInfo.version,"check":"signed parent -> inherited network-denied worker -> bundled ffmpeg; XPC downloader file descriptor"], to: diagnostics.appendingPathComponent("sandbox-probe-result.json"))
         } catch {
             try? Disk.write(["status":"failed","error":error.localizedDescription,"events":events.joined(separator:",")], to: diagnostics.appendingPathComponent("sandbox-probe-result.json"))
         }

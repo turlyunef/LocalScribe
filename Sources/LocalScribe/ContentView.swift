@@ -63,12 +63,16 @@ struct ContentView: View {
                         Group {
                             if selected.state.processing {
                                 ProgressView()
-                                Button("Отменить") { Task { await model.cancelSelected() } }.help("Отменить обработку выбранной записи")
-                            } else if model.queuePosition(for: selected.id) != nil,
-                                      selected.state == .queued || selected.state == .recording && selected.captureProcessing == .queued {
+                                Button("Отменить") { Task { await model.cancel(selected.id) } }
+                                    .help("Отменить обработку выбранной записи")
+                                    .accessibilityIdentifier("recording.cancel")
+                            } else if model.queuePosition(for: selected.id) != nil {
                                 Button("Поднять на верх очереди") { model.moveToFrontOfQueue(selected.id) }
                                     .help("Обработать выбранную запись следующей после текущего задания")
                                     .accessibilityIdentifier("recording.moveToFront")
+                                Button("Отменить") { Task { await model.cancel(selected.id) } }
+                                    .help("Убрать запись из очереди, сохранив аудио и результаты")
+                                    .accessibilityIdentifier("recording.cancel")
                             } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
                                 Button("Продолжить") { model.resume(selected.id) }
                                     .disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady)
@@ -387,7 +391,7 @@ struct ModelSettings: View {
             Section("Локальные данные") {
                 Button("Показать папку данных") { if let root = model.repository?.root { NSWorkspace.shared.open(root) } }.help("Открыть папку записей и моделей в Finder")
                 Button("Лицензии") { NSWorkspace.shared.open(model.resources.appendingPathComponent("Licenses")) }.help("Открыть лицензии сторонних компонентов")
-                Text("LocalScribe " + (Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "0.1") + " · локальная предварительная сборка").font(.caption).foregroundStyle(.secondary)
+                Text("LocalScribe " + AppInfo.version + " · локальная предварительная сборка").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
             .onAppear { initializeSelection() }
