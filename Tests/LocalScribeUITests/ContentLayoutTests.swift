@@ -391,6 +391,68 @@ final class ContentLayoutTests: XCTestCase {
         }
     }
 
+    func testWarningsSectionAppearsOnlyWithWarningsAndCanBeSelected() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repo = try RecordingRepository(root: root)
+        let manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        let other = Manifest(sourceType: "import", title: "Без предупреждений", filename: "other.wav")
+        try repo.save(manifest); try repo.save(other)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        await model.reload()
+        model.selection = manifest.id
+        model.automaticSummaries = false
+        let (hosting, window) = host(ContentView(model: model), width: 1400)
+        defer { window.close() }
+        try await settle(hosting)
+        XCTAssertFalse(descendants(try element("result.section", in: hosting)).contains { text($0) == "Предупреждения" })
+
+        let warning = "В интервале 00:02:09–00:02:11 есть звук, но начало речи не распознано."
+        try await model.archive?.update(manifest.id) { $0.warnings = [warning] }
+        await model.reload()
+        for width: CGFloat in [1100, 1400] {
+            window.setContentSize(NSSize(width: width, height: 700))
+            try await settle(hosting)
+            let picker = try element("result.section", in: hosting)
+            let buttons = try ["Расшифровка", "Итоги", "Предупреждения"].map { title in
+                try XCTUnwrap(descendants(picker).first { text($0) == title }, title)
+            }
+            let frames = try buttons.map { try XCTUnwrap($0.accessibilityFrame?()) }
+            for frame in frames { XCTAssertGreaterThan(frame.width, 0) }
+            for (left, right) in zip(frames, frames.dropFirst()) {
+                XCTAssertLessThanOrEqual(left.maxX, right.minX)
+                XCTAssertEqual(left.midY, right.midY, accuracy: 2)
+            }
+            let editFrame = try XCTUnwrap(element("result.edit", in: hosting).accessibilityFrame?())
+            XCTAssertLessThanOrEqual(frames[2].maxX, editFrame.minX)
+            // SwiftUI's segmented item performs the action even when AX returns false.
+            _ = buttons[2].accessibilityPerformPress?()
+            await model.resultPresentation.task?.value
+            try await settle(hosting)
+            XCTAssertEqual(model.tab, .warnings)
+            let textView = try XCTUnwrap(subviews(hosting).compactMap { $0 as? NSTextView }.first)
+            XCTAssertTrue(textView.string.contains("Предупреждение: \(warning)"))
+            XCTAssertNil(findElement("result.automaticSummariesDisabled", in: hosting))
+            model.tab = .transcript
+        }
+        model.tab = .warnings
+        model.selection = other.id
+        try await settle(hosting)
+        XCTAssertEqual(model.tab, .transcript)
+        XCTAssertFalse(descendants(try element("result.section", in: hosting)).contains { text($0) == "Предупреждения" })
+        model.selection = manifest.id; model.tab = .warnings
+        try await settle(hosting)
+        try await model.archive?.update(manifest.id) { $0.warnings = [] }
+        await model.reload()
+        try await settle(hosting)
+        XCTAssertEqual(model.tab, .transcript)
+        XCTAssertFalse(descendants(try element("result.section", in: hosting)).contains { text($0) == "Предупреждения" })
+        await model.shutdown()
+    }
+
     func testTranscriptDeleteButtonsStayOutsideVerticalScrollerAtBothEditorWidths() async throws {
         let segments = (0..<30).map { index in
             Segment(id: "s\(index)", startMs: index * 1000, endMs: (index + 1) * 1000,

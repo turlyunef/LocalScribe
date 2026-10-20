@@ -1,5 +1,5 @@
 import Foundation
-public enum ExportPart: String, CaseIterable, Sendable { case transcript = "Расшифровка", summary = "Итоги", all = "Всё" }
+public enum ExportPart: String, CaseIterable, Sendable { case transcript = "Расшифровка", summary = "Итоги", warnings = "Предупреждения", all = "Всё" }
 public struct ExportTimestamp: Sendable, Equatable {
     public let segmentID: String
     public let range: NSRange
@@ -44,7 +44,7 @@ public enum ExportService {
         // Look up only the referenced segments per finding. Transcript position is
         // the stable chronological order, including segments with equal start times.
         var evidenceIndex: [String: Int] = [:]
-        if part != .transcript, s != nil, let t {
+        if part == .summary || part == .all, s != nil, let t {
             evidenceIndex.reserveCapacity(t.segments.count)
             for (index, segment) in t.segments.enumerated() { evidenceIndex[segment.id] = index }
         }
@@ -55,11 +55,14 @@ public enum ExportService {
         append("Статус: \(state)\nАвтоматическая локальная обработка. Возможны ошибки.\n")
         if m.activeRunId != nil && m.pendingRunId != nil { append("Показан предыдущий успешный результат; новая обработка ещё не завершена.\n") }
         if let s { append("Язык итогов: \(s.language == "ru" ? "русский" : "English")\n") }
-        for warning in m.warnings { append("Предупреждение: \(clean(warning))\n") }
         if !m.sourceComplete { append("Запись неполная.\n") }
         if let t, !t.diarized { append("Участники не определены. Промежуточная расшифровка.\n") }
         append("\n")
-        if part != .transcript {
+        if (part == .warnings || part == .all) && !m.warnings.isEmpty {
+            append(heading("Предупреждения"))
+            for warning in m.warnings { append("Предупреждение: \(clean(warning))\n\n") }
+        }
+        if part == .summary || part == .all {
             if let s {
                 for (title, findings) in [("Краткое содержание", s.overview), ("Решения и договорённости", s.decisions), ("Задачи", s.tasks), ("Открытые вопросы", s.openQuestions)] {
                     append(heading(title))
@@ -81,7 +84,7 @@ public enum ExportService {
                 }
             } else { append("Итоги ещё не готовы.\n\n") }
         }
-        if part != .summary {
+        if part == .transcript || part == .all {
             append(heading("Расшифровка"))
             if let t {
                 if t.segments.isEmpty { append("Речь не обнаружена.\n") }

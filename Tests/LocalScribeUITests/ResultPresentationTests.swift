@@ -22,7 +22,8 @@ final class ResultPresentationTests: XCTestCase {
     }
 
     private func ready(_ presentation: ResultPresentation) async throws {
-        await presentation.task?.value
+        // Loading a selected recording can replace a render while we await it.
+        while let task = presentation.task { await task.value }
         XCTAssertFalse(presentation.isRendering)
     }
 
@@ -128,7 +129,71 @@ final class ResultPresentationTests: XCTestCase {
         XCTAssertTrue(updated.contains("Готово с предупреждениями"))
         XCTAssertTrue(updated.contains("Дата записи:")); XCTAssertTrue(updated.contains("02:59:59"))
         XCTAssertTrue(updated.contains("Показан предыдущий успешный результат"))
-        XCTAssertTrue(updated.contains("Проверить 😀")); XCTAssertTrue(updated.contains("Запись неполная"))
+        XCTAssertFalse(updated.contains("Проверить 😀")); XCTAssertTrue(updated.contains("Запись неполная"))
+        model.tab = .warnings; try await ready(model.resultPresentation)
+        XCTAssertTrue(model.resultPresentation.result.text.contains("Предупреждение: Проверить 😀"))
+        XCTAssertTrue(model.resultPresentation.result.timestamps.isEmpty)
+    }
+
+    func testWarningsTabTracksSelectedManifestAndWarningUpdates() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repo = try RecordingRepository(root: root)
+        var (manifest, transcript, summary) = fixture()
+        manifest.displayTitle = "Встреча с предупреждениями"
+        manifest.warnings = ["Проверить начало речи 😀"]
+        let other = Manifest(sourceType: "import", title: "Другая встреча", filename: "other.wav")
+        try save(manifest, transcript, summary, to: repo); try repo.save(other)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        await model.reload()
+        XCTAssertEqual(model.resultTabs, [.transcript, .summary])
+        XCTAssertEqual(model.exportParts, [.transcript, .summary, .all])
+        model.selection = manifest.id
+        try await loaded(model)
+        XCTAssertEqual(model.resultTabs, [.transcript, .summary, .warnings])
+        XCTAssertEqual(model.exportParts, [.transcript, .summary, .warnings, .all])
+        model.tab = .warnings
+        try await ready(model.resultPresentation)
+        let warnings = model.resultPresentation.result
+        XCTAssertTrue(warnings.text.contains("Предупреждение: Проверить начало речи 😀"))
+        XCTAssertTrue(warnings.timestamps.isEmpty)
+        XCTAssertEqual(model.renderedResult(.warnings), warnings)
+        XCTAssertTrue(model.rendered(.warnings, markdown: true).contains("## Предупреждения"))
+        model.tab = .transcript; try await ready(model.resultPresentation)
+        XCTAssertFalse(model.resultPresentation.result.text.contains("Проверить начало речи 😀"))
+        let baseline = model.resultPresentation.renderCount
+        model.tab = .warnings
+        XCTAssertEqual(model.resultPresentation.result, warnings)
+        XCTAssertEqual(model.resultPresentation.renderCount, baseline)
+
+        try await model.archive?.update(manifest.id) { $0.warnings.append("Проверить сроки") }
+        await model.reload()
+        XCTAssertTrue(model.resultPresentation.result.text.isEmpty)
+        try await ready(model.resultPresentation)
+        XCTAssertTrue(model.resultPresentation.result.text.contains("Предупреждение: Проверить сроки"))
+        model.selection = other.id
+        XCTAssertEqual(model.tab, .transcript)
+        XCTAssertEqual(model.resultTabs, [.transcript, .summary])
+        XCTAssertFalse(model.exportParts.contains(.warnings))
+        XCTAssertTrue(model.resultPresentation.result.text.isEmpty)
+        try await ready(model.resultPresentation)
+        XCTAssertFalse(model.resultPresentation.result.text.contains("Проверить сроки"))
+
+        model.selection = manifest.id; model.tab = .warnings
+        try await ready(model.resultPresentation)
+        try await model.archive?.update(manifest.id) { $0.warnings = [] }
+        await model.reload()
+        XCTAssertEqual(model.tab, .transcript)
+        XCTAssertFalse(model.resultTabs.contains(.warnings))
+        XCTAssertFalse(model.exportParts.contains(.warnings))
+        try await ready(model.resultPresentation)
+        XCTAssertFalse(model.resultPresentation.result.text.contains("Предупреждение:"))
+        model.selection = nil
+        XCTAssertTrue(model.resultPresentation.result.text.isEmpty)
+        await model.shutdown()
     }
 
     func testIrrelevantManifestChangesReuseCache() async throws {
@@ -162,6 +227,33 @@ final class ResultPresentationTests: XCTestCase {
         release.signal(); await oldTask.value
         XCTAssertTrue(presentation.result.text.isEmpty); XCTAssertTrue(presentation.result.timestamps.isEmpty)
         XCTAssertFalse(presentation.isRendering)
+    }
+
+    func testDelayedWarningsRenderCannotOverwriteTranscriptAfterTabSwitch() async throws {
+        let started = expectation(description: "Warnings renderer started")
+        let release = DispatchSemaphore(value: 0)
+        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown in
+            if part == .warnings {
+                started.fulfill()
+                _ = release.wait(timeout: .now() + 5)
+            }
+            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+        }
+        var (manifest, transcript, summary) = fixture()
+        manifest.warnings = ["Проверить начало речи"]
+        presentation.update(manifest: manifest, transcript: transcript, summary: summary, revision: 1, part: .warnings)
+        let oldTask = try XCTUnwrap(presentation.task)
+        await fulfillment(of: [started], timeout: 3)
+        presentation.update(manifest: manifest, transcript: transcript, summary: summary, revision: 1, part: .transcript)
+        XCTAssertTrue(presentation.result.text.isEmpty)
+        XCTAssertTrue(presentation.result.timestamps.isEmpty)
+        try await ready(presentation)
+        let current = presentation.result
+        XCTAssertTrue(current.text.contains("Реплика 10799"))
+        XCTAssertFalse(current.text.contains("Предупреждение:"))
+        assertLinks(current)
+        release.signal(); await oldTask.value
+        XCTAssertEqual(presentation.result, current)
     }
 
     func testOlderRenderCannotOverwriteNewerTitleAndResult() async throws {

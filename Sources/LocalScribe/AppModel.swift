@@ -102,6 +102,8 @@ import LocalScribeCore
     private var resultSignature = ""
     private var resultLoadID = UUID()
     var selected: Manifest? { recordings.first { $0.id == selection } }
+    var resultTabs: [ExportPart] { selected?.warnings.isEmpty == false ? [.transcript, .summary, .warnings] : [.transcript, .summary] }
+    var exportParts: [ExportPart] { resultTabs + [.all] }
     var tools: URL { resources.appendingPathComponent("tools") }
     var worker: URL { workerOverride ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
     init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
@@ -163,6 +165,7 @@ import LocalScribeCore
         loadResult()
     }
     private func refreshPresentation() {
+        if tab == .warnings && !resultTabs.contains(.warnings) { tab = .transcript; return }
         resultPresentation.update(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: tab)
     }
     func renameRecording(_ id: String, title: String) async {

@@ -99,16 +99,21 @@ struct ContentView: View {
                     }
                     if selected.activeRunId != nil && selected.pendingRunId != nil { Text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.").font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
                     HStack {
-                        Picker(selection: $model.tab) {
-                            Text("Расшифровка").tag(ExportPart.transcript)
-                            Text("Итоги").tag(ExportPart.summary)
+                        Picker(selection: Binding(get: { model.tab }, set: { part in
+                            // Updating the prepared text also publishes changes; wait
+                            // until SwiftUI finishes the picker's own view update.
+                            Task { @MainActor in model.tab = part }
+                        })) {
+                            ForEach(model.resultTabs, id: \.self) { part in
+                                Text(part.rawValue).tag(part)
+                            }
                         } label: {
                             Text("Результат")
                                 .lineLimit(1)
                                 .fixedSize(horizontal: true, vertical: false)
                         }
                         .pickerStyle(.segmented)
-                        .frame(width: 270)
+                        .frame(width: model.resultTabs.contains(.warnings) ? 410 : 270)
                         .accessibilityIdentifier("result.section")
                         Spacer()
                         Button("Редактировать", systemImage: "pencil", action: model.beginResultEditing)
@@ -116,15 +121,15 @@ struct ContentView: View {
                             .help("Изменить текст расшифровки и итогов")
                             .accessibilityIdentifier("result.edit")
                         Menu {
-                            ForEach(ExportPart.allCases, id: \.self) { part in Button(part.rawValue) { model.copy(part) }.help("Копировать: \(part.rawValue)") }
+                            ForEach(model.exportParts, id: \.self) { part in Button(part.rawValue) { model.copy(part) }.help("Копировать: \(part.rawValue)") }
                         } label: { Label("Копировать", systemImage: "doc.on.doc") } primaryAction: { model.copy(model.tab) }
                         .help("Копировать открытый результат; меню позволяет выбрать раздел")
                         Menu {
-                            ForEach(ExportPart.allCases, id: \.self) { part in
+                            ForEach(model.exportParts, id: \.self) { part in
                                 Menu(part.rawValue) { Button("Markdown (.md)") { model.export(markdown: true, part: part) }.help("Сохранить раздел «\(part.rawValue)» в Markdown"); Button("Текст (.txt)") { model.export(markdown: false, part: part) }.help("Сохранить раздел «\(part.rawValue)» в текстовый файл") }
                             }
                         } label: { Label("Экспорт", systemImage: "square.and.arrow.up") }
-                        .help("Сохранить расшифровку, итоги или всё вместе в файл")
+                        .help("Сохранить выбранный раздел результата или всё вместе в файл")
                     }.padding(.horizontal,20).padding(.bottom,12)
                     Divider()
                     if model.tab == .summary, model.summary == nil, !model.automaticSummaries {

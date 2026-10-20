@@ -76,11 +76,73 @@ final class ExportTests: XCTestCase {
         for markdown in [false, true] {
             for part in ExportPart.allCases {
                 let rendered = ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
-                let expectedIDs = part == .transcript ? ["first", "second"] : part == .summary ? ["second"] : ["second", "first", "second"]
+                let expectedIDs: [String]
+                switch part {
+                case .transcript: expectedIDs = ["first", "second"]
+                case .summary: expectedIDs = ["second"]
+                case .warnings: expectedIDs = []
+                case .all: expectedIDs = ["second", "first", "second"]
+                }
                 XCTAssertEqual(rendered.timestamps.map(\.segmentID), expectedIDs)
-                XCTAssertEqual(rendered.timestamps.filter(\.isTranscript).count, part == .summary ? 0 : 2)
+                XCTAssertEqual(rendered.timestamps.filter(\.isTranscript).count, part == .transcript || part == .all ? 2 : 0)
                 for timestamp in rendered.timestamps {
                     XCTAssertEqual((rendered.text as NSString).substring(with: timestamp.range), "[00:01:16]")
+                }
+            }
+        }
+    }
+
+    func testWarningsHaveDedicatedSectionAndRemainInCompleteExport() {
+        var manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        manifest.warnings = ["00:02:09–00:02:11", "00:06:42–00:07:00", "00:16:00–00:16:02",
+                             "00:25:00–00:25:03", "00:26:58–00:27:00", "00:27:00–00:27:01",
+                             "00:27:28–00:27:30"].map {
+            "В интервале \($0) есть звук, но начало речи не распознано. Прослушайте исходник; можно повторить обработку другой моделью."
+        } + ["Неподтверждённые поля ответственных и сроков оставлены как «Не указано»; неопределённость источника сохранена.",
+             "Проверить [план] *позже* 😀"]
+        let transcript = Transcript(fingerprint: "f", diarized: true, segments: [
+            Segment(id: "s", startMs: 1000, endMs: 2000, text: "Исходная реплика", language: "ru")
+        ])
+        let summary = Summary(language: "ru", overview: [Finding(id: "f", text: "Вывод встречи", evidenceSegmentIds: ["s"])])
+        for markdown in [false, true] {
+            for part in ExportPart.allCases {
+                let result = ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+                let includesWarnings = part == .warnings || part == .all
+                XCTAssertEqual(result.text.contains("Предупреждения\n\n"), includesWarnings)
+                XCTAssertEqual(result.text.components(separatedBy: "Предупреждение: ").count - 1,
+                               includesWarnings ? manifest.warnings.count : 0)
+                if includesWarnings {
+                    var end = result.text.startIndex
+                    for warning in manifest.warnings.dropLast() {
+                        guard let range = result.text.range(of: "Предупреждение: \(warning)", range: end..<result.text.endIndex) else {
+                            XCTFail("Пропущено предупреждение или нарушен порядок: \(warning)"); continue
+                        }
+                        end = range.upperBound
+                    }
+                    XCTAssertTrue(result.text.contains(markdown ? "Проверить \\[план\\] \\*позже\\* 😀" : "Проверить [план] *позже* 😀"))
+                }
+                if part == .warnings {
+                    XCTAssertTrue(result.timestamps.isEmpty)
+                    XCTAssertFalse(result.text.contains("Исходная реплика"))
+                    XCTAssertFalse(result.text.contains("Вывод встречи"))
+                    XCTAssertFalse(result.text.contains("Расшифровка\n"))
+                    XCTAssertFalse(result.text.contains("Краткое содержание"))
+                }
+            }
+        }
+    }
+
+    func testEmptyWarningsDoNotAddSectionOrUnrelatedPlaceholders() {
+        let manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        for markdown in [false, true] {
+            for part in ExportPart.allCases {
+                let result = ExportService.renderResult(manifest: manifest, transcript: nil, summary: nil, part: part, markdown: markdown)
+                XCTAssertFalse(result.text.contains("Предупреждения"))
+                XCTAssertFalse(result.text.contains("Предупреждение:"))
+                if part == .warnings {
+                    XCTAssertFalse(result.text.contains("ещё не готовы"))
+                    XCTAssertFalse(result.text.contains("ещё не готова"))
+                    XCTAssertTrue(result.timestamps.isEmpty)
                 }
             }
         }
