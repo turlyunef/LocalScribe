@@ -5,13 +5,16 @@ import LocalScribeCore
 @testable import LocalScribeWorker
 
 final class SpeechRecognizerTests: XCTestCase {
-    private func wave(_ root: URL, milliseconds: Int, amplitude: Float = 0.1) throws -> URL {
+    private func wave(_ root: URL, milliseconds: Int, amplitude: Float = 0.1, pauses: [Range<Int>] = []) throws -> URL {
         try Disk.directory(root)
         let url = root.appendingPathComponent("fixture.wav")
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
         let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(milliseconds * 16)))
         buffer.frameLength = buffer.frameCapacity
         buffer.floatChannelData![0].initialize(repeating: amplitude, count: Int(buffer.frameLength))
+        for pause in pauses {
+            for frame in (pause.lowerBound * 16)..<(pause.upperBound * 16) { buffer.floatChannelData![0][frame] = 0 }
+        }
         try autoreleasepool {
             let settings: [String: Any] = [AVFormatIDKey: kAudioFormatLinearPCM, AVSampleRateKey: 16000,
                 AVNumberOfChannelsKey: 1, AVLinearPCMBitDepthKey: 16, AVLinearPCMIsFloatKey: false,
@@ -76,27 +79,42 @@ final class SpeechRecognizerTests: XCTestCase {
         XCTAssertEqual(metrics.value.prefixRecovery.completedCalls, 1); XCTAssertEqual(metrics.value.unrecoveredPrefixes, 0)
     }
 
-    func testInternalLanguageGapIsRetriedLocallyWithoutReplacingRecognizedWords() async throws {
+    func testFirstPauseSplitsActualModelInputsAndKeepsWordTimes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = try wave(root, milliseconds: 28000, pauses: [4000..<5000])
+        var inputs: [Int] = []
+        let recognizer = SpeechRecognizer { samples, _ in
+            inputs.append(samples.count / 16)
+            return inputs.count == 1 ? self.result([("первая", 0.2, 3.8)]) : self.result([("second", 1.8, 24)])
+        }
+        let segments = try await recognizer.recognize(wave: audio, coreStart: 0, coreEnd: 28000, durationMs: 28000)
+        XCTAssertEqual(inputs, [5280, 24720])
+        XCTAssertEqual(segments.map(\.text), ["первая", "second"])
+        XCTAssertEqual(segments.map(\.startMs), [200, 5080])
+        XCTAssertEqual(segments.map(\.endMs), [3800, 27280])
+    }
+
+    func testInteriorGapKeepsPrimaryWordsWithoutLocalRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 20000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
         var calls = 0
-        let recognizer = SpeechRecognizer(metrics: metrics) { samples, _ in
+        let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in
             calls += 1
-            if calls == 1 { return self.result([("начало", 0.2, 5), ("конец", 15, 20)]) }
-            XCTAssertEqual(samples.count / 16, 10500, "Gap 5–15 s keeps 250 ms of context on each side")
-            return self.result([("context", 0, 0.2), ("English", 0.5, 10)])
+            return self.result([("начало", 0.2, 5), ("конец", 15, 20)])
         }
         let segments = try await recognizer.recognize(wave: audio, coreStart: 0, coreEnd: 20000, durationMs: 20000)
-        XCTAssertEqual(segments.map(\.text), ["начало", "English", "конец"])
-        XCTAssertEqual(segments.map(\.startMs), [200, 5250, 15000])
-        XCTAssertEqual(metrics.value.gapRecovery.inputs.count, 1)
-        XCTAssertEqual(metrics.value.unrecoveredGaps, 0)
+        XCTAssertEqual(calls, 1)
+        XCTAssertEqual(segments.map(\.text), ["начало", "конец"])
+        XCTAssertEqual(segments.map(\.startMs), [200, 15000])
+        XCTAssertEqual(metrics.value.gapRecovery.inputs.count, 0)
         XCTAssertEqual(metrics.value.prefixRecovery.inputs.count, 0)
+        XCTAssertEqual(metrics.value.windowPolicy, "first-pause-prefix-recovery")
     }
 
-    func testPersistentGapGetsOnlyOneRetry() async throws {
+    func testUncoveredTailDoesNotTriggerLocalRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 5000)
@@ -104,10 +122,10 @@ final class SpeechRecognizerTests: XCTestCase {
         var calls = 0
         let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in
             calls += 1
-            return calls == 1 ? self.result([("start", 0.2, 1)]) : []
+            return self.result([("start", 0.2, 1)])
         }
         _ = try await recognizer.recognize(wave: audio, coreStart: 0, coreEnd: 5000, durationMs: 5000)
-        XCTAssertEqual(calls, 2); XCTAssertEqual(metrics.value.unrecoveredGaps, 1)
+        XCTAssertEqual(calls, 1); XCTAssertEqual(metrics.value.gapRecovery.inputs.count, 0)
     }
 
     func testUnrecoveredPrefixAndSilentWindowsAreCounted() async throws {
@@ -120,7 +138,8 @@ final class SpeechRecognizerTests: XCTestCase {
         XCTAssertEqual(metrics.value.unrecoveredPrefixes, 1)
         let silent = try wave(root, milliseconds: 10000, amplitude: 0)
         _ = try await recognizer.recognize(wave: silent, coreStart: 0, coreEnd: 10000, durationMs: 10000)
-        XCTAssertEqual(metrics.value.silentWindows, 1); XCTAssertEqual(metrics.value.primary.inputs.count, 1)
+        XCTAssertEqual(metrics.value.silentWindows, 6); XCTAssertEqual(metrics.value.primary.inputs.count, 1)
+        XCTAssertEqual(metrics.value.plannedWindows.totalMs, 20000)
     }
 
     func testLiveOriginAndShortTailKeepOriginalTimeline() async throws {

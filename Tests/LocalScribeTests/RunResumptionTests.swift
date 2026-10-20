@@ -95,4 +95,26 @@ final class RunResumptionTests: XCTestCase {
         XCTAssertEqual(resolved.fingerprint, hash)
         try resolved.validate(at: repo.models)
     }
+
+    func testASRRollbackRejectsOptimizedCheckpointsWithoutChangingArchivedRun() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, catalog, manifest, current) = try fixture(root)
+        var optimized = current
+        optimized.pipelineVersion = "1.0.0-audio2-asr6-live1-diarization4-summary15"
+        XCTAssertNotEqual(current.fingerprint, optimized.fingerprint)
+        let run = repo.run(manifest.id, current.id)
+        let runFile = run.appendingPathComponent("run.json")
+        try Disk.write(optimized, to: runFile)
+        let checkpoint = run.appendingPathComponent("asr/part-0.json")
+        try Disk.write(ASRPart(fingerprint: optimized.fingerprint, index: 0, startMs: 0, endMs: 1000, segments: []), to: checkpoint)
+        let files = [repo.folder(manifest.id).appendingPathComponent("manifest.json"), runFile, checkpoint]
+        let before = try files.map { try Data(contentsOf: $0) }
+        XCTAssertThrowsError(try repo.resumeRun(manifest.id, catalog: catalog)) {
+            XCTAssertTrue($0.localizedDescription.contains("Версия обработки изменилась"))
+        }
+        XCTAssertEqual(try files.map { try Data(contentsOf: $0) }, before)
+        XCTAssertEqual(try repo.load(manifest.id).activeRunId, manifest.activeRunId)
+        XCTAssertEqual(try repo.load(manifest.id).pendingRunId, current.id)
+    }
 }

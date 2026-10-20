@@ -68,12 +68,13 @@ struct ASRMetrics: Codable {
     var elapsedSeconds = 0.0
     var modelLoadSeconds = 0.0
     var liveCapture: Bool
-    var windowPolicy = "late-pause-v2-gap-recovery"
+    var windowPolicy = "first-pause-prefix-recovery"
     var plannedWindows = ASRWindowLengths()
     var silentWindows = 0
     var checkpointHits = 0
     var checkpointAudioMs = 0
     var unrecoveredPrefixes = 0
+    // Retained for numeric diagnostic compatibility; asr7 does not retry gaps.
     var unrecoveredGaps = 0
     var primary = ASRCallMetrics()
     var prefixRecovery = ASRCallMetrics()
@@ -95,7 +96,7 @@ final class ASRMetricsRecorder {
     private let started = ProcessInfo.processInfo.systemUptime
     private(set) var value: ASRMetrics
 
-    init(run: URL, liveCapture: Bool, windowPolicy: String = "late-pause-v2-gap-recovery") {
+    init(run: URL, liveCapture: Bool, windowPolicy: String = "first-pause-prefix-recovery") {
         destination = run.appendingPathComponent("metrics-asr.json")
         value = ASRMetrics(liveCapture: liveCapture)
         value.windowPolicy = windowPolicy

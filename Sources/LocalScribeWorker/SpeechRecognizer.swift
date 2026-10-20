@@ -4,14 +4,12 @@ import WhisperKit
 
 final class SpeechRecognizer {
     private let transcribe: ([Float], DecodingOptions) async throws -> [TranscriptionResult]
-    private let windowLength: ([Float]) -> Int
     private let metrics: ASRMetricsRecorder?
     private let warning: @Sendable (String) -> Void
     init(info: RunInfo, models: URL, metrics: ASRMetricsRecorder? = nil,
-         windowLength: @escaping ([Float]) -> Int = { Analysis.nextASRWindowLength($0) },
          warning: @escaping @Sendable (String) -> Void) async throws {
         self.warning = warning
-        self.metrics = metrics; self.windowLength = windowLength
+        self.metrics = metrics
         let started = ProcessInfo.processInfo.systemUptime
         defer { metrics?.modelLoaded(seconds: ProcessInfo.processInfo.systemUptime - started) }
         let folder = models.appendingPathComponent(try info.modelID(for: .asr)), tokenizer = models.appendingPathComponent(try info.modelID(for: .tokenizer))
@@ -24,7 +22,6 @@ final class SpeechRecognizer {
     init(metrics: ASRMetricsRecorder? = nil, warning: @escaping @Sendable (String) -> Void = { _ in },
          transcribe: @escaping ([Float], DecodingOptions) async throws -> [TranscriptionResult]) {
         self.metrics = metrics; self.warning = warning; self.transcribe = transcribe
-        windowLength = { Analysis.nextASRWindowLength($0) }
     }
     func recognize(wave: URL, coreStart: Int, coreEnd: Int, durationMs: Int, originMs: Int = 0) async throws -> [Segment] {
         var segments: [Segment] = []
@@ -32,7 +29,7 @@ final class SpeechRecognizer {
         while offset < coreEnd {
             try Task.checkCancellation()
             let planning = try Media.samples(wave, start: Double(offset-originMs)/1000, duration: Double(min(coreEnd-offset, Analysis.asrCoreWindowMs))/1000)
-            let length = max(1, (windowLength(planning) + 15) / 16)
+            let length = max(1, Analysis.nextASRWindowLength(planning) / 16)
             let end = min(coreEnd, offset + length)
             let readStart = max(0, offset - 1000), readEnd = min(durationMs, end + 1000)
             let samples = try Media.samples(wave, start: Double(readStart-originMs)/1000, duration: Double(readEnd-readStart)/1000)
@@ -58,26 +55,6 @@ final class SpeechRecognizer {
                         warning("В интервале \(timecode(offset))–\(timecode(missingEnd)) есть звук, но начало речи не распознано. Прослушайте исходник; можно повторить обработку другой моделью.")
                     }
                 }
-                let gaps = Analysis.missingASRInteriorRanges(segments: recognized, samples: samples,
-                    readStartMs: readStart, coreStartMs: offset, coreEndMs: end)
-                for gap in gaps {
-                    try Task.checkCancellation()
-                    // Keep acoustic edges, but avoid letting neighbouring speech
-                    // in another language dominate this local retry.
-                    let gapStart = max(originMs, gap.lowerBound - 250), gapEnd = min(durationMs, gap.upperBound + 250)
-                    let context = try Media.samples(wave, start: Double(gapStart-originMs)/1000, duration: Double(gapEnd-gapStart)/1000)
-                    let retried = try await decode(context, options: options, phase: .gapRecovery)
-                    let recovered = mappedSegments(retried, readStart: gapStart, start: gap.lowerBound, end: gap.upperBound, durationMs: durationMs)
-                    recognized.append(contentsOf: recovered)
-                    // A second attempt is bounded; persistent gaps remain explicit.
-                    let remaining = Analysis.missingASRInteriorRanges(segments: recognized, samples: samples,
-                        readStartMs: readStart, coreStartMs: offset, coreEndMs: end)
-                    if remaining.contains(where: { $0.overlaps(gap) }) {
-                        metrics?.missingGap()
-                        warning("В интервале \(timecode(gap.lowerBound))–\(timecode(gap.upperBound)) есть звук без расшифровки. Прослушайте исходник; можно повторить обработку другой моделью.")
-                    }
-                }
-                recognized.sort { $0.startMs < $1.startMs }
                 segments.append(contentsOf: recognized)
             }
             offset = end

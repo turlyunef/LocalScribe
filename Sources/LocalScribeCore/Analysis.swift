@@ -46,63 +46,20 @@ public enum Analysis {
         return audibleFrames >= rate * 3 / 5 ? end : nil
     }
 
-    /// Longer inputs can omit an internal utterance, notably a language switch.
-    /// Retry only uncovered gaps between/after segments. Energy is a retry hint,
-    /// never permission to invent words or discard quiet input. Prefix recovery
-    /// remains separate because it needs the wider real context from asr5.
-    public static func missingASRInteriorRanges(segments: [Segment], samples: [Float], readStartMs: Int,
-                                               coreStartMs: Int, coreEndMs: Int, rate: Int = 16000) -> [Range<Int>] {
-        let ordered = segments.sorted { $0.startMs < $1.startMs }
-        guard let first = ordered.first else { return [] }
-        var coveredEnd = max(coreStartMs, first.endMs), gaps: [Range<Int>] = []
-        for segment in ordered.dropFirst() {
-            let gapEnd = min(coreEndMs, segment.startMs)
-            if gapEnd > coveredEnd { gaps.append(coveredEnd..<gapEnd) }
-            coveredEnd = max(coveredEnd, segment.endMs)
-        }
-        if coveredEnd < coreEndMs { gaps.append(coveredEnd..<coreEndMs) }
-        return gaps.filter { gap in
-            guard gap.count >= 1500 else { return false }
-            // Exclude alignment uncertainty at both boundaries.
-            let startFrame = max(0, (gap.lowerBound + 500 - readStartMs) * rate / 1000)
-            let endFrame = min(samples.count, (gap.upperBound - 500 - readStartMs) * rate / 1000)
-            guard startFrame < endFrame else { return false }
-            let block = max(1, rate / 50)
-            var audibleFrames = 0
-            for start in stride(from: startFrame, to: endFrame, by: block) {
-                let end = min(endFrame, start + block)
-                var energy: Float = 0
-                for index in start..<end { energy += samples[index] * samples[index] }
-                if energy / Float(end - start) >= 1e-6 { audibleFrames += end - start }
-            }
-            return audibleFrames >= rate * 3 / 5
-        }
-    }
-
-    /// Prefer the last complete pause in the second half of a 28 s window.
-    /// Short pauses remain inside the input; quietness never discards speech.
+    /// Choose a pause boundary without deleting silence or moving the original timeline.
+    /// Quietness controls splitting only; it never decides whether to discard speech.
     public static func nextASRWindowLength(_ samples: [Float], rate: Int = 16000) -> Int {
-        let limit = min(samples.count, rate * asrCoreWindowMs / 1000)
-        let block = max(1, rate / 50), minimum = rate * 14, pause = rate * 3 / 5
-        guard limit > minimum else { return limit }
-        var quietStart: Int?, boundary: Int?
-        for start in stride(from: 0, to: limit, by: block) {
-            let end = min(limit, start + block)
+        let block = rate / 50, minimum = rate * 2, pause = 30 // 600 ms
+        guard samples.count > minimum else { return samples.count }
+        var quiet = 0
+        for start in stride(from: 0, to: samples.count, by: block) {
+            let end = min(samples.count, start + block)
             var energy: Float = 0
             for i in start..<end { energy += samples[i] * samples[i] }
-            if energy / Float(end-start) < 1e-6 {
-                if quietStart == nil { quietStart = start }
-            } else if let silenceStart = quietStart {
-                let midpoint = (silenceStart + start) / 2
-                if start - silenceStart >= pause, midpoint >= minimum, limit - midpoint >= rate {
-                    boundary = midpoint
-                }
-                quietStart = nil
-            }
+            if energy / Float(end-start) < 1e-6 { quiet += 1 } else { quiet = 0 }
+            if quiet >= pause, start >= minimum { return min(samples.count, start - block * pause / 2) }
         }
-        // An already quiet end is a safe boundary and avoids a tiny silent tail.
-        if let quietStart, limit - quietStart >= pause { return limit }
-        return boundary ?? limit
+        return samples.count
     }
     public static func language(_ text: String, fallback: String) -> String {
         let ru = text.unicodeScalars.contains { (0x400...0x52f).contains($0.value) }
