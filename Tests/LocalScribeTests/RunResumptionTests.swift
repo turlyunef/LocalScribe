@@ -96,25 +96,89 @@ final class RunResumptionTests: XCTestCase {
         try resolved.validate(at: repo.models)
     }
 
-    func testASRRollbackRejectsOptimizedCheckpointsWithoutChangingArchivedRun() throws {
+    func testASRVersionChangeRejectsOldCheckpointsWithoutChangingArchivedRun() throws {
+        for version in ["asr6", "asr7"] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let (repo, catalog, manifest, current) = try fixture(root)
+            var previous = current
+            previous.pipelineVersion = "1.0.0-audio2-\(version)-live1-diarization4-summary15"
+            XCTAssertNotEqual(current.fingerprint, previous.fingerprint)
+            let run = repo.run(manifest.id, current.id)
+            let runFile = run.appendingPathComponent("run.json")
+            try Disk.write(previous, to: runFile)
+            let checkpoint = run.appendingPathComponent("asr/part-0.json")
+            try Disk.write(ASRPart(fingerprint: previous.fingerprint, index: 0, startMs: 0, endMs: 1000, segments: []), to: checkpoint)
+            let files = [repo.folder(manifest.id).appendingPathComponent("manifest.json"), runFile, checkpoint]
+            let before = try files.map { try Data(contentsOf: $0) }
+            XCTAssertThrowsError(try repo.resumeRun(manifest.id, catalog: catalog)) {
+                XCTAssertTrue($0.localizedDescription.contains("Версия обработки изменилась"))
+            }
+            XCTAssertEqual(try files.map { try Data(contentsOf: $0) }, before)
+            XCTAssertEqual(try repo.load(manifest.id).activeRunId, manifest.activeRunId)
+            XCTAssertEqual(try repo.load(manifest.id).pendingRunId, current.id)
+        }
+    }
+
+    func testRejectedASR7ResumeAndFailedASR8ReprocessingKeepReadableActiveResult() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let (repo, catalog, manifest, current) = try fixture(root)
-        var optimized = current
-        optimized.pipelineVersion = "1.0.0-audio2-asr6-live1-diarization4-summary15"
-        XCTAssertNotEqual(current.fingerprint, optimized.fingerprint)
-        let run = repo.run(manifest.id, current.id)
-        let runFile = run.appendingPathComponent("run.json")
-        try Disk.write(optimized, to: runFile)
-        let checkpoint = run.appendingPathComponent("asr/part-0.json")
-        try Disk.write(ASRPart(fingerprint: optimized.fingerprint, index: 0, startMs: 0, endMs: 1000, segments: []), to: checkpoint)
-        let files = [repo.folder(manifest.id).appendingPathComponent("manifest.json"), runFile, checkpoint]
-        let before = try files.map { try Data(contentsOf: $0) }
-        XCTAssertThrowsError(try repo.resumeRun(manifest.id, catalog: catalog)) {
-            XCTAssertTrue($0.localizedDescription.contains("Версия обработки изменилась"))
+        let (repo, catalog, initial, current) = try fixture(root)
+        var manifest = initial
+        let original = repo.folder(manifest.id).appendingPathComponent(manifest.originalRelativePath)
+        try Disk.directory(original.deletingLastPathComponent())
+        try Data("technical source".utf8).write(to: original)
+        manifest.sha256 = try Disk.hash(original)
+        let oldVersion = "1.0.0-audio2-asr7-live1-diarization4-summary15"
+        var active = RunInfo(id: try XCTUnwrap(manifest.activeRunId), sourceHash: manifest.sha256,
+                             profileHash: catalog.fingerprint)
+        active.pipelineVersion = oldVersion
+        let transcript = Transcript(fingerprint: active.fingerprint, diarized: true, segments: [
+            Segment(id: "stable-id", startMs: 200, endMs: 900, speakerId: "speaker-1",
+                    text: "Готовый результат", language: "ru", uncertain: true,
+                    words: [Word(text: "Готовый", startMs: 200, endMs: 500),
+                            Word(text: " результат", startMs: 500, endMs: 900)])
+        ])
+        let summary = Summary(language: "ru", overview: [
+            Finding(id: "fact", text: "Результат", evidenceSegmentIds: ["stable-id"], uncertain: true)
+        ])
+        let activePath = repo.run(manifest.id, active.id)
+        try Disk.write(active, to: activePath.appendingPathComponent("run.json"))
+        try Disk.write(transcript, to: activePath.appendingPathComponent("transcript.json"))
+        try Disk.write(summary, to: activePath.appendingPathComponent("summary.json"))
+        var pending = current; pending.pipelineVersion = oldVersion; pending.sourceHash = manifest.sha256
+        let pendingPath = repo.run(manifest.id, pending.id)
+        try Disk.write(pending, to: pendingPath.appendingPathComponent("run.json"))
+        try Disk.write(ASRPart(fingerprint: pending.fingerprint, index: 0, startMs: 0, endMs: 1000,
+                              segments: transcript.segments), to: pendingPath.appendingPathComponent("asr/part-0.json"))
+        try repo.save(manifest)
+        let preserved = [original, activePath.appendingPathComponent("run.json"),
+                         activePath.appendingPathComponent("transcript.json"), activePath.appendingPathComponent("summary.json"),
+                         pendingPath.appendingPathComponent("run.json"), pendingPath.appendingPathComponent("asr/part-0.json")]
+        let bytes = try preserved.map { try Data(contentsOf: $0) }
+        let manifestURL = repo.folder(manifest.id).appendingPathComponent("manifest.json")
+        let oldManifest = try Data(contentsOf: manifestURL)
+        XCTAssertThrowsError(try repo.resumeRun(manifest.id, catalog: catalog))
+        XCTAssertEqual(try Data(contentsOf: manifestURL), oldManifest)
+        XCTAssertEqual(try repo.results(repo.load(manifest.id)).0, transcript)
+        XCTAssertEqual(try repo.results(repo.load(manifest.id)).1, summary)
+
+        let fresh = try repo.beginRun(&manifest, catalog: catalog)
+        XCTAssertEqual(fresh.pipelineVersion, "1.0.0-audio2-asr8-live1-diarization4-summary15")
+        XCTAssertNotEqual(fresh.id, pending.id)
+        XCTAssertNotEqual(fresh.fingerprint, pending.fingerprint)
+        XCTAssertEqual(fresh.modelIDs, pending.modelIDs)
+        // Model/ASR failure changes only the new attempt's status. Even a broken
+        // partial artifact must not replace the validated active transcript.
+        try Data("incomplete".utf8).write(to: repo.run(manifest.id, fresh.id).appendingPathComponent("transcript.json"))
+        for state in [JobState.failed, .cancelled, .interrupted] {
+            manifest.state = state; try repo.save(manifest)
+            XCTAssertEqual(try repo.resumeRun(manifest.id, catalog: catalog).id, fresh.id)
+            XCTAssertEqual(try repo.load(manifest.id).activeRunId, active.id)
+            XCTAssertEqual(try repo.load(manifest.id).pendingRunId, fresh.id)
+            XCTAssertEqual(try repo.results(repo.load(manifest.id)).0, transcript)
+            XCTAssertEqual(try repo.results(repo.load(manifest.id)).1, summary)
+            XCTAssertEqual(try preserved.map { try Data(contentsOf: $0) }, bytes)
         }
-        XCTAssertEqual(try files.map { try Data(contentsOf: $0) }, before)
-        XCTAssertEqual(try repo.load(manifest.id).activeRunId, manifest.activeRunId)
-        XCTAssertEqual(try repo.load(manifest.id).pendingRunId, current.id)
     }
 }

@@ -2,7 +2,7 @@ import Foundation
 import LocalScribeCore
 import WhisperKit
 
-enum ASRCallPhase { case primary, prefixRecovery, gapRecovery }
+enum ASRCallPhase { case primary, prefixRecovery, gapRecovery, contextReview }
 
 /// Bounded numeric diagnostics. No text, tokens, source IDs, paths or SDK errors.
 struct ASRWindowLengths: Codable {
@@ -79,12 +79,18 @@ struct ASRMetrics: Codable {
     var primary = ASRCallMetrics()
     var prefixRecovery = ASRCallMetrics()
     var gapRecovery = ASRCallMetrics()
+    // Optional: historical metrics remain readable; shipping ASR leaves it absent.
+    var contextReview: ASRCallMetrics?
 
     mutating func update(_ phase: ASRCallPhase, _ body: (inout ASRCallMetrics) -> Void) {
         switch phase {
         case .primary: body(&primary)
         case .prefixRecovery: body(&prefixRecovery)
         case .gapRecovery: body(&gapRecovery)
+        case .contextReview:
+            var call = contextReview ?? ASRCallMetrics()
+            body(&call)
+            contextReview = call
         }
     }
 }

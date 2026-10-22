@@ -82,7 +82,11 @@ assert [(x['part']['startMs'],x['part']['endMs']) for x in parts]==[(0,30000),(3
 metrics=json.loads((run/'metrics-asr.json').read_text())
 assert metrics['status']=='completed' and metrics['liveCapture'] is True
 assert metrics['checkpointHits']==1 and metrics['checkpointAudioMs']==30000
-assert metrics['plannedWindows']['count']==1
+# The first-pause policy splits a silent tail into several short cores.
+# Check complete tail coverage and silence, not the historical late-pause count.
+assert metrics['plannedWindows']['totalMs']==40125-30000
+assert metrics['plannedWindows']['count']>=1
+assert metrics['silentWindows']==metrics['plannedWindows']['count']
 assert metrics['primary']['inputs']['count']==0, 'The resumed silent tail must not decode the cached speech again'
 result=dict(status='passed',recordingPath=str(recording),runPath=str(run),firstCheckpointBeforeStop=True,resumedCheckpointUnchanged=True,tailEndMs=parts[-1]['part']['endMs'],firstRunEvents=[e['type'] for e in events1],resumeEvents=[e['type'] for e in events2],segments=len(json.loads((run/'live-transcript.json').read_text())['segments']),metricsStatus=metrics['status'],checkpointHits=metrics['checkpointHits'],newWindowCount=metrics['plannedWindows']['count'],newPrimaryCalls=metrics['primary']['inputs']['count'])
 write(base/'probe-result.json',result)

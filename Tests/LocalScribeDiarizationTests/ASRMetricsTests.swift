@@ -3,6 +3,20 @@ import XCTest
 @testable import LocalScribeWorker
 
 final class ASRMetricsTests: XCTestCase {
+    func testContextReviewMetricsAreOptionalForHistoricalAndProductionDiagnostics() throws {
+        let metrics = ASRMetrics(liveCapture: false)
+        let encoder = JSONEncoder(), decoder = JSONDecoder()
+        let legacy = try encoder.encode(metrics)
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: legacy) as? [String: Any])
+        XCTAssertNil(json["contextReview"])
+        XCTAssertNil(try decoder.decode(ASRMetrics.self, from: legacy).contextReview)
+        var reviewed = try decoder.decode(ASRMetrics.self, from: legacy)
+        reviewed.update(.contextReview) { $0.inputs.add(30000) }
+        let saved = try decoder.decode(ASRMetrics.self, from: encoder.encode(reviewed))
+        XCTAssertEqual(saved.contextReview?.inputs.count, 1)
+        XCTAssertEqual(saved.primary.inputs.count, 0)
+    }
+
     func testPipelineModelLoadFailureFinishesMetricsWithoutChangingRunOrManifest() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

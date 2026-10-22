@@ -50,4 +50,41 @@ final class ASRWindowTests: XCTestCase {
         XCTAssertEqual(Analysis.nextASRWindowLength(samples(seconds: 28, pauses: [25000..<25580]), rate: 1000), 28000)
         XCTAssertEqual(Analysis.nextASRWindowLength(samples(seconds: 11, pauses: [5000..<6000]), rate: 1000), 5280)
     }
+
+    func testExperimentalLatePausePreservesShortUtterancesInsideWindow() {
+        let audio = samples(seconds: 28, pauses: [4000..<5000, 16000..<17000, 25000..<26000])
+        XCTAssertEqual(Analysis.nextASRWindowLength(audio, rate: 1000, policy: .firstPause), 4280)
+        XCTAssertEqual(Analysis.nextASRWindowLength(audio, rate: 1000, policy: .latePause), 25500)
+        XCTAssertEqual(Analysis.nextASRWindowLength(samples(seconds: 28, pauses: [26000..<28000]), rate: 1000, policy: .latePause), 28000)
+        XCTAssertEqual(Analysis.nextASRWindowLength(samples(seconds: 60, pauses: []), rate: 1000, policy: .latePause), 28000)
+    }
+
+    func testBothPoliciesCoverQuietAudioAndShortTailsWithoutDroppingSamples() {
+        for policy in ASRWindowPolicy.allCases {
+            for amplitude: Float in [0, 0.0005, 0.1] {
+                let audio = [Float](repeating: amplitude, count: 60125)
+                var offset = 0
+                while offset < audio.count {
+                    let input = Array(audio[offset..<min(offset + 28000, audio.count)])
+                    let count = Analysis.nextASRWindowLength(input, rate: 1000, policy: policy)
+                    XCTAssertGreaterThan(count, 0); XCTAssertLessThanOrEqual(count, 28000)
+                    offset += count
+                }
+                XCTAssertEqual(offset, audio.count)
+            }
+        }
+    }
+
+    func testInteriorRecoveryDetectsOnlySustainedUncoveredAudio() {
+        let segments = [Segment(id: "first", startMs: 0, endMs: 3000, text: "first", language: "en"),
+                        Segment(id: "last", startMs: 7000, endMs: 8000, text: "last", language: "en")]
+        let voiced = samples(seconds: 10, pauses: [])
+        XCTAssertEqual(Analysis.missingASRInteriorRanges(segments: segments, samples: voiced,
+            readStartMs: 0, coreStartMs: 0, coreEndMs: 10000, rate: 1000), [3000..<7000, 8000..<10000])
+        let quiet = samples(seconds: 10, pauses: [3000..<7000, 8000..<10000])
+        XCTAssertTrue(Analysis.missingASRInteriorRanges(segments: segments, samples: quiet,
+            readStartMs: 0, coreStartMs: 0, coreEndMs: 10000, rate: 1000).isEmpty)
+        XCTAssertTrue(Analysis.missingASRInteriorRanges(segments: [], samples: voiced,
+            readStartMs: 0, coreStartMs: 0, coreEndMs: 10000, rate: 1000).isEmpty)
+    }
 }

@@ -4,6 +4,7 @@ import LocalScribeCore
 
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
+    let aboutPanel = AboutPanelPresenter()
     private var quitting = false
     private var shutdownFinished = false
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -28,7 +29,7 @@ import LocalScribeCore
         .commands {
             CommandGroup(replacing: .appInfo) {
                 Button("О LocalScribe") {
-                    NSApplication.shared.orderFrontStandardAboutPanel(options: [
+                    delegate.aboutPanel.show(options: [
                         .applicationVersion: AppInfo.version,
                         .credits: NSAttributedString(string: "Локальная запись, расшифровка и подведение итогов встреч на вашем Mac.")
                     ])
