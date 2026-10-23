@@ -5,6 +5,9 @@ ROOT="$PWD"
 IDENTITY="${LOCALSCRIBE_SIGN_IDENTITY:--}"
 bash scripts/build_icon.sh
 if [ ! -x Assets/tools/ffmpeg ] || [ ! -x Assets/tools/ffprobe ]; then bash scripts/build_ffmpeg.sh; fi
+for tool in Assets/tools/ffmpeg Assets/tools/ffprobe; do
+    "$tool" -v quiet -demuxers | awk '$1 == "D" && $2 == "aac" { found=1 } END { exit !found }' || { echo "Rebuild bundled AAC audio tools: bash scripts/build_ffmpeg.sh" >&2; exit 1; }
+done
 # Reject a stale tool compiled for the build machine's newer OS.
 for tool in Assets/tools/ffmpeg Assets/tools/ffprobe; do
     xcrun vtool -show-build "$tool" | awk '$1 == "minos" { found=1; if ($2 != "26.0") exit 1 } END { if (!found) exit 1 }' || { echo "Rebuild bundled audio tools: bash scripts/build_ffmpeg.sh" >&2; exit 1; }

@@ -1,6 +1,6 @@
 # LocalScribe
 
-Нативное локальное приложение для Apple Silicon, macOS 26+. Запись встроенного микрофона, импорт MP3/M4A/WAV/FLAC/OGG/OPUS, Whisper на выбор, SpeakerKit OSS, Qwen3.5 через MLX. Результаты только для чтения, копирование, MD/TXT. Редактора, системного захвата звука, серверов и облачного анализа нет.
+Нативное локальное приложение для Apple Silicon, macOS 26+. Запись встроенного микрофона, импорт AAC (ADTS)/MP3/M4A/WAV/FLAC/OGG/OPUS, Whisper на выбор, SpeakerKit OSS, Qwen3.5 через MLX. Результаты только для чтения, копирование, MD/TXT. Редактора, системного захвата звука, серверов и облачного анализа нет.
 
 **Текущая версия — 0.37.0.** Версия задаётся явно; автоматического пересчёта при сборке нет.
 
@@ -57,6 +57,7 @@ bash scripts/build_app.sh
 ```sh
 swift test -c release -j 4
 python3 -m unittest discover -s scripts/tests -v  # bootstrap и сборка FFmpeg: локальные фикстуры без весов и сети
+python3 scripts/format_checks.py         # декодирование, включая AAC ADTS; нужны Assets/tools и локальные аудиофикстуры
 python3 scripts/download_models.py       # только bootstrap разработчика, те же SHA-256
 python3 scripts/download_models.py --model asr-small --model summary-4b --model diarization
 python3 scripts/smoke.py /path/to/audio.wav --worker .build/out/Products/Release/LocalScribeWorker

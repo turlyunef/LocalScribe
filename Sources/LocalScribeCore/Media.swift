@@ -112,9 +112,33 @@ public enum Media {
               let codec = audio["codec_name"] as? String,
               ["aac", "alac", "mp3", "flac", "vorbis", "opus"].contains(codec) || codec.hasPrefix("pcm_") else { throw ScribeError.message("Выберите поддерживаемый аудиофайл без видео") }
         let format = json["format"] as? [String: Any]
-        let duration = Double((format?["duration"] as? String) ?? (audio["duration"] as? String) ?? "") ?? 0
+        let duration: Double
+        if format?["format_name"] as? String == "aac" {
+            // ADTS has no container duration. FFprobe's bitrate estimate can
+            // differ by seconds on VBR audio, so count actual packet durations.
+            duration = try adtsDuration(source, tools: tools, timeBase: audio["time_base"] as? String, cancellable: cancellable)
+        } else {
+            duration = Double((format?["duration"] as? String) ?? (audio["duration"] as? String) ?? "") ?? 0
+        }
         guard duration.isFinite, duration > 0, duration <= 10_800.0005 else { throw ScribeError.message(duration > 10_800 ? "Запись длиннее 3 часов. Автоматическое усечение отключено." : "Не удалось определить ненулевую длительность") }
         return AudioInfo(duration: duration, sampleRate: Double(audio["sample_rate"] as? String ?? "") ?? 0, channels: audio["channels"] as? Int ?? 0, codec: codec)
+    }
+    private static func adtsDuration(_ source: URL, tools: URL, timeBase: String?, cancellable: Bool) throws -> Double {
+        let parts = timeBase?.split(separator: "/") ?? []
+        guard parts.count == 2, let numerator = Int64(parts[0]), let denominator = Int64(parts[1]),
+              numerator > 0, denominator > 0 else { throw ScribeError.message("Не удалось определить длительность AAC") }
+        // Stop after the import limit plus one second, bounding work and output
+        // for oversized files while still rejecting them without truncation.
+        let data = try execute(tools.appendingPathComponent("ffprobe"), ["-v", "error", "-protocol_whitelist", "file,pipe", "-select_streams", "a:0", "-read_intervals", "%10801", "-show_entries", "packet=duration", "-of", "csv=p=0", source.path], cancellable: cancellable)
+        var ticks: Int64 = 0
+        for line in data.split(separator: 10) {
+            if cancellable { try Task.checkCancellation() }
+            guard let value = Int64(String(decoding: line, as: UTF8.self)), value > 0 else { throw ScribeError.message("Не удалось определить длительность AAC") }
+            let (sum, overflow) = ticks.addingReportingOverflow(value)
+            guard !overflow else { throw ScribeError.message("Некорректная длительность AAC") }
+            ticks = sum
+        }
+        return Double(ticks) * Double(numerator) / Double(denominator)
     }
     public static func prepare(_ source: URL, to destination: URL, tools: URL) throws -> String? {
         try Disk.directory(destination.deletingLastPathComponent())

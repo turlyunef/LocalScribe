@@ -8,34 +8,9 @@ struct ContentView: View {
     @State private var recordingSheet = false
     var body: some View {
         NavigationSplitView {
-            List(selection: $model.selection) {
-                ForEach(model.recordings) { recording in
-                    VStack(alignment: .leading, spacing: 5) {
-                        Text(recording.displayTitle).lineLimit(2).fontWeight(.medium)
-                        Text("\(timecode(recording.durationMs)) · \(recording.createdAt.formatted(date: .abbreviated, time: .omitted))").font(.caption).foregroundStyle(.secondary)
-                        HStack(spacing: 5) {
-                            if recording.state == .queued, let position = model.queuePosition(for: recording.id) {
-                                queuePositionText(position, recordingID: recording.id)
-                            }
-                            Label(recording.state.title, systemImage: recording.state == .recording ? "record.circle.fill" : recording.state == .completed ? "checkmark.circle" : "waveform")
-                                .foregroundStyle(recording.state == .recording ? .red : .secondary)
-                                .accessibilityIdentifier("recording.status.\(recording.id)")
-                        }.font(.caption)
-                        if let processing = recording.captureProcessing, recording.state == .recording {
-                            HStack(spacing: 5) {
-                                if processing == .queued, let position = model.queuePosition(for: recording.id) {
-                                    queuePositionText(position, recordingID: recording.id)
-                                }
-                                Label(processing == .transcribing ? "Речь распознаётся в фоне" : processing == .queued ? "Распознавание в очереди" : "Распознавание приостановлено; запись идёт", systemImage: "waveform")
-                                    .foregroundStyle(.secondary)
-                                    .accessibilityIdentifier("recording.captureStatus.\(recording.id)")
-                            }.font(.caption2)
-                        }
-                    }.padding(.vertical, 5).tag(recording.id)
-                }
-            }
-            .navigationTitle("LocalScribe")
-            .navigationSplitViewColumnWidth(min: 220, ideal: 270)
+            RecordingGroupsSidebar(model: model)
+                .navigationTitle("LocalScribe")
+                .navigationSplitViewColumnWidth(min: 240, ideal: 290)
             VStack(spacing: 6) {
                 Label("Всё обрабатывается на Mac", systemImage: "lock.shield").font(.caption)
                     .accessibilityIdentifier("sidebar.localProcessing")
@@ -83,7 +58,7 @@ struct ContentView: View {
                         RecordingActionsView(
                             canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
                             canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
-                            canDelete: !model.finalizingRecording && model.recordingID != selected.id,
+                            canDelete: model.deletingGroupID == nil && !model.finalizingRecording && model.recordingID != selected.id,
                             showAudio: model.showAudio,
                             repeatAnalysis: { Task { await model.repeatAnalysis(summaryOnly: false) } },
                             recreateSummary: { language in Task { await model.repeatAnalysis(summaryOnly: true, language: language) } },
@@ -164,9 +139,10 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 18) {
                 Label("Новая запись", systemImage: "mic.fill").font(.title2)
                 Text("Встроенный микрофон MacBook")
+                Text("Группа: \(model.defaultGroup.name) ✓").accessibilityIdentifier("recording.destination")
                 Text("Убедитесь, что участники знают о записи.").foregroundStyle(.secondary)
                 Text("Голоса в наушниках не записываются. Запись можно сохранить и без установленных моделей.").font(.callout).foregroundStyle(.secondary)
-                HStack { Spacer(); Button("Отмена") { recordingSheet = false }.help("Закрыть окно без начала записи"); Button("Начать") { recordingSheet = false; Task { await model.startRecording() } }.buttonStyle(.borderedProminent).help("Начать запись встроенного микрофона") }
+                HStack { Spacer(); Button("Отмена") { recordingSheet = false }.help("Закрыть окно без начала записи"); Button("Начать") { let destination = model.defaultGroup.id; recordingSheet = false; Task { await model.startRecording(groupID: destination) } }.buttonStyle(.borderedProminent).help("Начать запись встроенного микрофона") }
             }.padding(28).frame(width: 440)
         }
         .sheet(item: $model.resultEdit) { draft in
@@ -176,12 +152,6 @@ struct ContentView: View {
         .disabled(model.preparingStorage || model.shuttingDown)
     }
 
-    private func queuePositionText(_ position: Int, recordingID: String) -> some View {
-        Text("\(position)")
-            .foregroundStyle(.red)
-            .accessibilityLabel("Место в очереди: \(position)")
-            .accessibilityIdentifier("recording.queuePosition.\(recordingID)")
-    }
 }
 
 struct RecordingStatusText: View {

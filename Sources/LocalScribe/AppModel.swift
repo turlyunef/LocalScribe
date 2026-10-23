@@ -4,6 +4,14 @@ import AVFoundation
 import LocalScribeCore
 
 @MainActor final class AppModel: ObservableObject {
+    @Published private(set) var recordingGroups = RecordingGroups()
+    @Published private(set) var deletingGroupID: String?
+    @Published var sidebarRevealID: String?
+    private var reportedGroupsError: String?
+    private var deletingRecordingIDs: Set<String> = []
+    private var recordingAdmission: [String: UInt64] = [:]
+    private var finalizingRecordingID: String?
+    private var startingGroupID: String?
     @Published var recordings: [Manifest] = [] { didSet { refreshPresentation() } }
     @Published var selection: String? {
         didSet {
@@ -76,6 +84,9 @@ import LocalScribeCore
     private var enqueuing: [String: UUID] = [:]
     private var queueGeneration: UInt64 = 0
     private var activeID: String?
+    // Unlike activeID, this survives cancellation/resource pause until every
+    // worker reader and the queue's file cleanup have finished.
+    private var processingRecordingID: String?
     private var stopping = false
     private var resourcesPaused = false
     private var memoryLimited = false
@@ -161,6 +172,10 @@ import LocalScribeCore
         if snapshot.revision != archiveRevision {
             archiveRevision = snapshot.revision
             recordings = snapshot.manifests
+            recordingGroups = snapshot.groups
+            if let error = snapshot.groupsError, error != reportedGroupsError {
+                reportedGroupsError = error; errorHandler.report(message: error)
+            }
         }
         loadResult()
     }
@@ -351,13 +366,15 @@ import LocalScribeCore
         panel.message = "MP3, M4A, WAV, FLAC, OGG, OPUS — до 3 часов"
         guard panel.runModal() == .OK else { return }; importURLs(panel.urls)
     }
-    func importURLs(_ urls: [URL]) {
-        for url in urls { enqueueImport { url } }
+    func importURLs(_ urls: [URL], groupID: String? = nil) {
+        let destination = groupID ?? recordingGroups.defaultID
+        for url in urls { enqueueImport(groupID: destination) { url } }
     }
-    func importProviders(_ providers: [NSItemProvider]) {
-        for provider in providers { enqueueImport { try await DroppedFileURL.load(provider) } }
+    func importProviders(_ providers: [NSItemProvider], groupID: String? = nil) {
+        let destination = groupID ?? recordingGroups.defaultID
+        for provider in providers { enqueueImport(groupID: destination) { try await DroppedFileURL.load(provider) } }
     }
-    private func enqueueImport(_ loadURL: @escaping @MainActor () async throws -> URL?) {
+    private func enqueueImport(groupID: String, _ loadURL: @escaping @MainActor () async throws -> URL?) {
         guard !preparingStorage, !shuttingDown, let archive else { return }
         importQueue.enqueue { [self] in
             do {
@@ -366,7 +383,7 @@ import LocalScribeCore
                 let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
                 let tools = self.tools
                 do {
-                    let manifest = try await archive.importFile(url, tools: tools)
+                    let manifest = try await archive.importFile(url, tools: tools, groupID: groupID)
                     await completeImport(manifest)
                 } catch let duplicate as DuplicateRecording {
                     try Task.checkCancellation()
@@ -375,7 +392,7 @@ import LocalScribeCore
                     case .openExisting: selection = duplicate.id
                     case .importAgain:
                         try Task.checkCancellation()
-                        let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true)
+                        let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true, groupID: groupID)
                         await completeImport(manifest)
                     case .cancel: break
                     }
@@ -388,16 +405,18 @@ import LocalScribeCore
         if resultEdit == nil && !savingResult { selection = manifest.id }
         await reload(); await enqueue(manifest.id)
     }
-    func startRecording() async {
+    func startRecording(groupID: String? = nil) async {
         guard resultEdit == nil, !savingResult, recordingID == nil, let repository, let archive, !preparingStorage, !stopping, !shuttingDown, !startingRecording, !finalizingRecording, !installing else { return }
+        let destination = groupID ?? recordingGroups.defaultID
+        startingGroupID = destination
         startingRecording = true
-        defer { startingRecording = false; Task { await processQueue() } }
+        defer { startingGroupID = nil; startingRecording = false; Task { await processQueue() } }
         guard await AVCaptureDevice.requestAccess(for: .audio) else { errorHandler.report(message: "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS."); return }
         guard !shuttingDown else { return }
         var m = Manifest(sourceType: "microphone", title: "Запись \(Date().formatted(date: .abbreviated, time: .shortened))", filename: "original.caf")
         m.state = .recording
         do {
-            try await archive.save(m)
+            try await archive.createRecording(m, groupID: destination)
             guard !shuttingDown else {
                 try await archive.update(m.id) { $0.state = .interrupted }
                 return
@@ -432,13 +451,19 @@ import LocalScribeCore
                     }
                 }
             }
-            await reload()
-        } catch { m.state = .failed; m.lastError = error.localizedDescription; try? await archive.save(m); errorHandler.report(error); await reload() }
+            await revealRecording(m.id)
+        } catch {
+            let message = error.localizedDescription
+            _ = try? await archive.update(m.id) { $0.state = .failed; $0.lastError = message }
+            errorHandler.report(error); await reload()
+        }
     }
     func stopRecording(warning: String? = nil) async {
         guard let id = recordingID, let archive, !stopping else { return }
+        finalizingRecordingID = id
         stopping = true; finalizingRecording = true; status = "Сохраняем аудио…"
         defer {
+            finalizingRecordingID = nil
             stopping = false; finalizingRecording = false; supervisor.recordingActive = false
             captureLimited = false; resourcesPaused = memoryLimited
             if status == "Сохраняем аудио…" { status = "" }
@@ -513,11 +538,12 @@ import LocalScribeCore
         }
     }
     func resume(_ id: String) {
-        guard !preparingStorage, !shuttingDown, !finalizingRecording, queuePauses.isEmpty, id != recordingID, id != activeID else { return }
-        let generation = queueGeneration
+        guard !preparingStorage, !shuttingDown, !finalizingRecording, queuePauses.isEmpty, !deletingRecordingIDs.contains(id), id != recordingID, id != activeID else { return }
+        let generation = queueGeneration, admission = recordingAdmission[id, default: 0]
+        finalizingRecordingID = id
         finalizingRecording = true
         Task {
-            defer { finalizingRecording = false }
+            defer { finalizingRecording = false; finalizingRecordingID = nil }
             do {
                 if let archive {
                     let (needsAssembly, hasParts) = try await archive.perform { repository in
@@ -530,7 +556,7 @@ import LocalScribeCore
                         let parts = (try? FileManager.default.contentsOfDirectory(at: repository.folder(id).appendingPathComponent("capture"), includingPropertiesForKeys: nil)) ?? []
                         return (!m.sourceComplete || needsSeal, parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") })
                     }
-                    guard generation == queueGeneration, !shuttingDown else { return }
+                    guard generation == queueGeneration, admission == recordingAdmission[id, default: 0], !deletingRecordingIDs.contains(id), !shuttingDown else { return }
                     if needsAssembly {
                         guard hasParts else {
                             let message = "В этой записи нет сохранённого звука. Начните новую запись."
@@ -540,7 +566,7 @@ import LocalScribeCore
                         try await finalizeCapture(id)
                     }
                 }
-                guard generation == queueGeneration, !shuttingDown else { return }
+                guard generation == queueGeneration, admission == recordingAdmission[id, default: 0], !deletingRecordingIDs.contains(id), !shuttingDown else { return }
                 await enqueue(id, allowCancelled: true)
             } catch { errorHandler.report(error) }
         }
@@ -566,14 +592,14 @@ import LocalScribeCore
     }
     func enqueueCapture(_ id: String) async {
         guard let archive else { return }
-        let generation = queueGeneration, pauseReason = queuePauses.values.first
+        let generation = queueGeneration, admission = recordingAdmission[id, default: 0], pauseReason = queuePauses.values.first
         let valid = await archive.perform { repository in
             guard let manifest = try? repository.load(id), manifest.state == .recording, manifest.captureProcessing != .cancelled,
                   let pending = manifest.pendingRunId,
                   let info = try? Disk.read(RunInfo.self, at: repository.run(id, pending).appendingPathComponent("run.json")) else { return false }
             return info.liveCapture == true
         }
-        guard valid, generation == queueGeneration, activeID != id, !shuttingDown else { return }
+        guard valid, generation == queueGeneration, admission == recordingAdmission[id, default: 0], !deletingRecordingIDs.contains(id), activeID != id, !shuttingDown else { return }
         if let reason = queuePauses.values.first ?? pauseReason {
             await interruptEnqueue(id, reason: reason); return
         }
@@ -588,7 +614,7 @@ import LocalScribeCore
         await reload()
     }
     func enqueue(_ id: String, allowCancelled: Bool = false) async {
-        guard let archive, enqueuing[id] == nil else { return }
+        guard let archive, !deletingRecordingIDs.contains(id), enqueuing[id] == nil else { return }
         let request = UUID(), generation = queueGeneration
         let pauseReason = queuePauses.values.first
         enqueuing[id] = request
@@ -598,7 +624,7 @@ import LocalScribeCore
         }
         guard let m = try? await archive.load(id), m.sourceComplete, id != activeID,
               allowCancelled || m.state != .cancelled,
-              generation == queueGeneration, enqueuing[id] == request else { return }
+              generation == queueGeneration, !deletingRecordingIDs.contains(id), enqueuing[id] == request else { return }
         if shuttingDown {
             _ = try? await archive.update(id) { m in
                 m.state = .interrupted; m.lastError = "Приложение закрыто. Можно продолжить обработку."
@@ -622,15 +648,15 @@ import LocalScribeCore
         try hardware.requireCompatibility(for: profile)
     }
     func processQueue() async {
-        guard !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
+        guard deletingGroupID == nil, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
               let repository, let archive, let catalog else { return }
-        busy = true; defer { busy = false; activeID = nil; status = "" }
-        while queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
+        busy = true; defer { busy = false; activeID = nil; processingRecordingID = nil; status = "" }
+        while deletingGroupID == nil && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
                 status = "Обработка ожидает охлаждения Mac"
                 try? await Task.sleep(for: .seconds(2)); continue
             }
-            let id = queued.removeFirst(); activeID = id
+            let id = queued.removeFirst(); activeID = id; processingRecordingID = id
             do {
                 var m = try await archive.load(id)
                 if m.pendingRunId == nil {
@@ -722,7 +748,7 @@ import LocalScribeCore
             }
             // Only the owning queue task clears activeID, after all readers exit.
             await archive.perform { try? $0.cleanupTemporaryFiles(id) }
-            activeID = nil; await reload()
+            activeID = nil; processingRecordingID = nil; await reload()
         }
     }
     private func runWorker(_ command: WorkerCommand) async throws {
@@ -814,9 +840,10 @@ import LocalScribeCore
     }
     func cancel(_ id: String) async {
         guard let archive else { return }
+        recordingAdmission[id, default: 0] &+= 1
         enqueuing.removeValue(forKey: id)
         queued.removeAll { $0 == id }
-        if activeID == id {
+        if activeID == id || processingRecordingID == id {
             suspendingQueue = true; activeID = nil
             await supervisor.cancel()
             while busy { try? await Task.sleep(for: .milliseconds(50)) }
@@ -829,12 +856,88 @@ import LocalScribeCore
         await reload()
     }
     func deleteSelected() async {
-        guard let selected, let archive, selected.id != recordingID, !finalizingRecording else { return }
+        guard deletingGroupID == nil, let selected, let archive, selected.id != recordingID, !finalizingRecording else { return }
         let alert = NSAlert(); alert.messageText = "Удалить запись и результаты?"; alert.informativeText = "Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся."
         alert.addButton(withTitle: "Удалить запись"); alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         await cancelSelected()
         do { try await archive.delete(selected); selection = nil; await reload() } catch { errorHandler.report(error) }
+    }
+    var defaultGroup: RecordingGroup { recordingGroups.defaultGroup }
+    func recordings(in groupID: String) -> [Manifest] {
+        recordings.filter { recordingGroups.groupID(for: $0.id) == groupID }
+            .sorted { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt }
+    }
+    func saveGroupName(_ name: String, id: String? = nil) async throws {
+        guard let archive else { throw ScribeError.message("Хранилище недоступно") }
+        try await archive.editGroups { groups in
+            if let id { try groups.rename(id, name: name) }
+            else { try groups.create(name: name) }
+        }
+        await reload()
+    }
+    func changeGroups(_ operation: @Sendable (inout RecordingGroups) throws -> Void) async {
+        guard let archive else { return }
+        do { try await archive.editGroups(operation); await reload() }
+        catch { errorHandler.report(error) }
+    }
+    func moveRecording(_ id: String, to groupID: String) async {
+        guard let archive, deletingGroupID == nil else { return }
+        do { try await archive.moveRecording(id, to: groupID); await reload() }
+        catch { errorHandler.report(error) }
+    }
+    func revealRecording(_ id: String) async {
+        guard let archive else { return }
+        await reload()
+        let groupID = recordingGroups.groupID(for: id)
+        do { try await archive.editGroups { try $0.setExpanded(groupID, true) } }
+        catch { errorHandler.report(error) }
+        await reload()
+        selection = id; sidebarRevealID = id
+    }
+    func canDeleteRecordings(in groupID: String) -> Bool {
+        if startingRecording && startingGroupID == groupID { return false }
+        return ![recordingID, finalizingRecordingID].compactMap { $0 }.contains {
+            recordingGroups.groupID(for: $0) == groupID
+        }
+    }
+    /// Confirmation belongs to the view; this method rechecks live protection.
+    func deleteGroup(_ id: String, deleteRecordings: Bool) async {
+        guard let archive, deletingGroupID == nil, id != RecordingGroup.ungroupedID else { return }
+        guard !deleteRecordings || canDeleteRecordings(in: id) else {
+            errorHandler.report(message: "Сначала остановите запись"); return
+        }
+        deletingGroupID = id
+        var members: [String] = []
+        defer {
+            deletingGroupID = nil
+            // Deleted IDs stay barred; surviving members can be explicitly resumed.
+            deletingRecordingIDs.subtract(recordings.map(\.id))
+            Task { await processQueue() }
+        }
+        do {
+            members = try await archive.prepareGroupDeletion(id)
+            if deleteRecordings {
+                let protected = Set([recordingID, finalizingRecordingID].compactMap { $0 })
+                guard canDeleteRecordings(in: id), protected.isDisjoint(with: members) else {
+                    throw ScribeError.message("Сначала остановите запись")
+                }
+                deletingRecordingIDs.formUnion(members)
+                // Invalidate all admissions before the first cancellation suspends.
+                for member in members {
+                    recordingAdmission[member, default: 0] &+= 1
+                    enqueuing.removeValue(forKey: member)
+                }
+                queued.removeAll { members.contains($0) }
+                for member in members { await cancel(member) }
+            }
+            try await archive.finishGroupDeletion(id, deleteRecordings: deleteRecordings)
+        } catch {
+            await archive.cancelGroupDeletion(id)
+            errorHandler.report(error)
+        }
+        await reload()
+        if let selection, !recordings.contains(where: { $0.id == selection }) { self.selection = nil }
     }
     func showAudio() { guard let selected, let repository else { return }; NSWorkspace.shared.activateFileViewerSelecting([repository.folder(selected.id).appendingPathComponent(selected.originalRelativePath)]) }
     func rendered(_ part: ExportPart, markdown: Bool = false) -> String {

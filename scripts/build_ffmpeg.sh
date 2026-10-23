@@ -24,7 +24,7 @@ cd "$STAGING/ffmpeg-$VERSION"
  --disable-doc --disable-debug --disable-network --disable-avdevice \
  --disable-everything --enable-ffmpeg --enable-ffprobe --enable-avcodec --enable-avformat \
  --enable-avfilter --enable-swresample --enable-protocol=file,pipe \
- --enable-demuxer=mov,mp3,wav,flac,ogg,caf \
+ --enable-demuxer=aac,mov,mp3,wav,flac,ogg,caf \
  --enable-decoder=aac,alac,mp3,mp3float,flac,vorbis,opus,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le,pcm_s16be,pcm_s24be,pcm_s32be,pcm_f32be \
  --enable-parser=aac,mpegaudio,flac,opus,vorbis \
  --enable-encoder=pcm_s16le,pcm_f32le --enable-muxer=wav,caf,pcm_f32le \

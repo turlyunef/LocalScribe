@@ -1,0 +1,343 @@
+import AppKit
+import SwiftUI
+import XCTest
+@testable import LocalScribe
+@testable import LocalScribeCore
+
+@MainActor
+final class RecordingGroupIntegrationTests: XCTestCase {
+    private func fixture() throws -> (RecordingRepository, AppModel) {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let suite = UUID().uuidString
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults, importProbe: { _, _ in
+            AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le")
+        })
+        return (repo, model)
+    }
+    private func descendants(_ element: AnyObject) -> [AnyObject] {
+        let children = (element.accessibilityChildren?() ?? []).map { $0 as AnyObject }
+        return children + children.flatMap { descendants($0) }
+    }
+    private func element(_ id: String, in view: NSView) -> AnyObject? {
+        if let found = descendants(view).first(where: { $0.accessibilityIdentifier?() == id }) { return found }
+        return view.subviews.lazy.compactMap { self.element(id, in: $0) }.first
+    }
+    private func host<V: View>(_ view: V) -> (NSHostingView<V>, NSWindow) {
+        _ = NSApplication.shared
+        NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
+        let hosting = NSHostingView(rootView: view)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = hosting
+        window.makeKeyAndOrderFront(nil); hosting.layoutSubtreeIfNeeded()
+        return (hosting, window)
+    }
+    private func settle(_ view: NSView) async throws {
+        try await Task.sleep(for: .milliseconds(180)); view.layoutSubtreeIfNeeded()
+    }
+
+    func testImportBatchAndDelayedProvidersKeepDestinationAcrossDefaultChangesAndDuplicates() async throws {
+        let (repo, model) = try fixture()
+        try await model.saveGroupName("First")
+        let first = model.defaultGroup.id
+        let urls = try (1...3).map { i in
+            let url = repo.root.appendingPathComponent("input-\(i).wav")
+            try Data("audio \(i)".utf8).write(to: url); return url
+        }
+        // Block the import slot before the batch is added, then change the default.
+        var release = false
+        model.importQueue.enqueue { while !release { try? await Task.sleep(for: .milliseconds(10)) } }
+        model.importURLs(Array(urls.prefix(2)))
+        let provider = NSItemProvider(object: urls[2] as NSURL)
+        model.importProviders([provider])
+        try await model.saveGroupName("Second")
+        let second = model.defaultGroup.id
+        release = true
+        await model.importQueue.waitUntilIdle()
+        XCTAssertEqual(model.recordings.count, 3)
+        XCTAssertTrue(model.recordings.allSatisfy { model.recordingGroups.groupID(for: $0.id) == first })
+        XCTAssertEqual(model.defaultGroup.id, second)
+        model.resolveDuplicateImport = { _ in .importAgain }
+        model.importURLs([urls[0]], groupID: first)
+        await model.importQueue.waitUntilIdle()
+        XCTAssertEqual(model.recordings.count, 4)
+        XCTAssertTrue(model.recordings.allSatisfy { model.recordingGroups.groupID(for: $0.id) == first })
+        XCTAssertEqual(model.defaultGroup.id, second)
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
+    }
+
+    func testMovePreservesSelectionQueueExpansionAndDateOrder() async throws {
+        let (repo, model) = try fixture()
+        let manifests = try (1...3).map { i in
+            var m = Manifest(sourceType: "import", title: "Meeting \(i)", filename: "a.wav")
+            m.createdAt = Date(timeIntervalSince1970: Double(i)); m.sourceComplete = true
+            try repo.save(m); return m
+        }
+        model.installing = true; model.modelsReady = true
+        for m in manifests { await model.enqueue(m.id) }
+        try await model.saveGroupName("First")
+        let first = model.defaultGroup.id
+        try await model.saveGroupName("Second")
+        let second = model.defaultGroup.id
+        await model.changeGroups { try $0.setExpanded(second, false) }
+        model.selection = manifests[0].id
+        for m in manifests.reversed() { await model.moveRecording(m.id, to: first) }
+        await model.moveRecording(manifests[0].id, to: second)
+        XCTAssertEqual(model.selection, manifests[0].id)
+        XCTAssertEqual(model.recordings(in: first).map(\.id), [manifests[2].id, manifests[1].id])
+        XCTAssertEqual(model.recordingGroups.groups.first { $0.id == second }?.expanded, false)
+        for (index, m) in manifests.enumerated() { XCTAssertEqual(model.queuePosition(for: m.id), index + 1) }
+        await model.changeGroups { try $0.move(first, before: second) }
+        XCTAssertEqual(model.defaultGroup.id, second)
+        await model.revealRecording(manifests[0].id)
+        XCTAssertEqual(model.recordingGroups.groups.first { $0.id == second }?.expanded, true)
+        XCTAssertEqual(model.sidebarRevealID, manifests[0].id)
+        XCTAssertEqual(model.selection, manifests[0].id)
+        await model.deleteGroup(first, deleteRecordings: false)
+        for (index, m) in manifests.enumerated() { XCTAssertEqual(model.queuePosition(for: m.id), index + 1) }
+        XCTAssertEqual(model.selection, manifests[0].id)
+        await model.shutdown()
+    }
+
+    func testSidebarCollapseKeepsOpenRecordingAndDefault() async throws {
+        let (repo, model) = try fixture()
+        let m = Manifest(sourceType: "import", title: "Open", filename: "a.wav")
+        try repo.save(m)
+        _ = try await model.archive?.refresh(m.id)
+        try await model.saveGroupName("Group")
+        let group = model.defaultGroup.id
+        await model.moveRecording(m.id, to: group)
+        model.selection = m.id
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        let header = try XCTUnwrap(element("groups.header.\(group)", in: view))
+        XCTAssertTrue(header.accessibilityPerformPress?() ?? false)
+        try await settle(view)
+        XCTAssertEqual(model.recordingGroups.groups.first?.expanded, false)
+        XCTAssertEqual(model.selection, m.id)
+        XCTAssertEqual(model.defaultGroup.id, group)
+        XCTAssertNil(element("sidebar.recording.\(m.id)", in: view))
+        await model.shutdown()
+    }
+
+    func testAddFocusTypingInvalidNameAndEscapePreserveDefaultUntilCommit() async throws {
+        let (_, model) = try fixture()
+        await model.reload()
+        let old = model.defaultGroup.id
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        XCTAssertTrue(try XCTUnwrap(element("groups.add", in: view)).accessibilityPerformPress?() ?? false)
+        try await settle(view)
+        let field = try XCTUnwrap(window.firstResponder as? NSTextView, "New group must focus its field immediately")
+        XCTAssertEqual(field.string, "")
+        field.insertText("БЕЗ ТЕМЫ", replacementRange: field.selectedRange())
+        field.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        try await settle(view)
+        XCTAssertNotNil(element("groups.name.error", in: view))
+        XCTAssertEqual(model.defaultGroup.id, old)
+        let retry = try XCTUnwrap(window.firstResponder as? NSTextView)
+        retry.selectAll(nil); retry.insertText("  Работа  ", replacementRange: retry.selectedRange())
+        retry.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        try await settle(view)
+        XCTAssertEqual(model.defaultGroup.name, "Работа")
+        XCTAssertEqual(model.recordingGroups.groups.first?.expanded, true)
+        let saved = model.defaultGroup.id
+        XCTAssertTrue(try XCTUnwrap(element("groups.add", in: view)).accessibilityPerformPress?() ?? false)
+        try await settle(view)
+        let cancelled = try XCTUnwrap(window.firstResponder as? NSTextView)
+        cancelled.insertText("Cancelled", replacementRange: cancelled.selectedRange())
+        cancelled.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        try await settle(view)
+        XCTAssertNil(element("groups.name", in: view))
+        XCTAssertEqual(model.defaultGroup.id, saved)
+        XCTAssertEqual(model.recordingGroups.groups.count, 2)
+        await model.shutdown()
+    }
+
+    func testInternalTransferTypesAreDistinctFromEachOtherAndFileURLs() {
+        let id = UUID().uuidString
+        let recording = SidebarTransfer.provider(id, type: SidebarTransfer.recording)
+        let group = SidebarTransfer.provider(id, type: SidebarTransfer.group)
+        XCTAssertFalse(recording.hasItemConformingToTypeIdentifier(SidebarTransfer.group.identifier))
+        XCTAssertFalse(group.hasItemConformingToTypeIdentifier(SidebarTransfer.recording.identifier))
+        XCTAssertFalse(recording.hasItemConformingToTypeIdentifier("public.file-url"))
+        XCTAssertFalse(group.hasItemConformingToTypeIdentifier("public.file-url"))
+        XCTAssertEqual(SidebarTransfer.identifier(Data(id.utf8)), id)
+        XCTAssertNil(SidebarTransfer.identifier(Data("../../outside".utf8)))
+    }
+    func testEditorCommitsOnBlurAndEmptyDraftOrRenameEscapeCancels() async throws {
+        let (_, model) = try fixture()
+        await model.reload()
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        XCTAssertTrue(try XCTUnwrap(element("groups.add", in: view)).accessibilityPerformPress?() ?? false)
+        try await settle(view)
+        let field = try XCTUnwrap(window.firstResponder as? NSTextView)
+        field.insertText("Blur saved", replacementRange: field.selectedRange())
+        window.makeFirstResponder(view)
+        try await settle(view)
+        XCTAssertEqual(model.defaultGroup.name, "Blur saved")
+        let saved = model.defaultGroup.id
+        XCTAssertTrue(try XCTUnwrap(element("groups.add", in: view)).accessibilityPerformPress?() ?? false)
+        try await settle(view)
+        window.makeFirstResponder(view)
+        try await settle(view)
+        XCTAssertNil(element("groups.name", in: view))
+        XCTAssertEqual(model.defaultGroup.id, saved)
+
+        var cancelled = false
+        let (renameView, renameWindow) = host(GroupNameEditor(
+            draft: GroupNameDraft(groupID: saved, name: "Blur saved"),
+            save: { try await model.saveGroupName($0, id: saved) }, cancel: { cancelled = true }))
+        defer { renameWindow.close() }
+        try await settle(renameView)
+        let renameField = try XCTUnwrap(renameWindow.firstResponder as? NSTextView)
+        renameField.selectAll(nil); renameField.insertText("Discard", replacementRange: renameField.selectedRange())
+        renameField.doCommand(by: #selector(NSResponder.cancelOperation(_:)))
+        try await settle(renameView)
+        XCTAssertTrue(cancelled)
+        XCTAssertEqual(model.defaultGroup.name, "Blur saved")
+        await model.shutdown()
+    }
+
+    func testEditorPersistenceFailureRetainsTextFocusAndDefault() async throws {
+        let (repo, model) = try fixture()
+        await model.reload()
+        try Disk.directory(repo.root.appendingPathComponent("groups.json"))
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        XCTAssertTrue(try XCTUnwrap(element("groups.add", in: view)).accessibilityPerformPress?() ?? false)
+        try await settle(view)
+        let field = try XCTUnwrap(window.firstResponder as? NSTextView)
+        field.insertText("Retry me", replacementRange: field.selectedRange())
+        field.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        try await settle(view)
+        XCTAssertEqual(model.defaultGroup.id, RecordingGroup.ungroupedID)
+        XCTAssertEqual((window.firstResponder as? NSTextView)?.string, "Retry me")
+        XCTAssertNotNil(element("groups.name.error", in: view))
+        try FileManager.default.removeItem(at: repo.root.appendingPathComponent("groups.json"))
+        (window.firstResponder as? NSTextView)?.doCommand(by: #selector(NSResponder.insertNewline(_:)))
+        try await settle(view)
+        XCTAssertEqual(model.defaultGroup.name, "Retry me")
+        await model.shutdown()
+    }
+
+    func testDeletionConfirmationHasNoDestructiveReturnShortcutAndProtectsCapture() async throws {
+        let (repo, model) = try fixture()
+        var m = Manifest(sourceType: "microphone", title: "Capture", filename: "original.caf")
+        m.state = .recording; try repo.save(m)
+        _ = try await model.archive?.refresh(m.id)
+        try await model.saveGroupName("Capture")
+        let group = model.defaultGroup
+        await model.moveRecording(m.id, to: group.id)
+        model.recordingID = m.id
+        var dismissed = false
+        let (view, window) = host(DeleteRecordingGroupView(model: model, group: group, dismiss: { dismissed = true }))
+        defer { window.close() }
+        try await settle(view)
+        let destructive = try XCTUnwrap(element("groups.confirmDeleteRecordings", in: view))
+        XCTAssertEqual(destructive.isAccessibilityEnabled?(), false)
+        XCTAssertNil(window.defaultButtonCell)
+        let enter = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36))
+        _ = window.performKeyEquivalent(with: enter)
+        XCTAssertFalse(dismissed)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.folder(m.id).path))
+        model.recordingID = nil
+        try await settle(view)
+        XCTAssertEqual(destructive.isAccessibilityEnabled?(), true)
+        XCTAssertNil(window.defaultButtonCell)
+        let escape = try XCTUnwrap(NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+            windowNumber: window.windowNumber, context: nil, characters: "\u{1b}", charactersIgnoringModifiers: "\u{1b}", isARepeat: false, keyCode: 53))
+        _ = window.performKeyEquivalent(with: escape)
+        try await settle(view)
+        XCTAssertTrue(dismissed)
+        XCTAssertTrue(model.recordingGroups.groups.contains { $0.id == group.id })
+        await model.shutdown()
+    }
+
+    private func moveMenuTitles(recordingID: String, in view: NSView, window: NSWindow) throws -> [String] {
+        let row = try XCTUnwrap(element("sidebar.recording.\(recordingID)", in: view))
+        let frame = try XCTUnwrap(row.accessibilityFrame?())
+        let location = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
+        let event = try XCTUnwrap(NSEvent.mouseEvent(with: .rightMouseDown, location: location,
+            modifierFlags: [], timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+            context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        var candidate = view.hitTest(view.convert(location, from: nil))
+        while let current = candidate {
+            if let menu = current.menu(for: event) {
+                menu.update()
+                if let submenu = menu.items.first(where: { $0.title == "Переместить в" })?.submenu {
+                    submenu.update()
+                    return submenu.items.map(\.title)
+                }
+            }
+            candidate = current.superview
+        }
+        throw ScribeError.message("Контекстное меню записи не найдено")
+    }
+
+    func testContextMenuFollowsRecordingMembershipAcrossMovesIncludingUngrouped() async throws {
+        let (repo, model) = try fixture()
+        let m = Manifest(sourceType: "import", title: "Move me", filename: "a.wav")
+        try repo.save(m)
+        _ = try await model.archive?.refresh(m.id)
+        try await model.saveGroupName("Работа")
+        let work = model.defaultGroup.id
+        try await model.saveGroupName("Учёба")
+        let study = model.defaultGroup.id
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        XCTAssertEqual(try moveMenuTitles(recordingID: m.id, in: view, window: window), ["Учёба", "Работа"])
+        for (destination, expected) in [(work, ["Учёба", "Без темы"]),
+                                        (study, ["Работа", "Без темы"]),
+                                        (RecordingGroup.ungroupedID, ["Учёба", "Работа"])] {
+            await model.moveRecording(m.id, to: destination)
+            try await settle(view)
+            XCTAssertEqual(try moveMenuTitles(recordingID: m.id, in: view, window: window), expected)
+        }
+        await model.shutdown()
+    }
+
+    func testContextMenuUsesClickedRecordingAndUpdatesAfterRenameReorderAndGroupRemoval() async throws {
+        let (repo, model) = try fixture()
+        let clicked = Manifest(sourceType: "import", title: "Clicked", filename: "a.wav")
+        let selected = Manifest(sourceType: "import", title: "Selected", filename: "b.wav")
+        for m in [clicked, selected] {
+            try repo.save(m)
+            _ = try await model.archive?.refresh(m.id)
+        }
+        try await model.saveGroupName("Работа")
+        let work = model.defaultGroup.id
+        try await model.saveGroupName("Учёба")
+        let study = model.defaultGroup.id
+        await model.moveRecording(clicked.id, to: work)
+        model.selection = selected.id
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        XCTAssertEqual(try moveMenuTitles(recordingID: clicked.id, in: view, window: window), ["Учёба", "Без темы"])
+        XCTAssertEqual(try moveMenuTitles(recordingID: selected.id, in: view, window: window), ["Учёба", "Работа"])
+        try await model.saveGroupName("Проекты", id: work)
+        await model.changeGroups { try $0.move(work, before: study) }
+        try await settle(view)
+        XCTAssertEqual(try moveMenuTitles(recordingID: clicked.id, in: view, window: window), ["Учёба", "Без темы"])
+        XCTAssertEqual(try moveMenuTitles(recordingID: selected.id, in: view, window: window), ["Проекты", "Учёба"])
+        await model.deleteGroup(work, deleteRecordings: false)
+        try await settle(view)
+        XCTAssertEqual(try moveMenuTitles(recordingID: clicked.id, in: view, window: window), ["Учёба"])
+        XCTAssertEqual(model.selection, selected.id)
+        XCTAssertEqual(model.defaultGroup.id, study)
+        await model.shutdown()
+    }
+
+}

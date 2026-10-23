@@ -43,7 +43,8 @@ public struct RecordingRepository: Sendable {
         manifest.displayTitle = title
         try save(manifest)
     }
-    public func importFile(_ source: URL, info: AudioInfo, allowDuplicate: Bool = false) throws -> Manifest {
+    public func importFile(_ source: URL, info: AudioInfo, allowDuplicate: Bool = false,
+                           beforePublish: (Manifest) throws -> Void = { _ in }) throws -> Manifest {
         try Task.checkCancellation()
         let fm = FileManager.default
         let input = try ImportSource(source)
@@ -62,6 +63,7 @@ public struct RecordingRepository: Sendable {
         try Task.checkCancellation()
         try fm.moveItem(at: partial, to: original)
         manifest.sha256 = digest; manifest.durationMs = Int((info.duration * 1000).rounded()); manifest.sampleRate = info.sampleRate; manifest.channels = info.channels; manifest.sourceComplete = true; manifest.state = .queued
+        try beforePublish(manifest)
         try save(manifest)
         published = true
         return manifest
