@@ -20,8 +20,13 @@ struct SummarySourceIndex: Sendable {
         self.lines = lines; tokenCounts = counts; indexByID = indexes
     }
 
-    func context(_ segments: [Segment]) -> String {
-        segments.map { lines[indexByID[$0.id]!] }.joined(separator: "\n")
+    func context(_ segments: [Segment]) throws -> String {
+        try segments.map { segment in
+            guard let index = indexByID[segment.id] else {
+                throw ScribeError.message("Источник итогов содержит неизвестную реплику")
+            }
+            return lines[index]
+        }.joined(separator: "\n")
     }
 
     func evidenceContext(for finding: Finding) -> [Segment] {

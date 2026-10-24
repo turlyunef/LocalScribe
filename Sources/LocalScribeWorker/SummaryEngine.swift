@@ -75,7 +75,7 @@ actor SummaryEngine {
             let extraction = try await SummaryExtraction.extract(group, language: language) { pass in
                 let section = pass.section, spokenLanguage = pass.spokenLanguage
                 self.emit("progress", "Составляем итоги — часть \(index+1) из \(groups.count): \(self.sectionTitle(section))", nil)
-                let context = source.context(pass.segments)
+                let context = try source.context(pass.segments)
                 let content = "FOCUS SEGMENT IDS (\(spokenLanguage)):\n\(pass.focusSegmentIds.joined(separator: ", "))\nCHRONOLOGICAL SOURCE WITH CONTEXT:\n\(context)"
                 let partFingerprint = Disk.fingerprint(fingerprint + section.rawValue + spokenLanguage)
                 let relativePath = "summary-parts/part-\(index)-\(section.rawValue)-\(Disk.fingerprint(spokenLanguage)).json"
@@ -131,8 +131,8 @@ actor SummaryEngine {
         let questionModel = reviewModel(container, kind: "question")
         ledger.openQuestions = try await SummaryQuestionResolution.unresolved(ledger.openQuestions, transcript: transcript, tokenCounts: source.tokenCounts) { pass in
             let candidate = String(data: try encoder.encode(pass.question), encoding: .utf8)!
-            let original = source.context(pass.original)
-            let later = source.context(pass.later)
+            let original = try source.context(pass.original)
+            let later = try source.context(pass.later)
             let fingerprint = Disk.fingerprint(sourceHash + candidate + original + later + "question-resolution-v2")
             let relativePath = "summary-parts/resolve-question-\(pass.questionIndex)-\(pass.partIndex).json"
             let path = self.run.appendingPathComponent(relativePath)
@@ -182,7 +182,7 @@ actor SummaryEngine {
         for (index, finding) in findings.enumerated() {
             emit("progress", "Проверяем основания: \(kind == "task" ? "задачи" : "решения") \(index+1) из \(findings.count)", nil)
             let evidence = source.evidenceContext(for: finding)
-            let context = source.context(evidence)
+            let context = try source.context(evidence)
             let encoded = String(data: try encoder.encode(finding), encoding: .utf8)!
             let fingerprint = Disk.fingerprint(sourceHash + encoded + context + kind)
             let path = run.appendingPathComponent("summary-parts/verify-\(kind)-\(index).json")
@@ -208,9 +208,9 @@ actor SummaryEngine {
             let laterGroups = source.laterGroups(after: acceptedFinding)
             for (partIndex, laterGroup) in laterGroups.enumerated() where !accepted.isEmpty {
                 let candidateText = String(data: try encoder.encode(accepted), encoding: .utf8)!
-                let laterText = source.context(laterGroup)
+                let laterText = try source.context(laterGroup)
                 let reviewEvidence = source.evidenceContext(for: accepted[0])
-                let reviewContext = source.context(reviewEvidence)
+                let reviewContext = try source.context(reviewEvidence)
                 let reviewFingerprint = Disk.fingerprint(sourceHash + candidateText + reviewContext + laterText + kind)
                 let reviewPath = run.appendingPathComponent("summary-parts/amend-\(kind)-\(index)-\(partIndex).json")
                 emit("progress", "Проверяем поздние уточнения — \(partIndex+1) из \(laterGroups.count)", nil)

@@ -44,6 +44,15 @@ private enum UnexpectedSummaryCall: Error { case review, amendment }
 
 @MainActor
 final class SummaryEngineTests: XCTestCase {
+    func testSourceIndexRejectsForeignSegmentInsteadOfTrapping() async throws {
+        let source = await SummarySourceIndex(transcript()) { _ in 100 }
+        let foreign = Segment(id: "foreign", startMs: 0, endMs: 1000, text: "Unrelated", language: "en")
+        XCTAssertThrowsError(try source.context([foreign])) {
+            XCTAssertTrue($0.localizedDescription.contains("неизвестную реплику"))
+        }
+        XCTAssertEqual(try source.context([source.transcript.segments[0]]), source.lines[0])
+    }
+
     func testModelLoadFailureResetsMetricsWithoutPublishingSummaryOrSDKError() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -107,7 +116,7 @@ final class SummaryEngineTests: XCTestCase {
         let distant = Finding(id: "d", text: "Check items", evidenceSegmentIds: ["s7", "s1", "s7"])
         let oldEvidence = SummarySource.evidenceContext(for: distant, in: transcript)
         XCTAssertEqual(source.evidenceContext(for: distant), oldEvidence)
-        XCTAssertEqual(source.context(oldEvidence), oldEvidence.map(legacySourceLine).joined(separator: "\n"))
+        XCTAssertEqual(try source.context(oldEvidence), oldEvidence.map(legacySourceLine).joined(separator: "\n"))
         XCTAssertEqual(source.laterGroups(after: distant).map { $0.map(\.id) }, [["s8", "s9", "s10"]])
         let last = Finding(id: "last", text: "Check items", evidenceSegmentIds: ["s10"])
         XCTAssertTrue(source.laterGroups(after: last).isEmpty)
@@ -139,11 +148,11 @@ final class SummaryEngineTests: XCTestCase {
         // Require canonical fingerprints as well as reuse within this process.
         let canonical = JSONEncoder(); canonical.outputFormatting = [.sortedKeys]
         let encoded = String(decoding: try canonical.encode(finding), as: UTF8.self)
-        let context = source.context(source.evidenceContext(for: finding))
+        let context = try source.context(source.evidenceContext(for: finding))
         let saved = try Disk.read(SavedSummary.self, at: root.appendingPathComponent("summary-parts/verify-task-0.json"))
         XCTAssertEqual(saved.fingerprint, Disk.fingerprint("fixture" + encoded + context + "task"))
         let candidate = String(decoding: try canonical.encode([finding]), as: UTF8.self)
-        let later = source.context(source.laterGroups(after: finding)[0])
+        let later = try source.context(source.laterGroups(after: finding)[0])
         let amendment = try Disk.read(SavedAmendment.self, at: root.appendingPathComponent("summary-parts/amend-task-0-0.json"))
         XCTAssertEqual(amendment.fingerprint, Disk.fingerprint("fixture" + candidate + context + later + "task"))
         let paths = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("summary-parts"), includingPropertiesForKeys: nil)
