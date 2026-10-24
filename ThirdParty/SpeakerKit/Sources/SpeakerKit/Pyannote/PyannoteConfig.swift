@@ -130,6 +130,7 @@ public struct PyannoteDiarizationOptions: DiarizationOptions {
     public var numberOfSpeakers: Int?
     public var minActiveOffset: Float?
     public var clusterDistanceThreshold: Float?
+    /// Unsupported by the pinned VBx clusterer; nonnil values are rejected.
     public var minClusterSize: Int?
     public var useExclusiveReconciliation: Bool
     public var centroidSource: SpeakerCentroidSource
@@ -137,6 +138,9 @@ public struct PyannoteDiarizationOptions: DiarizationOptions {
     public var clipTimestamps: [Float]
 
     func validateSupportedOptions() throws {
+        guard minClusterSize == nil else {
+            throw SpeakerKitError.invalidConfiguration("The pinned VBx clusterer does not support minClusterSize")
+        }
         guard clipTimestamps.isEmpty else {
             throw SpeakerKitError.invalidConfiguration("LocalScribe SpeakerKit requires the full audio timeline; clipTimestamps is unsupported")
         }

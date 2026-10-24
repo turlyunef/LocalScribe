@@ -205,3 +205,11 @@ trap/молчаливой потери текста. Семь SummaryEngineTests
 clipTimestamps отклоняются до загрузки моделей и числового преобразования.
 Ограничение описано в README, сохранено full-timeline.patch. Четыре
 ModelGeometryTests прошли, включая multi-/partial-clip и NaN/Infinity.
+
+## Мелкое: игнорируемый minClusterSize
+
+Подтверждено: VBxClusteringConfig не использует эту опцию. Вместо внедрения
+нового алгоритма со сменой идентичности голосов snapshot явно отклоняет nonnil
+minClusterSize до обработки. API-поле сохранено с описанием ограничения;
+путь LocalScribe с nil не меняется. Пять ModelGeometryTests прошли.
+Все 18 upstream SHA восстановлены обратным применением семи локальных патчей.

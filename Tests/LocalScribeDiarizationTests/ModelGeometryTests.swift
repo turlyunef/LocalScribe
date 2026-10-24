@@ -3,6 +3,15 @@ import CoreML
 @testable import LocalScribeSpeakerKit
 
 final class ModelGeometryTests: XCTestCase {
+    func testUnsupportedMinimumClusterSizeIsNotSilentlyIgnored() throws {
+        try PyannoteDiarizationOptions(numberOfSpeakers: 2).validateSupportedOptions()
+        for value in [-1, 0, 1, 10, Int.max] {
+            XCTAssertThrowsError(try PyannoteDiarizationOptions(minClusterSize: value).validateSupportedOptions()) {
+                XCTAssertTrue($0.localizedDescription.contains("minClusterSize"))
+            }
+        }
+    }
+
     func testSeekClipsAreExplicitlyUnsupportedBeforeTimelineConversion() throws {
         try PyannoteDiarizationOptions().validateSupportedOptions()
         for timestamps: [Float] in [[0, 1, 2, 3], [1, 2], [0], [.nan], [.infinity], [-1, 2]] {
