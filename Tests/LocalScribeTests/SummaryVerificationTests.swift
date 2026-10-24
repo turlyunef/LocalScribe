@@ -25,6 +25,44 @@ private actor ReviewMock {
 }
 
 final class SummaryVerificationTests: XCTestCase {
+    func testQuestionReviewPagesLongOriginalAndLaterWithoutClosingPartialContext() async throws {
+        let original = sources(count: 3, length: 12_000)
+        let later = [Segment(id: "answer", startMs: 5000, endMs: 6000, text: "The answer is Friday. " + String(repeating: "y", count: 12_000), language: "en")]
+        let mock = ReviewMock { request in
+            guard request.attempt == 1 else { return "invalid JSON" }
+            if request.user.components(separatedBy: "LATER SOURCE:\n").last?.contains("The answer is Friday.") == true {
+                return #"{"effect":"resolved","sourceSegmentId":"answer","quote":"The answer is Friday."}"#
+            }
+            return #"{"effect":"none","sourceSegmentId":null,"quote":null}"#
+        }
+        let verdict = try await SummaryVerification.checkQuestionResolution(candidate: "When is the release?", original: original, later: later, model: mock.model)
+        XCTAssertEqual(verdict.effect, .uncertain)
+        XCTAssertEqual(verdict.sourceSegmentId, "answer")
+        let requests = await mock.requests
+        assertBudget(requests)
+        XCTAssertGreaterThan(requests.count, 2)
+        XCTAssertTrue(requests.allSatisfy { $0.purpose == .questionResolution })
+        for id in original.map(\.id) { XCTAssertTrue(requests.contains { $0.user.contains("[\(id) ") }) }
+        XCTAssertTrue(requests.contains { $0.user.contains("chars=0..<") })
+        XCTAssertTrue(requests.contains { $0.user.contains("/\(later[0].text.count)") })
+    }
+
+    func testQuestionReviewKeepsOrdinaryExplicitAnswerAndRejectsInventedQuote() async throws {
+        let original = [Segment(id: "question", startMs: 0, endMs: 1000, text: "When is the release?", language: "en")]
+        let later = [Segment(id: "answer", startMs: 1000, endMs: 2000, text: "On Friday.", language: "en")]
+        let mock = ReviewMock { request in
+            request.attempt == 0
+                ? #"{"effect":"resolved","sourceSegmentId":"answer","quote":"On Monday."}"#
+                : #"{"effect":"resolved","sourceSegmentId":"answer","quote":"On Friday."}"#
+        }
+        let verdict = try await SummaryVerification.checkQuestionResolution(candidate: "Release date?", original: original, later: later, model: mock.model)
+        XCTAssertEqual(verdict.effect, .resolved)
+        XCTAssertEqual(verdict.quote, "On Friday.")
+        let requests = await mock.requests
+        XCTAssertEqual(requests.map(\.attempt), [0, 1])
+        assertBudget(requests)
+    }
+
     func testDiagnosticsIdentifyRetriesAndInvalidQuotesWithoutChangingVerdicts() async throws {
         let source = Segment(id: "s0", startMs: 0, endMs: 1000, text: "I will check the release.", language: "en")
         let finding = Finding(id: "t", text: "Check the release", evidenceSegmentIds: [source.id])

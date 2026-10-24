@@ -164,7 +164,7 @@ final class RunResumptionTests: XCTestCase {
         XCTAssertEqual(try repo.results(repo.load(manifest.id)).1, summary)
 
         let fresh = try repo.beginRun(&manifest, catalog: catalog)
-        XCTAssertEqual(fresh.pipelineVersion, "1.0.0-audio2-asr8-live1-diarization4-summary15")
+        XCTAssertEqual(fresh.pipelineVersion, "1.0.0-audio2-asr8-live1-diarization4-summary16")
         XCTAssertNotEqual(fresh.id, pending.id)
         XCTAssertNotEqual(fresh.fingerprint, pending.fingerprint)
         XCTAssertEqual(fresh.modelIDs, pending.modelIDs)
