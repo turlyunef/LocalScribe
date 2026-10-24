@@ -25,6 +25,32 @@ final class RecordingGroupsTests: XCTestCase {
         return await archive.snapshot().groups.defaultGroup
     }
 
+    func testRecoveryPrunesDeletedMembershipButPreservesDamagedArchiveAndGroupSettings() async throws {
+        let repo = try fixture(), removed = try recording(repo), damaged = try recording(repo), healthy = try recording(repo)
+        let archive = RecordingCoordinator(repository: repo)
+        let group = try await create(archive, "Keep group")
+        try await archive.moveRecordings([removed.id, damaged.id, healthy.id], to: group.id)
+        try await archive.editGroups { try $0.setExpanded(group.id, false) }
+        try await archive.delete(removed)
+        let damagedFile = repo.folder(damaged.id).appendingPathComponent("manifest.json")
+        let corrupt = Data("broken".utf8); try corrupt.write(to: damagedFile)
+        let orphan = UUID().uuidString
+        var saved = try repo.loadGroups(); try saved.assign(orphan, to: group.id); try repo.saveGroups(saved)
+        let reopened = RecordingCoordinator(repository: repo)
+        let snapshot = try await reopened.recover()
+        XCTAssertNil(snapshot.groups.membership[removed.id])
+        XCTAssertNil(snapshot.groups.membership[orphan])
+        XCTAssertEqual(snapshot.groups.membership[damaged.id], group.id)
+        XCTAssertEqual(snapshot.groups.membership[healthy.id], group.id)
+        XCTAssertEqual(snapshot.groups.defaultID, group.id)
+        XCTAssertEqual(snapshot.groups.groups.first?.expanded, false)
+        XCTAssertEqual(try repo.loadGroups(), snapshot.groups)
+        XCTAssertEqual(try Data(contentsOf: damagedFile), corrupt)
+        let before = try Data(contentsOf: repo.root.appendingPathComponent("groups.json"))
+        _ = try await reopened.recover()
+        XCTAssertEqual(try Data(contentsOf: repo.root.appendingPathComponent("groups.json")), before)
+    }
+
     func testBatchMoveValidatesAllMembersBeforePublishingAndPreservesManifests() async throws {
         let repo = try fixture(), a = try recording(repo), b = try recording(repo)
         let archive = RecordingCoordinator(repository: repo)

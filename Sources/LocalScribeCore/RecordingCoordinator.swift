@@ -47,6 +47,7 @@ public actor RecordingCoordinator {
             let recovered = try repository.recover(reportInvalid: { invalid.append($0) })
             unreadableRecordingIDs = invalid.sorted()
             replace(recovered)
+            try pruneDeletedMembership()
         }
         catch {
             // A failed batch may already have committed some manifests.
@@ -176,6 +177,19 @@ public actor RecordingCoordinator {
         scheduleIndex()
         // Avoid retaining deleted metadata even during the coalescing interval.
         flushIndex()
+    }
+    private func pruneDeletedMembership() throws {
+        guard groupsError == nil, deletingGroups.isEmpty else { return }
+        var next = groups
+        for id in groups.membership.keys where positions[id] == nil {
+            do {
+                // A damaged or inaccessible directory must retain its assignment.
+                _ = try repository.folder(id).resourceValues(forKeys: [.isDirectoryKey])
+            } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                try next.assign(id, to: RecordingGroup.ungroupedID)
+            } catch { continue }
+        }
+        if next != groups { try commitGroups(next) }
     }
     private func requireGroups() throws {
         initialize()
