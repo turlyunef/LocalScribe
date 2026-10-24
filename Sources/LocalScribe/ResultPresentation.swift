@@ -87,14 +87,20 @@ import LocalScribeCore
         }
     }
 
-    /// Explicit copy/export actions can synchronously fill a missing cache entry.
-    /// SwiftUI body only reads the asynchronously published `result`.
+    /// Explicit copy/export uses the same cache and background renderer as the view.
+    /// A changed selection/content must never publish an obsolete action result.
     func render(manifest: Manifest, transcript: Transcript?, summary: Summary?, revision: UInt64,
-                part: ExportPart, markdown: Bool) -> RenderedExport {
+                part: ExportPart, markdown: Bool) async throws -> RenderedExport {
         let key = key(manifest, revision: revision, part: part, markdown: markdown)
+        try Task.checkCancellation()
         if let cached = cache[key] { return cached }
         renderCount += 1
-        let value = renderer(manifest, transcript, summary, part, markdown)
+        let renderer = self.renderer
+        let value = await Task.detached(priority: .userInitiated) {
+            renderer(manifest, transcript, summary, part, markdown)
+        }.value
+        try Task.checkCancellation()
+        guard content == key.content else { throw CancellationError() }
         cache[key] = value
         return value
     }

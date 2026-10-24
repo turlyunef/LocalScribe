@@ -64,8 +64,10 @@ final class ResultEditingModelTests: XCTestCase {
         try await model.saveResultEdits(draft)
         try await waitForResult(model)
         XCTAssertNil(model.resultEdit); XCTAssertFalse(model.savingResult)
-        XCTAssertTrue(model.rendered(.transcript).contains("Исправленная фраза 😀"))
-        XCTAssertTrue(model.rendered(.summary, markdown: true).contains("Исправленный обзор"))
+        let exportedTranscript = try await model.rendered(.transcript)
+        let exportedSummary = try await model.rendered(.summary, markdown: true)
+        XCTAssertTrue(exportedTranscript.contains("Исправленная фраза 😀"))
+        XCTAssertTrue(exportedSummary.contains("Исправленный обзор"))
         XCTAssertNotEqual(model.selected?.activeRunId, manifest.activeRunId)
     }
 

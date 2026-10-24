@@ -40,6 +40,8 @@ import LocalScribeCore
     let indicators = ActivityIndicators()
     let resultPresentation = ResultPresentation()
     private var resultRevision: UInt64 = 0
+    private(set) var copyTask: Task<Void, Never>?
+    private var exportTasks: [UUID: Task<Void, Never>] = [:]
     var status: String { get { indicators.status } set { indicators.status = newValue } }
     @Published var modelsStatus = "Проверяем модели…"
     @Published var modelsReady = false
@@ -1051,22 +1053,48 @@ import LocalScribeCore
         if let selection, !recordings.contains(where: { $0.id == selection }) { self.selection = nil }
     }
     func showAudio() { guard let selected, let repository else { return }; NSWorkspace.shared.activateFileViewerSelecting([repository.folder(selected.id).appendingPathComponent(selected.originalRelativePath)]) }
-    func rendered(_ part: ExportPart, markdown: Bool = false) -> String {
-        renderedResult(part, markdown: markdown).text
+    func rendered(_ part: ExportPart, markdown: Bool = false) async throws -> String {
+        try await renderedResult(part, markdown: markdown).text
     }
-    func renderedResult(_ part: ExportPart, markdown: Bool = false) -> RenderedExport {
-        guard let selected else { return RenderedExport() }
-        return resultPresentation.render(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part, markdown: markdown)
+    func renderedResult(_ part: ExportPart, markdown: Bool = false) async throws -> RenderedExport {
+        guard let selected else { throw CancellationError() }
+        return try await resultPresentation.render(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part, markdown: markdown)
     }
-    func copy(_ part: ExportPart) { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(rendered(part), forType: .string); status = "Скопировано" }
+    func copy(_ part: ExportPart) {
+        copyTask?.cancel()
+        copyTask = Task {
+            do {
+                let text = try await rendered(part)
+                try Task.checkCancellation()
+                guard !shuttingDown else { return }
+                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+                status = "Скопировано"
+            } catch { errorHandler.report(error) }
+        }
+    }
     func export(markdown: Bool, part: ExportPart) {
         guard let selected else { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = selected.displayTitle.replacingOccurrences(of: "/", with: "-") + (markdown ? ".md" : ".txt")
         guard panel.runModal() == .OK, let url = panel.url else { return }
-        do { try rendered(part, markdown: markdown).write(to: url, atomically: true, encoding: .utf8) } catch { errorHandler.report(message: "Не удалось экспортировать: \(error.localizedDescription)") }
+        let request = UUID()
+        exportTasks[request] = Task {
+            defer { exportTasks.removeValue(forKey: request) }
+            await export(to: url, markdown: markdown, part: part)
+        }
+    }
+    func export(to url: URL, markdown: Bool, part: ExportPart) async {
+        do {
+            let text = try await rendered(part, markdown: markdown)
+            try await Task.detached(priority: .userInitiated) {
+                try text.write(to: url, atomically: true, encoding: .utf8)
+            }.value
+        } catch is CancellationError { }
+        catch { errorHandler.report(message: "Не удалось экспортировать: \(error.localizedDescription)") }
     }
     func shutdown() async {
         shuttingDown = true
+        copyTask?.cancel()
+        for task in Array(exportTasks.values) { await task.value }
         recordingSearch.shutdown()
         importQueue.cancel()
         memorySource?.cancel(); memorySource = nil

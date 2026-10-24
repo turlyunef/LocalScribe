@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import AppKit
 import XCTest
 import LocalScribeCore
 @testable import LocalScribe
@@ -52,6 +53,47 @@ final class ResultPresentationTests: XCTestCase {
         }
     }
 
+    func testUncachedActionRenderingRunsOffMainAndRejectsStaleContent() async throws {
+        let started = expectation(description: "Action renderer started")
+        let release = DispatchSemaphore(value: 0)
+        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown in
+            XCTAssertFalse(Thread.isMainThread)
+            started.fulfill()
+            _ = release.wait(timeout: .now() + 5)
+            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+        }
+        let (manifest, transcript, summary) = fixture()
+        let action = Task { try await presentation.render(manifest: manifest, transcript: transcript, summary: summary,
+            revision: 1, part: .all, markdown: true) }
+        await fulfillment(of: [started], timeout: 3)
+        // MainActor is responsive while the renderer is deliberately blocked.
+        presentation.update(manifest: nil, transcript: nil, summary: nil, revision: 2, part: .transcript)
+        release.signal()
+        do { _ = try await action.value; XCTFail("Stale export must not be used") }
+        catch is CancellationError { }
+        XCTAssertTrue(presentation.result.text.isEmpty)
+    }
+
+    func testCopyAllAndMarkdownExportPrepareUncachedSections() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let (manifest, transcript, summary) = fixture()
+        try save(manifest, transcript, summary, to: repo)
+        let model = AppModel(repository: repo, startServices: false)
+        model.selection = manifest.id
+        try await loaded(model)
+        model.copy(.all)
+        await model.copyTask?.value
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string),
+            ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: .all, markdown: false).text)
+        let url = root.appendingPathComponent("export.md")
+        await model.export(to: url, markdown: true, part: .all)
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8),
+            ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: .all, markdown: true).text)
+        await model.shutdown()
+    }
+
     func testLongResultDoesNotRenderOrPublishAppModelOnMeterAndProgressUpdates() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -70,7 +112,7 @@ final class ResultPresentationTests: XCTestCase {
             model.level = Double(tick % 10) / 10; model.elapsed = Double(tick) / 10
             model.soundNotice = tick.isMultiple(of: 2) ? "Тихий звук" : nil
             model.status = "Распознаём речь: \(tick)"
-            _ = model.renderedResult(.transcript)
+            _ = try await model.renderedResult(.transcript)
         }
         await Task.yield()
         XCTAssertEqual(appChanges, 0)
@@ -100,13 +142,15 @@ final class ResultPresentationTests: XCTestCase {
         try await ready(model.resultPresentation)
         XCTAssertTrue(model.resultPresentation.result.text.hasPrefix("Новое имя 🧑🏽‍💻 [проект]"))
         assertLinks(model.resultPresentation.result)
-        let plain = model.renderedResult(.transcript)
+        let plain = try await model.renderedResult(.transcript)
         let beforeMarkdown = model.resultPresentation.renderCount
-        let markdown = model.renderedResult(.transcript, markdown: true)
+        let markdown = try await model.renderedResult(.transcript, markdown: true)
         XCTAssertEqual(model.resultPresentation.renderCount, beforeMarkdown + 1)
         XCTAssertTrue(markdown.text.hasPrefix("# Новое имя 🧑🏽‍💻 \\[проект\\]"))
-        XCTAssertEqual(model.renderedResult(.transcript, markdown: true), markdown)
-        XCTAssertEqual(model.renderedResult(.transcript), plain)
+        let cachedMarkdown = try await model.renderedResult(.transcript, markdown: true)
+        let cachedPlain = try await model.renderedResult(.transcript)
+        XCTAssertEqual(cachedMarkdown, markdown)
+        XCTAssertEqual(cachedPlain, plain)
         XCTAssertEqual(model.resultPresentation.renderCount, beforeMarkdown + 1)
         assertLinks(markdown)
         // A fingerprint can stay unchanged after an in-memory content revision.
@@ -160,8 +204,10 @@ final class ResultPresentationTests: XCTestCase {
         let warnings = model.resultPresentation.result
         XCTAssertTrue(warnings.text.contains("Предупреждение: Проверить начало речи 😀"))
         XCTAssertTrue(warnings.timestamps.isEmpty)
-        XCTAssertEqual(model.renderedResult(.warnings), warnings)
-        XCTAssertTrue(model.rendered(.warnings, markdown: true).contains("## Предупреждения"))
+        let cachedWarnings = try await model.renderedResult(.warnings)
+        let markdownWarnings = try await model.rendered(.warnings, markdown: true)
+        XCTAssertEqual(cachedWarnings, warnings)
+        XCTAssertTrue(markdownWarnings.contains("## Предупреждения"))
         model.tab = .transcript; try await ready(model.resultPresentation)
         XCTAssertFalse(model.resultPresentation.result.text.contains("Проверить начало речи 😀"))
         let baseline = model.resultPresentation.renderCount
