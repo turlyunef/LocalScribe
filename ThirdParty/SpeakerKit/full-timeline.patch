@@ -1,0 +1,41 @@
+diff --git a/Sources/SpeakerKit/Pyannote/PyannoteConfig.swift b/Sources/SpeakerKit/Pyannote/PyannoteConfig.swift
+index 032a514..36d5a36 100644
+--- a/Sources/SpeakerKit/Pyannote/PyannoteConfig.swift
++++ b/Sources/SpeakerKit/Pyannote/PyannoteConfig.swift
+@@ -133,9 +133,15 @@ public struct PyannoteDiarizationOptions: DiarizationOptions {
+     public var minClusterSize: Int?
+     public var useExclusiveReconciliation: Bool
+     public var centroidSource: SpeakerCentroidSource
+-    /// Optional seek boundaries in seconds; pairs define [start, end] clips. Empty means process full audio.
++    /// LocalScribe supports the complete source timeline only. Nonempty clips are rejected.
+     public var clipTimestamps: [Float]
+ 
++    func validateSupportedOptions() throws {
++        guard clipTimestamps.isEmpty else {
++            throw SpeakerKitError.invalidConfiguration("LocalScribe SpeakerKit requires the full audio timeline; clipTimestamps is unsupported")
++        }
++    }
++
+     public init(
+         numberOfSpeakers: Int? = nil,
+         minActiveOffset: Float? = nil,
+diff --git a/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift b/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
+index 303d5de..1ea3120 100644
+--- a/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
++++ b/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
+@@ -144,6 +144,7 @@ actor PyannoteDiarizerActor {
+         options: PyannoteDiarizationOptions? = nil,
+         progressCallback: (@Sendable (Progress) -> Void)? = nil
+     ) async throws {
++        try options?.validateSupportedOptions()
+         await reset()
+         timings.pipelineStart = CFAbsoluteTimeGetCurrent()
+ 
+@@ -260,6 +261,7 @@ actor PyannoteDiarizerActor {
+     }
+ 
+     func clusterSpeakers(with clusterer: Clusterer, options: PyannoteDiarizationOptions? = nil, progressCallback: (@Sendable (Progress) -> Void)? = nil) async throws -> DiarizationResult {
++        try options?.validateSupportedOptions()
+         let progressObj = Progress(totalUnitCount: 100)
+         progressObj.completedUnitCount = 0
+         progressCallback?(progressObj)

@@ -144,6 +144,7 @@ actor PyannoteDiarizerActor {
         options: PyannoteDiarizationOptions? = nil,
         progressCallback: (@Sendable (Progress) -> Void)? = nil
     ) async throws {
+        try options?.validateSupportedOptions()
         await reset()
         timings.pipelineStart = CFAbsoluteTimeGetCurrent()
 
@@ -260,6 +261,7 @@ actor PyannoteDiarizerActor {
     }
 
     func clusterSpeakers(with clusterer: Clusterer, options: PyannoteDiarizationOptions? = nil, progressCallback: (@Sendable (Progress) -> Void)? = nil) async throws -> DiarizationResult {
+        try options?.validateSupportedOptions()
         let progressObj = Progress(totalUnitCount: 100)
         progressObj.completedUnitCount = 0
         progressCallback?(progressObj)

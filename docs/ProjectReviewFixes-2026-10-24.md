@@ -197,3 +197,11 @@ trap/молчаливой потери текста. Семь SummaryEngineTests
 и COPYFILE_DISABLE=1 для исключения macOS AppleDouble-метаданных.
 Тот же тест прошёл после исправления; исходники, Package.resolved и локальные
 патчи SpeakerKit включены. Настоящий проект в архив для этой проверки не собирался.
+
+## Мелкое: шкалы seek clips в SpeakerKit
+
+Подтверждено для upstream-пути; в приложении он не вызывается.
+Снимок теперь явно поддерживает только полную исходную шкалу: непустые
+clipTimestamps отклоняются до загрузки моделей и числового преобразования.
+Ограничение описано в README, сохранено full-timeline.patch. Четыре
+ModelGeometryTests прошли, включая multi-/partial-clip и NaN/Infinity.

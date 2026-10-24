@@ -133,8 +133,14 @@ public struct PyannoteDiarizationOptions: DiarizationOptions {
     public var minClusterSize: Int?
     public var useExclusiveReconciliation: Bool
     public var centroidSource: SpeakerCentroidSource
-    /// Optional seek boundaries in seconds; pairs define [start, end] clips. Empty means process full audio.
+    /// LocalScribe supports the complete source timeline only. Nonempty clips are rejected.
     public var clipTimestamps: [Float]
+
+    func validateSupportedOptions() throws {
+        guard clipTimestamps.isEmpty else {
+            throw SpeakerKitError.invalidConfiguration("LocalScribe SpeakerKit requires the full audio timeline; clipTimestamps is unsupported")
+        }
+    }
 
     public init(
         numberOfSpeakers: Int? = nil,
