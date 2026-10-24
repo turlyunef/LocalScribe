@@ -170,11 +170,11 @@ actor PyannoteDiarizerActor {
         for (seekClipStart, seekClipEnd) in seekClips {
             try Task.checkCancellation()
 
-            let audioClip = Array(audioArray[seekClipStart..<seekClipEnd])
-            let clipSeconds = Double(audioClip.count) / Double(WhisperKit.sampleRate)
+            let clipRange = seekClipStart..<seekClipEnd
+            let clipSeconds = Double(clipRange.count) / Double(WhisperKit.sampleRate)
             self.timings.inputAudioSeconds += clipSeconds
 
-            let expectedChunks = segmenterModel.maxChunks(for: audioClip.count)
+            let expectedChunks = segmenterModel.maxChunks(for: clipRange.count)
 
             let embedderWorkerCount = concurrentEmbedderWorkers ?? min(8, max(2, Int(clipSeconds / 30.0)))
             self.timings.numberOfEmbedderWorkers = embedderWorkerCount
@@ -182,7 +182,7 @@ actor PyannoteDiarizerActor {
             let snap = try await Self.processClip(
                 expectedChunks: expectedChunks, workerCount: embedderWorkerCount,
                 produce: { send in
-                    try await segmenterModel.predict(audioArray: audioClip, sendOutput: send)
+                    try await segmenterModel.predict(audioArray: audioArray, sendOutput: send, audioRange: clipRange)
                 },
                 embed: { output in try await embedderModel.embed(segmenterOutput: output) },
                 consume: { embeddings in await clusterer.add(speakerEmbeddings: embeddings) },

@@ -121,7 +121,8 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
     public func predict(
         audioArray: [Float],
         sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
-        windowPadding: Int = 0
+        windowPadding: Int = 0,
+        audioRange: Range<Int>? = nil
     ) async throws {
         guard let model else {
             throw SpeakerKitError.modelUnavailable("Speaker segmenter model is unavailable")
@@ -139,7 +140,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
         let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
         try await predictChunks(audioArray: audioArray, sendOutput: sendOutput,
-                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset) { index, waveform in
+                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset, audioRange: audioRange) { index, waveform in
             guard let audioSamples = AudioProcessor.padOrTrimAudio(
                 fromArray: Self.reflectTail(waveform, toLength: maxChunkLength),
                 startAt: 0, toLength: maxChunkLength
@@ -163,21 +164,26 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
         windowPadding: Int = 0,
         chunkStrideOffset: Int,
+        audioRange: Range<Int>? = nil,
         predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
     ) async throws {
         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
-        guard chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
-              windowPadding >= 0, windowPadding <= audioArray.count else {
+        let bounds = audioRange ?? audioArray.indices
+        guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count,
+              chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
+              windowPadding >= 0, windowPadding <= bounds.count else {
             throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
         }
-        var chunkEndIndex = 0
-        var chunks: [(index: Int, waveform: [Float])] = []
-        while chunkEndIndex < audioArray.count - windowPadding {
-            let chunkStartIndex = max(chunkEndIndex - chunkStrideOffset, 0)
-            chunkEndIndex = min(chunkStartIndex + maxChunkLength, audioArray.count)
-            chunks.append((index: chunks.count, waveform: Array(audioArray[chunkStartIndex..<chunkEndIndex])))
+        // Queue only ranges. PCM is materialized by the worker immediately
+        // before inference, so overlapping blocks do not accumulate in memory.
+        var chunkEndIndex = bounds.lowerBound
+        var chunks: [(index: Int, range: Range<Int>)] = []
+        while chunkEndIndex < bounds.upperBound - windowPadding {
+            let chunkStartIndex = max(chunkEndIndex - chunkStrideOffset, bounds.lowerBound)
+            chunkEndIndex = min(chunkStartIndex + maxChunkLength, bounds.upperBound)
+            chunks.append((index: chunks.count, range: chunkStartIndex..<chunkEndIndex))
         }
-        let chunkStream = AsyncStream<(index: Int, waveform: [Float])> { continuation in
+        let chunkStream = AsyncStream<(index: Int, range: Range<Int>)> { continuation in
             for chunk in chunks { continuation.yield(chunk) }
             continuation.finish()
         }
@@ -188,7 +194,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
                     var completed = 0
                     for await chunk in chunkStream {
                         try Task.checkCancellation()
-                        let output = try await predictChunk(chunk.index, chunk.waveform)
+                        let output = try await predictChunk(chunk.index, Array(audioArray[chunk.range]))
                         try Task.checkCancellation()
                         guard output.chunkIndex == chunk.index else {
                             throw SpeakerKitError.invalidModelOutput("Segmenter returned the wrong chunk index")

@@ -129,6 +129,20 @@ final class TailReflectionTests: XCTestCase {
                                                       concurrentSegmenterWorkers: 1, concurrentEmbedderWorkers: 1))
         let result = try await kit.diarize(audioArray: samples)
         XCTAssertEqual(result.speakerCount, 2)
+        // Saved pre-optimization output of this explicitly selected regression fixture.
+        let expected = [(984, 17_368, "raw-0"), (18_896, 26_366, "raw-1"),
+                        (27_368, 28_879, "raw-0"), (29_235, 34_550, "raw-0"), (36_213, 37_232, "raw-0")]
+        let actual = result.segments.compactMap { segment -> VoiceInterval? in
+            guard let id = segment.speaker.speakerId else { return nil }
+            return VoiceInterval.clipped(startSeconds: Double(segment.startTime), endSeconds: Double(segment.endTime),
+                                         speakerId: "raw-\(id)", durationMs: 37_900)
+        }
+        XCTAssertEqual(actual.count, expected.count)
+        for (interval, saved) in zip(actual, expected) {
+            XCTAssertEqual(interval.startMs, saved.0)
+            XCTAssertEqual(interval.endMs, saved.1)
+            XCTAssertEqual(interval.speakerId, saved.2)
+        }
         let speakers = [Float(5), 22, 32].map { time in
             result.segments.first { $0.startTime <= time && time < $0.endTime }?.speaker.speakerId
         }

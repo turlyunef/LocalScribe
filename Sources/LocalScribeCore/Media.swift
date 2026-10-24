@@ -175,10 +175,17 @@ public enum Media {
         let remaining = max(0, file.length - file.framePosition)
         let count = AVAudioFrameCount(min(remaining, AVAudioFramePosition(((duration ?? (Double(remaining) / rate)) * rate).rounded())))
         guard count > 0 else { return [] }
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: count) else { throw ScribeError.message("Не хватает памяти для аудиобуфера") }
-        try file.read(into: buffer, frameCount: count)
-        guard let ptr = buffer.floatChannelData?[0] else { throw ScribeError.message("Неподдерживаемый PCM") }
-        return Array(UnsafeBufferPointer(start: ptr, count: Int(buffer.frameLength)))
+        // Keep one result array and a bounded decode buffer, even for hours of PCM.
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: min(count, 16_384)) else { throw ScribeError.message("Не хватает памяти для аудиобуфера") }
+        var samples: [Float] = []
+        samples.reserveCapacity(Int(count))
+        while samples.count < Int(count) {
+            try Task.checkCancellation()
+            try file.read(into: buffer, frameCount: min(buffer.frameCapacity, count - AVAudioFrameCount(samples.count)))
+            guard buffer.frameLength > 0, let ptr = buffer.floatChannelData?[0] else { throw ScribeError.message("Неполный или неподдерживаемый PCM") }
+            samples.append(contentsOf: UnsafeBufferPointer(start: ptr, count: Int(buffer.frameLength)))
+        }
+        return samples
     }
     public static func assembleCapture(_ folder: URL, destination: URL) throws -> (Int64, Double) {
         let parts = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).filter { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
