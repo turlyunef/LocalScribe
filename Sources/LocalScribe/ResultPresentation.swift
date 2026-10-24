@@ -1,6 +1,12 @@
 import SwiftUI
 import LocalScribeCore
 
+/// Each click is an event even when its segment is the same as the previous one.
+struct ResultJumpRequest: Equatable {
+    let id = UUID()
+    let segmentID: String
+}
+
 /// Frequent capture/progress changes are observed only by the indicator views.
 @MainActor final class ActivityIndicators: ObservableObject {
     @Published var status = ""

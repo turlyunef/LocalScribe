@@ -28,7 +28,7 @@ import LocalScribeCore
         didSet {
             sidebarSelection = SidebarSelection(selection)
             retainSearchSelection()
-            if oldValue != selection { transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil }
+            if oldValue != selection { jumpTo = nil; transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil }
             loadResult()
         }
     }
@@ -84,7 +84,7 @@ import LocalScribeCore
     @Published var shuttingDown = false
     @Published private(set) var preparingStorage = true
     @Published var tab: ExportPart = .transcript { didSet { refreshPresentation() } }
-    @Published var jumpTo: String?
+    @Published var jumpTo: ResultJumpRequest?
     let repository: RecordingRepository?
     let archive: RecordingCoordinator?
     private var archiveRevision: UInt64 = 0

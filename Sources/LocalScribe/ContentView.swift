@@ -113,7 +113,7 @@ struct ContentView: View {
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .accessibilityIdentifier("result.automaticSummariesDisabled")
                     } else {
-                        PresentedResultView(presentation: model.resultPresentation, targetID: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = id; model.tab = .transcript })
+                        PresentedResultView(presentation: model.resultPresentation, jumpRequest: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = ResultJumpRequest(segmentID: id); model.tab = .transcript })
                     }
                 } else {
                     ContentUnavailableView {
@@ -191,12 +191,12 @@ private struct ActivityStatusView: View {
 
 private struct PresentedResultView: View {
     @ObservedObject var presentation: ResultPresentation
-    var targetID: String?
+    var jumpRequest: ResultJumpRequest?
     var onJump: (String) -> Void
 
     var body: some View {
         ZStack {
-            ResultTextView(result: presentation.result, targetID: targetID, onJump: onJump)
+            ResultTextView(result: presentation.result, jumpRequest: jumpRequest, onJump: onJump)
             if presentation.isRendering { ProgressView("Подготавливаем результат…") }
         }
     }
@@ -250,7 +250,7 @@ struct RecordingTitleView: View {
 }
 
 struct ResultTextView: NSViewRepresentable {
-    var result: RenderedExport; var targetID: String?; var onJump: (String) -> Void
+    var result: RenderedExport; var jumpRequest: ResultJumpRequest?; var onJump: (String) -> Void
     func makeCoordinator() -> Coordinator { Coordinator() }
     func makeNSView(context: Context) -> NSScrollView {
         let scroll = NSTextView.scrollableTextView(); let view = scroll.documentView as! NSTextView
@@ -271,12 +271,13 @@ struct ResultTextView: NSViewRepresentable {
             view.textStorage?.setAttributedString(value)
             context.coordinator.target = nil
         }
-        if let targetID, context.coordinator.target != targetID, let range = context.coordinator.timestampRanges[targetID] {
-            view.scrollRangeToVisible(range); view.setSelectedRange(range); context.coordinator.target = targetID
+        if let jumpRequest, context.coordinator.target != jumpRequest,
+           let range = context.coordinator.timestampRanges[jumpRequest.segmentID] {
+            view.scrollRangeToVisible(range); view.setSelectedRange(range); context.coordinator.target = jumpRequest
         }
     }
     final class Coordinator: NSObject, NSTextViewDelegate {
-        var current = RenderedExport(); var target: String?; var onJump: ((String)->Void)?
+        var current = RenderedExport(); var target: ResultJumpRequest?; var onJump: ((String)->Void)?
         var timestampRanges: [String: NSRange] = [:]
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             let url = (link as? URL) ?? (link as? String).flatMap { URL(string:$0) }

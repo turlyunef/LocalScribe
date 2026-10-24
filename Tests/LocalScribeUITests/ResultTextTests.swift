@@ -32,6 +32,33 @@ final class ResultTextTests: XCTestCase {
                                           summary: summary, part: part, markdown: false)
     }
 
+    func testRepeatedJumpToSameSegmentWorksAfterManualScrollingAndSelection() throws {
+        let segments = (0..<100).map { Segment(id: "s\($0)", startMs: $0 * 1000, endMs: ($0 + 1) * 1000,
+            text: "Фраза \($0)", language: "ru") }
+        let rendered = render(segments)
+        let first = ResultJumpRequest(segmentID: "s90")
+        try withResult(ResultTextView(result: rendered, jumpRequest: first, onJump: { _ in })) { hosting, view in
+            let expected = try XCTUnwrap(rendered.timestamps.first { $0.segmentID == "s90" }).range
+            XCTAssertEqual(view.selectedRange(), expected)
+            view.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            view.setSelectedRange(NSRange(location: 0, length: 0))
+            let second = ResultJumpRequest(segmentID: "s90")
+            XCTAssertNotEqual(first, second)
+            hosting.rootView = ResultTextView(result: rendered, jumpRequest: second, onJump: { _ in })
+            let deadline = Date().addingTimeInterval(1)
+            while view.selectedRange() != expected && Date() < deadline {
+                RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+            }
+            XCTAssertEqual(view.selectedRange(), expected)
+            // Re-rendering the same request must preserve subsequent manual selection.
+            view.setSelectedRange(NSRange(location: 0, length: 0))
+            hosting.rootView = ResultTextView(result: rendered, jumpRequest: second, onJump: { _ in })
+            hosting.layoutSubtreeIfNeeded()
+            RunLoop.current.run(until: Date().addingTimeInterval(0.02))
+            XCTAssertEqual(view.selectedRange(), NSRange(location: 0, length: 0))
+        }
+    }
+
     func testJumpAndLinksDistinguishPhrasesStartingInSameSecond() throws {
         let segments = [
             Segment(id: "first", startMs: 76_100, endMs: 76_300, text: "Да 😀 [00:01:16]", language: "ru"),
@@ -39,7 +66,7 @@ final class ResultTextTests: XCTestCase {
         ]
         let rendered = render(segments)
         let text = rendered.text
-        let result = ResultTextView(result: rendered, targetID: "second", onJump: { _ in })
+        let result = ResultTextView(result: rendered, jumpRequest: ResultJumpRequest(segmentID: "second"), onJump: { _ in })
         try withResult(result) { _, view in
             let source = text as NSString
             let first = source.range(of: "[00:01:16]")
@@ -60,7 +87,7 @@ final class ResultTextTests: XCTestCase {
         let rendered = render(segments, summary: summary, part: .summary)
         let text = rendered.text
         var jumped: String?
-        let result = ResultTextView(result: rendered, targetID: nil, onJump: { jumped = $0 })
+        let result = ResultTextView(result: rendered, jumpRequest: nil, onJump: { jumped = $0 })
         try withResult(result) { _, view in
             let range = (text as NSString).range(of: "[00:01:16]")
             let link = try XCTUnwrap(view.textStorage?.attribute(.link, at: range.location, effectiveRange: nil))
@@ -75,11 +102,11 @@ final class ResultTextTests: XCTestCase {
         replacement.id = "new"
         let rendered = render([original])
         let text = rendered.text
-        let initial = ResultTextView(result: rendered, targetID: nil, onJump: { _ in })
+        let initial = ResultTextView(result: rendered, jumpRequest: nil, onJump: { _ in })
         try withResult(initial) { hosting, view in
             let replacementResult = render([replacement])
             XCTAssertEqual(replacementResult.text, text)
-            hosting.rootView = ResultTextView(result: replacementResult, targetID: "new", onJump: { _ in })
+            hosting.rootView = ResultTextView(result: replacementResult, jumpRequest: ResultJumpRequest(segmentID: "new"), onJump: { _ in })
             hosting.layoutSubtreeIfNeeded()
             let range = (text as NSString).range(of: "[00:01:16]")
             let deadline = Date().addingTimeInterval(1)
@@ -102,7 +129,7 @@ final class ResultTextTests: XCTestCase {
         ])
         let rendered = render(segments, summary: summary, part: .summary)
         var jumps: [String] = []
-        let result = ResultTextView(result: rendered, targetID: nil, onJump: { jumps.append($0) })
+        let result = ResultTextView(result: rendered, jumpRequest: nil, onJump: { jumps.append($0) })
         try withResult(result) { _, view in
             XCTAssertEqual(rendered.timestamps.map(\.segmentID), ["second", "first", "second"])
             for timestamp in rendered.timestamps {
