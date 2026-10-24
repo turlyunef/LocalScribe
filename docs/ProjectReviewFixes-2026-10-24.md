@@ -57,3 +57,16 @@ Pipeline — summary16, fingerprint — prompt-v16-question-pages1;
 через AppErrorHandler. `ProcessingQueueTests.testEnqueueReportsUnreadableManifestAndPreservesCorruptFiles`
 прошёл: повреждённый файл сохранён, worker не запущен, незавершённый исходник
 по-прежнему не создаёт лишних сообщений.
+
+## N12 — не подтверждено
+
+Нативный AppKit-probe с `NSApplication.run`, настоящим переключением на прежнее
+приложение через NSRunningApplication.activate и возвратом фокуса проверил две
+NSPanel с hidesOnDeactivate=true: показанную до деактивации и созданную в фоне.
+Реальная деактивация подтверждена isActive=false; после активации обе панели
+присутствовали в CGWindowListCopyWindowInfo(.optionOnScreenOnly) без повторного
+orderFront. AppKit восстанавливает их сам. isVisible недостаточен для такой
+проверки: он остаётся true и у временно скрытой панели.
+
+Добавлять обработчик didBecomeActive по этой находке оснований нет.
+Свойство сверено с [документацией Apple](https://developer.apple.com/documentation/appkit/nswindow/hidesondeactivate).
