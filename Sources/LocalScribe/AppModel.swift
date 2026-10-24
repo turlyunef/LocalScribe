@@ -643,7 +643,13 @@ import LocalScribeCore
             if enqueuing[id] == request { enqueuing.removeValue(forKey: id) }
             if !busy { Task { await processQueue() } }
         }
-        guard let m = try? await archive.load(id), m.sourceComplete, id != activeID,
+        let m: Manifest
+        do { m = try await archive.load(id) }
+        catch {
+            errorHandler.report(message: "Не удалось прочитать запись для продолжения обработки. Файлы сохранены; проверьте архив и повторите попытку.")
+            return
+        }
+        guard m.sourceComplete, id != activeID,
               allowCancelled || m.state != .cancelled,
               generation == queueGeneration, !deletingRecordingIDs.contains(id), enqueuing[id] == request else { return }
         if shuttingDown {

@@ -49,3 +49,11 @@ DER на размеченных длинных встречах не измер�
 SummaryVerification/Question/Engine и RunResumption прошёл без ошибок.
 Pipeline — summary16, fingerprint — prompt-v16-question-pages1;
 старые задания и результаты не переписываются.
+
+## N10 — сообщение при отказе чтения перед enqueue
+
+Подтверждено для второго чтения в enqueue (первое чтение в resume уже показывало
+ошибку). Ошибка чтения теперь отделена от штатного отказа предусловий и показана
+через AppErrorHandler. `ProcessingQueueTests.testEnqueueReportsUnreadableManifestAndPreservesCorruptFiles`
+прошёл: повреждённый файл сохранён, worker не запущен, незавершённый исходник
+по-прежнему не создаёт лишних сообщений.

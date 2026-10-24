@@ -6,6 +6,27 @@ import Synchronization
 
 @MainActor
 final class ProcessingQueueTests: XCTestCase {
+    func testEnqueueReportsUnreadableManifestAndPreservesCorruptFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        let manifest = try completed(repo, title: "Corrupt")
+        let path = repo.folder(manifest.id).appendingPathComponent("manifest.json")
+        let bytes = Data("broken manifest".utf8)
+        try bytes.write(to: path)
+        await model.enqueue(manifest.id, allowCancelled: true)
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
+        XCTAssertTrue(model.errorHandler.messages[0].contains("Не удалось прочитать запись"))
+        XCTAssertEqual(try Data(contentsOf: path), bytes)
+        XCTAssertNil(model.queuePosition(for: manifest.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("events.jsonl").path))
+        // Ordinary precondition failures remain silent.
+        var incomplete = manifest; incomplete.sourceComplete = false; try repo.save(incomplete)
+        await model.enqueue(manifest.id)
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
+        await model.shutdown()
+    }
+
     private func fixture(_ root: URL, observeIO: (@Sendable (RecordingRepository.IOOperation) -> Void)? = nil) throws -> (RecordingRepository, AppModel, URL) {
         var repo = try RecordingRepository(root: root)
         repo.observeIO = observeIO
