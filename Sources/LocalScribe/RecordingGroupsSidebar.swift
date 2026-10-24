@@ -30,6 +30,10 @@ enum SidebarTransfer {
 
 struct RecordingGroupsSidebar: View {
     @ObservedObject var model: AppModel
+    @ObservedObject private var search: RecordingSearch
+    init(model: AppModel) {
+        self.model = model; self.search = model.recordingSearch
+    }
     @State private var editor: GroupNameDraft?
     @State private var deleting: RecordingGroup?
     @State private var deletingRecordings: SidebarDeletion?
@@ -51,24 +55,41 @@ struct RecordingGroupsSidebar: View {
                     .accessibilityIdentifier("groups.add")
                     .disabled(model.deletingGroupID != nil)
             }.padding(.horizontal, 12).padding(.vertical, 10)
+            RecordingSearchField(search: search)
+                .padding(.horizontal, 12).padding(.bottom, 8)
+            if search.active && search.completed {
+                Text("Найдено: \(search.matchingIDs.count)")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("recordings.search.count")
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 6)
+                if search.matchingIDs.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Записи не найдены")
+                        Text("Попробуйте другое название или очистите поиск").font(.caption).foregroundStyle(.secondary)
+                    }.accessibilityIdentifier("recordings.search.empty")
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                }
+            }
             ScrollViewReader { proxy in
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         if let draft = editor, draft.groupID == nil { nameEditor(draft).id(draft.id) }
-                        ForEach(model.recordingGroups.groups) { group in
-                            GroupInsertionLine(model: model, before: group.id, draggedGroup: $draggedGroup)
+                        ForEach(model.sidebarGroups(editing: editor?.groupID)) { group in
+                            if !search.active {
+                                GroupInsertionLine(model: model, before: group.id, draggedGroup: $draggedGroup)
+                            }
                             RecordingGroupDropArea(model: model, groupID: group.id, draggedRecording: draggedRecording) { targeted in
                                 if let draft = editor, draft.groupID == group.id {
                                     nameEditor(draft).id(draft.id)
                                 } else {
-                                    RecordingGroupHeader(model: model, group: group,
+                                    RecordingGroupHeader(model: model, search: search, group: group,
                                         draggedRecording: $draggedRecording, draggedGroup: $draggedGroup, dropTargeted: targeted,
                                         rename: { editor = GroupNameDraft(groupID: group.id, name: group.name) },
                                         delete: { deleting = group })
                                 }
-                                if group.expanded {
-                                    let members = model.recordings(in: group.id)
-                                    if members.isEmpty {
+                                if search.expanded(group) {
+                                    let members = model.visibleRecordings(in: group.id)
+                                    if members.isEmpty && !search.active {
                                         Text("Перетащите записи сюда или начните новую запись")
                                             .accessibilityIdentifier("groups.empty.\(group.id)")
                                             .font(.caption).foregroundStyle(.secondary)
@@ -143,7 +164,7 @@ struct RecordingGroupsSidebar: View {
     private func expansionButton(expanded: Bool) -> some View {
         let title = expanded ? "Развернуть все группы" : "Свернуть все группы"
         return Button {
-            Task { await model.changeGroups { $0.setAllExpanded(expanded) } }
+            Task { await model.setAllSidebarExpanded(expanded) }
         } label: {
             VStack(spacing: 3) {
                 Image(systemName: expanded ? "chevron.up" : "chevron.down")
@@ -290,7 +311,7 @@ private struct RecordingGroupDropArea<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) { content(targeted) }
+        LazyVStack(alignment: .leading, spacing: 0) { content(targeted) }
             .frame(maxWidth: .infinity, alignment: .leading)
             .contentShape(Rectangle())
             .background(targeted ? Color.accentColor.opacity(0.16) : Color.clear)
@@ -303,6 +324,7 @@ private struct RecordingGroupDropArea<Content: View>: View {
 
 private struct RecordingGroupHeader: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var search: RecordingSearch
     let group: RecordingGroup
     @Binding var draggedRecording: String?
     @Binding var draggedGroup: String?
@@ -315,7 +337,7 @@ private struct RecordingGroupHeader: View {
     private var controlsVisible: Bool { hovered || focus != nil }
     var body: some View {
         HStack(spacing: 5) {
-            if !group.isSystem {
+            if !group.isSystem && !search.active {
                 Image(systemName: "line.3.horizontal")
                     .frame(width: 14).opacity(controlsVisible ? 1 : 0)
                     .help("Перетащите, чтобы изменить порядок групп")
@@ -325,20 +347,25 @@ private struct RecordingGroupHeader: View {
                         return SidebarTransfer.provider(group.id, type: SidebarTransfer.group)
                     }
                     .dragConfiguration(DragConfiguration(allowMove: true))
+            } else if !group.isSystem {
+                Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary)
+                    .frame(width: 14).opacity(controlsVisible ? 1 : 0)
+                    .help("Очистите поиск, чтобы переставить группы")
+                    .accessibilityLabel("Очистите поиск, чтобы переставить группы")
             } else { Color.clear.frame(width: 14, height: 14) }
             Button {
-                Task { await model.changeGroups { try $0.setExpanded(group.id, !group.expanded) } }
+                Task { await model.setSidebarExpanded(group) }
             } label: {
                 HStack(spacing: 5) {
-                    Image(systemName: group.expanded ? "chevron.down" : "chevron.right").frame(width: 10)
-                    Text(dropTargeted ? "Отпустите → \(group.name)" : "\(group.name) · \(model.recordings(in: group.id).count)")
+                    Image(systemName: search.expanded(group) ? "chevron.down" : "chevron.right").frame(width: 10)
+                    Text(dropTargeted ? "Отпустите → \(group.name)" : "\(group.name) · \(model.sidebarGroupCount(group.id))")
                         .lineLimit(1).contentTransition(.opacity)
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain).focused($focus, equals: .disclosure)
                 .accessibilityIdentifier("groups.header.\(group.id)")
                 .accessibilityValue(dropTargeted ? "Отпустите для добавления в группу" : "")
-                .accessibilityLabel("\(group.name), записей: \(model.recordings(in: group.id).count), \(group.expanded ? "раскрыта" : "свёрнута")")
+                .accessibilityLabel("\(group.name), записей: \(model.sidebarGroupCount(group.id)), \(search.expanded(group) ? "раскрыта" : "свёрнута")")
             if !group.isSystem {
                 Button(role: .destructive, action: delete) { Image(systemName: "trash") }
                     .buttonStyle(.borderless).foregroundStyle(.red)
@@ -418,7 +445,7 @@ private struct GroupInsertionLine: View {
     let draggedGroup: String?
     @Binding var targeted: Bool
     func validateDrop(info: DropInfo) -> Bool {
-        model.deletingGroupID == nil && draggedGroup != before && draggedGroup != RecordingGroup.ungroupedID
+        !model.recordingSearch.active && model.deletingGroupID == nil && draggedGroup != before && draggedGroup != RecordingGroup.ungroupedID
             && info.hasItemsConforming(to: [SidebarTransfer.group])
     }
     func dropEntered(info: DropInfo) { targeted = validateDrop(info: info) }
@@ -430,6 +457,7 @@ private struct GroupInsertionLine: View {
         targeted = false
         guard validateDrop(info: info), let provider = info.itemProviders(for: [SidebarTransfer.group]).first else { return false }
         SidebarTransfer.load(provider, type: SidebarTransfer.group) { id in
+            guard !model.recordingSearch.active else { return }
             Task { await model.changeGroups { try $0.move(id, before: before) } }
         }
         return true

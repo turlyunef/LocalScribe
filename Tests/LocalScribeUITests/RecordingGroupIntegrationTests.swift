@@ -107,6 +107,46 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         await model.shutdown()
     }
 
+    func testNativeFilteredRangeAndMenuExcludeHiddenSelection() async throws {
+        let (repo, model) = try fixture()
+        let titles = ["Встреча первая", "Отпуск", "Встреча вторая"]
+        let rows = try titles.enumerated().map { index, title in
+            var m = Manifest(sourceType: "import", title: title, filename: "a.wav")
+            m.createdAt = Date(timeIntervalSince1970: Double(10 - index)); try repo.save(m); return m
+        }
+        for row in rows { _ = try await model.archive?.refresh(row.id) }
+        try await model.saveGroupName("Target")
+        let target = model.defaultGroup.id
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        try await clickRecording(rows[0].id, view: view, window: window)
+        try await clickRecording(rows[1].id, modifiers: .command, view: view, window: window)
+        model.recordingSearch.query = "встеча"
+        await model.recordingSearch.waitUntilIdle(); try await settle(view)
+        XCTAssertEqual(model.selection, rows[1].id)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id])
+        XCTAssertNil(element("sidebar.recording.\(rows[1].id)", in: view))
+        try await clickRecording(rows[2].id, modifiers: .shift, view: view, window: window)
+        // Filtering reset the hidden anchor, so Shift makes a single selection.
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[2].id])
+        try await clickRecording(rows[0].id, view: view, window: window)
+        try await clickRecording(rows[2].id, modifiers: .shift, view: view, window: window)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id, rows[2].id])
+        try await clickRecording(rows[0].id, context: true, view: view, window: window)
+        XCTAssertEqual(try recordingMenu(recordingID: rows[0].id, in: view, window: window).items.last?.title,
+                       "Удалить выбранные записи…")
+        let menu = try moveMenu(recordingID: rows[0].id, in: view, window: window)
+        menu.performActionForItem(at: 0); try await settle(view)
+        XCTAssertEqual(model.recordingGroups.groupID(for: rows[0].id), target)
+        XCTAssertEqual(model.recordingGroups.groupID(for: rows[2].id), target)
+        XCTAssertEqual(model.recordingGroups.groupID(for: rows[1].id), RecordingGroup.ungroupedID)
+        XCTAssertEqual(model.sidebarGroups(editing: nil).map(\.id), [target])
+        XCTAssertEqual(model.sidebarGroupCount(target), "2 / 2")
+        XCTAssertEqual(try moveMenuTitles(recordingID: rows[0].id, in: view, window: window), ["Без темы"])
+        await model.shutdown()
+    }
+
     func testRangeUsesExpandedGroupsAndBatchMovePreservesSelection() async throws {
         let (repo, model) = try fixture()
         let rows = try (0..<4).map { index in

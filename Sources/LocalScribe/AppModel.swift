@@ -4,7 +4,9 @@ import AVFoundation
 import LocalScribeCore
 
 @MainActor final class AppModel: ObservableObject {
-    @Published private(set) var recordingGroups = RecordingGroups()
+    @Published private(set) var recordingGroups = RecordingGroups() { didSet { recordingSearch.update(recordings, groups: recordingGroups) } }
+    let recordingSearch = RecordingSearch()
+    private var recordingsByID: [String: Manifest] = [:]
     @Published private(set) var deletingGroupID: String?
     @Published var sidebarRevealID: String?
     @Published private(set) var sidebarSelection = SidebarSelection()
@@ -14,10 +16,17 @@ import LocalScribeCore
     private var recordingAdmission: [String: UInt64] = [:]
     private var finalizingRecordingID: String?
     private var startingGroupID: String?
-    @Published var recordings: [Manifest] = [] { didSet { refreshPresentation() } }
+    @Published var recordings: [Manifest] = [] {
+        didSet {
+            recordingsByID = Dictionary(uniqueKeysWithValues: recordings.map { ($0.id, $0) })
+            recordingSearch.update(recordings, groups: recordingGroups)
+            refreshPresentation()
+        }
+    }
     @Published var selection: String? {
         didSet {
             sidebarSelection = SidebarSelection(selection)
+            retainSearchSelection()
             if oldValue != selection { transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil }
             loadResult()
         }
@@ -133,6 +142,7 @@ import LocalScribeCore
         catalog = providedCatalog ?? (try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json")))
         do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; archive = RecordingCoordinator(repository: repo, importProbe: importProbe) }
         catch { repository = nil; archive = nil; errorHandler.report(message: "Не удалось открыть локальное хранилище: \(error.localizedDescription)") }
+        recordingSearch.onVisibilityChange = { [weak self] in self?.retainSearchSelection() }
         if !startServices { preparingStorage = false; Task { await reload() }; return }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical, .normal], queue: .main)
         memorySource?.setEventHandler { [weak self] in
@@ -169,6 +179,7 @@ import LocalScribeCore
     func reload() async {
         guard let archive else { return }
         applySnapshot(await archive.snapshot())
+        await recordingSearch.waitForLayout()
     }
     private func applySnapshot(_ snapshot: RecordingCoordinator.Snapshot) {
         guard snapshot.revision >= archiveRevision else { return }
@@ -178,10 +189,11 @@ import LocalScribeCore
             recordingGroups = snapshot.groups
             var retained = sidebarSelection
             retained.retain(Set(recordings.map(\.id)))
-            if let selection, !retained.ids.contains(selection) {
+            if let selection, !recordings.contains(where: { $0.id == selection }) {
                 self.selection = recordings.first { retained.ids.contains($0.id) }?.id
             }
             sidebarSelection = retained
+            retainSearchSelection()
             if let error = snapshot.groupsError, error != reportedGroupsError {
                 reportedGroupsError = error; errorHandler.report(message: error)
             }
@@ -873,7 +885,7 @@ import LocalScribeCore
         do { try await archive.delete(selected); selection = nil; await reload() } catch { errorHandler.report(error) }
     }
     var sidebarRecordingOrder: [String] {
-        recordingGroups.groups.filter(\.expanded).flatMap { recordings(in: $0.id).map(\.id) }
+        recordingGroups.groups.filter { recordingSearch.expanded($0) }.flatMap { recordingSearch.visible[$0.id] ?? [] }
     }
     func selectSidebarRecording(_ id: String, command: Bool = false, shift: Bool = false) {
         var next = sidebarSelection
@@ -889,7 +901,8 @@ import LocalScribeCore
         sidebarSelection = next
     }
     func sidebarActionIDs(for id: String) -> Set<String> {
-        sidebarSelection.ids.contains(id) ? sidebarSelection.ids : [id]
+        let ids = sidebarSelection.ids.contains(id) ? sidebarSelection.ids : [id]
+        return recordingSearch.active && recordingSearch.completed ? ids.intersection(recordingSearch.matchingIDs) : ids
     }
     func moveRecordings(_ ids: Set<String>, to groupID: String) async {
         guard let archive, deletingGroupID == nil, !deletingSidebarRecordings else { return }
@@ -928,6 +941,32 @@ import LocalScribeCore
     func recordings(in groupID: String) -> [Manifest] {
         recordings.filter { recordingGroups.groupID(for: $0.id) == groupID }
             .sorted { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt }
+    }
+    func visibleRecordings(in groupID: String) -> [Manifest] {
+        (recordingSearch.visible[groupID] ?? []).compactMap { recordingsByID[$0] }
+    }
+    func sidebarGroups(editing id: String?) -> [RecordingGroup] {
+        recordingGroups.groups.filter {
+            !recordingSearch.active || !recordingSearch.completed || !(recordingSearch.visible[$0.id] ?? []).isEmpty || $0.id == id
+        }
+    }
+    func sidebarGroupCount(_ id: String) -> String {
+        let total = recordingSearch.normal[id]?.count ?? 0
+        return recordingSearch.active ? "\(recordingSearch.filtered[id]?.count ?? 0) / \(total)" : "\(total)"
+    }
+    private func retainSearchSelection() {
+        guard recordingSearch.active, recordingSearch.completed else { return }
+        var retained = sidebarSelection
+        retained.retain(recordingSearch.matchingIDs)
+        sidebarSelection = retained
+    }
+    func setSidebarExpanded(_ group: RecordingGroup) async {
+        if recordingSearch.active { recordingSearch.setExpanded(group.id, !recordingSearch.expanded(group)) }
+        else { await changeGroups { try $0.setExpanded(group.id, !group.expanded) } }
+    }
+    func setAllSidebarExpanded(_ expanded: Bool) async {
+        if recordingSearch.active { recordingSearch.setAllExpanded(expanded) }
+        else { await changeGroups { $0.setAllExpanded(expanded) } }
     }
     func saveGroupName(_ name: String, id: String? = nil) async throws {
         guard let archive else { throw ScribeError.message("Хранилище недоступно") }
@@ -1015,6 +1054,7 @@ import LocalScribeCore
     }
     func shutdown() async {
         shuttingDown = true
+        recordingSearch.shutdown()
         importQueue.cancel()
         memorySource?.cancel(); memorySource = nil
         if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }; sleepObserver = nil
