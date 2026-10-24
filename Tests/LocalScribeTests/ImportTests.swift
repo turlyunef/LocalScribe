@@ -1,9 +1,54 @@
 import Darwin
+import Synchronization
 import XCTest
 @testable import LocalScribeCore
 
 final class ImportTests: XCTestCase {
     private let info = AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_f32le")
+
+    func testCoordinatorReprobesVerifiedCopyAfterSourceReplacementAndRollsBackProbeFailure() async throws {
+        for failVerification in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let repo = try RecordingRepository(root: root.appendingPathComponent("archive"))
+            let source = root.appendingPathComponent("selected.wav")
+            let initial = Data("initial".utf8), replacement = Data("replacement".utf8), later = Data("later change".utf8)
+            try initial.write(to: source)
+            let calls = Mutex(0)
+            let archive = RecordingCoordinator(repository: repo, importProbe: { url, _ in
+                let index = calls.withLock { count in defer { count += 1 }; return count }
+                if index == 0 {
+                    XCTAssertEqual(url, source)
+                    XCTAssertEqual(try Data(contentsOf: url), initial)
+                    // Replace exactly after the first probe and before ImportSource.open.
+                    try replacement.write(to: source)
+                    return AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le")
+                }
+                XCTAssertNotEqual(url, source)
+                XCTAssertEqual(try Data(contentsOf: url), replacement)
+                try later.write(to: source) // External changes cannot affect the private copy.
+                if failVerification { throw ScribeError.message("invalid replacement audio") }
+                return AudioInfo(duration: 2, sampleRate: 32000, channels: 2, codec: "pcm_s16le")
+            })
+            do {
+                let manifest = try await archive.importFile(source, tools: root)
+                XCTAssertFalse(failVerification)
+                XCTAssertEqual(manifest.durationMs, 2000)
+                XCTAssertEqual(manifest.sampleRate, 32000); XCTAssertEqual(manifest.channels, 2)
+                let saved = repo.folder(manifest.id).appendingPathComponent(manifest.originalRelativePath)
+                XCTAssertEqual(try Data(contentsOf: saved), replacement)
+                XCTAssertEqual(manifest.sha256, try Disk.hash(saved))
+            } catch { XCTAssertTrue(failVerification) }
+            XCTAssertEqual(calls.withLock { $0 }, 2)
+            XCTAssertEqual(try Data(contentsOf: source), later)
+            if failVerification {
+                let snapshot = await archive.snapshot()
+                XCTAssertTrue(snapshot.manifests.isEmpty)
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.appendingPathComponent("archive/recordings").path), [])
+            }
+            await archive.flushIndex()
+        }
+    }
 
     func testRegularFileImportCreatesIndependentOriginal() throws {
         try checkIndependentImport(link: nil)

@@ -39,7 +39,7 @@ final class ImportQueueTests: XCTestCase {
         var expected: [String] = []
         for index in 0..<50 {
             let url = try source(root, "drop-\(index)")
-            expected.append(url.lastPathComponent)
+            expected.append(contentsOf: [url.lastPathComponent, "original.wav"])
             let provider = NSItemProvider()
             provider.registerObject(ofClass: NSURL.self, visibility: .all) { completion in
                 counts.withLock { $0.enter(); $0.providers += 1 }
@@ -53,7 +53,7 @@ final class ImportQueueTests: XCTestCase {
             model.importProviders([provider])
             if index == 24 {
                 let dialogURL = try source(root, "dialog")
-                expected.append(dialogURL.lastPathComponent)
+                expected.append(contentsOf: [dialogURL.lastPathComponent, "original.wav"])
                 model.importURLs([dialogURL])
             }
         }
@@ -61,7 +61,7 @@ final class ImportQueueTests: XCTestCase {
         XCTAssertEqual(counts.withLock { $0.maximum }, 1)
         XCTAssertEqual(counts.withLock { $0.active }, 0)
         XCTAssertEqual(counts.withLock { $0.providers }, 50)
-        XCTAssertEqual(counts.withLock { $0.probes }, 51)
+        XCTAssertEqual(counts.withLock { $0.probes }, 102)
         XCTAssertEqual(counts.withLock { $0.order }, expected)
         XCTAssertEqual(model.recordings.count, 51)
         XCTAssertTrue(model.errorHandler.messages.isEmpty)

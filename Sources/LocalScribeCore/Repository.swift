@@ -56,6 +56,7 @@ public struct RecordingRepository: Sendable {
     }
     public func importFile(_ source: URL, info: AudioInfo, allowDuplicate: Bool = false,
                            existingRecordings: [Manifest]? = nil,
+                           verifyAudio: ((URL) throws -> AudioInfo)? = nil,
                            beforePublish: (Manifest) throws -> Void = { _ in }) throws -> Manifest {
         try Task.checkCancellation()
         let fm = FileManager.default
@@ -74,6 +75,11 @@ public struct RecordingRepository: Sendable {
         try input.copy(to: partial, verifying: digest)
         try Task.checkCancellation()
         try fm.moveItem(at: partial, to: original)
+        // Preliminary path-based probing may precede a replacement of the source.
+        // Only metadata measured from our verified independent copy is authoritative.
+        let info = try verifyAudio?(original) ?? info
+        try Task.checkCancellation()
+        try Disk.requireSpace(Int64(info.duration * 32_000) + 500_000_000, at: root)
         manifest.sha256 = digest; manifest.durationMs = Int((info.duration * 1000).rounded()); manifest.sampleRate = info.sampleRate; manifest.channels = info.channels; manifest.sourceComplete = true; manifest.state = .queued
         try beforePublish(manifest)
         try save(manifest)
