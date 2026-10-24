@@ -56,7 +56,7 @@ extension RecordingRepository {
                 try Transcript(fingerprint: info.fingerprint, diarized: false, segments: part.segments).validate(durationMs: manifest.durationMs)
                 return part
             }
-            guard Set(parts.map(\.index)).count == parts.count else { throw invalidResult() }
+            guard parts.map(\.index).sorted() == Array(0..<parts.count) else { throw invalidResult() }
             let merged = Analysis.mergeParts(parts, fingerprint: info.fingerprint)
             try merged.validate(durationMs: manifest.durationMs)
             transcript = parts.isEmpty ? nil : merged

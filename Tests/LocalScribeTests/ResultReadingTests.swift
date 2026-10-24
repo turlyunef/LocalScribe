@@ -132,6 +132,27 @@ final class ResultReadingTests: XCTestCase {
         }
     }
 
+    func testPendingASRPreviewRejectsMissingFirstMiddleAndDuplicateParts() throws {
+        try fixture { repo, original, info, _, _ in
+            var manifest = original
+            manifest.activeRunId = nil; manifest.pendingRunId = info.id; manifest.durationMs = 900_000
+            let path = repo.run(manifest.id, info.id)
+            try FileManager.default.removeItem(at: path.appendingPathComponent("transcript.json"))
+            try FileManager.default.removeItem(at: path.appendingPathComponent("summary.json"))
+            let parts = path.appendingPathComponent("asr")
+            for indices in [[1], [0, 2], [0, 1, 1], [0, 1], [0, 1, 2]] {
+                try? FileManager.default.removeItem(at: parts)
+                for (fileIndex, index) in indices.enumerated() {
+                    let part = ASRPart(fingerprint: info.fingerprint, index: index,
+                        startMs: index * 300_000, endMs: (index + 1) * 300_000, segments: [])
+                    try Disk.write(part, to: parts.appendingPathComponent("part-\(fileIndex).json"))
+                }
+                if indices == [0, 1] || indices == [0, 1, 2] { XCTAssertNotNil(try repo.results(manifest).0) }
+                else { XCTAssertThrowsError(try repo.results(manifest)) }
+            }
+        }
+    }
+
     func testASRCheckpointBoundsBeforeArithmeticAndValidPreview() throws {
         try fixture { repo, original, info, transcript, _ in
             var manifest = original; manifest.activeRunId = nil; manifest.pendingRunId = info.id
