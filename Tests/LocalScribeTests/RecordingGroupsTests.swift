@@ -25,6 +25,28 @@ final class RecordingGroupsTests: XCTestCase {
         return await archive.snapshot().groups.defaultGroup
     }
 
+    func testBatchMoveValidatesAllMembersBeforePublishingAndPreservesManifests() async throws {
+        let repo = try fixture(), a = try recording(repo), b = try recording(repo)
+        let archive = RecordingCoordinator(repository: repo)
+        let source = try await create(archive, "Source"), target = try await create(archive, "Target")
+        try await archive.moveRecording(a.id, to: source.id)
+        let before = await archive.snapshot()
+        do {
+            try await archive.moveRecordings([a.id, b.id, UUID().uuidString], to: target.id)
+            XCTFail("Missing member must reject the entire move")
+        } catch {}
+        let failed = await archive.snapshot()
+        XCTAssertEqual(failed.groups, before.groups)
+        XCTAssertEqual(failed.revision, before.revision)
+        try await archive.moveRecordings([a.id, b.id], to: target.id)
+        let moved = await archive.snapshot()
+        XCTAssertEqual(moved.revision, before.revision + 1)
+        XCTAssertEqual(try repo.loadGroups().groupID(for: a.id), target.id)
+        XCTAssertEqual(try repo.loadGroups().groupID(for: b.id), target.id)
+        XCTAssertEqual(try repo.load(a.id).activeRunId, a.activeRunId)
+        XCTAssertEqual(try repo.load(b.id).pendingRunId, b.pendingRunId)
+    }
+
     func testLegacyArchiveUsesSystemGroupWithoutChangingFilesOrManifests() async throws {
         let repo = try fixture(), m = try recording(repo)
         let path = repo.folder(m.id).appendingPathComponent("manifest.json")

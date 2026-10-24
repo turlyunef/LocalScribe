@@ -7,6 +7,8 @@ import LocalScribeCore
     @Published private(set) var recordingGroups = RecordingGroups()
     @Published private(set) var deletingGroupID: String?
     @Published var sidebarRevealID: String?
+    @Published private(set) var sidebarSelection = SidebarSelection()
+    @Published private(set) var deletingSidebarRecordings = false
     private var reportedGroupsError: String?
     private var deletingRecordingIDs: Set<String> = []
     private var recordingAdmission: [String: UInt64] = [:]
@@ -15,6 +17,7 @@ import LocalScribeCore
     @Published var recordings: [Manifest] = [] { didSet { refreshPresentation() } }
     @Published var selection: String? {
         didSet {
+            sidebarSelection = SidebarSelection(selection)
             if oldValue != selection { transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil }
             loadResult()
         }
@@ -173,6 +176,12 @@ import LocalScribeCore
             archiveRevision = snapshot.revision
             recordings = snapshot.manifests
             recordingGroups = snapshot.groups
+            var retained = sidebarSelection
+            retained.retain(Set(recordings.map(\.id)))
+            if let selection, !retained.ids.contains(selection) {
+                self.selection = recordings.first { retained.ids.contains($0.id) }?.id
+            }
+            sidebarSelection = retained
             if let error = snapshot.groupsError, error != reportedGroupsError {
                 reportedGroupsError = error; errorHandler.report(message: error)
             }
@@ -648,10 +657,10 @@ import LocalScribeCore
         try hardware.requireCompatibility(for: profile)
     }
     func processQueue() async {
-        guard deletingGroupID == nil, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
+        guard deletingGroupID == nil, !deletingSidebarRecordings, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
               let repository, let archive, let catalog else { return }
         busy = true; defer { busy = false; activeID = nil; processingRecordingID = nil; status = "" }
-        while deletingGroupID == nil && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
+        while deletingGroupID == nil && !deletingSidebarRecordings && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
                 status = "Обработка ожидает охлаждения Mac"
                 try? await Task.sleep(for: .seconds(2)); continue
@@ -856,12 +865,64 @@ import LocalScribeCore
         await reload()
     }
     func deleteSelected() async {
-        guard deletingGroupID == nil, let selected, let archive, selected.id != recordingID, !finalizingRecording else { return }
+        guard deletingGroupID == nil, !deletingSidebarRecordings, let selected, let archive, selected.id != recordingID, !finalizingRecording else { return }
         let alert = NSAlert(); alert.messageText = "Удалить запись и результаты?"; alert.informativeText = "Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся."
         alert.addButton(withTitle: "Удалить запись"); alert.addButton(withTitle: "Отмена")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         await cancelSelected()
         do { try await archive.delete(selected); selection = nil; await reload() } catch { errorHandler.report(error) }
+    }
+    var sidebarRecordingOrder: [String] {
+        recordingGroups.groups.filter(\.expanded).flatMap { recordings(in: $0.id).map(\.id) }
+    }
+    func selectSidebarRecording(_ id: String, command: Bool = false, shift: Bool = false) {
+        var next = sidebarSelection
+        next.click(id, command: command, shift: shift, order: sidebarRecordingOrder)
+        let primary = next.ids.contains(id) ? id : sidebarRecordingOrder.first { next.ids.contains($0) }
+        if selection != primary { selection = primary }
+        sidebarSelection = next
+    }
+    func selectSidebarContext(_ id: String) {
+        var next = sidebarSelection
+        next.contextClick(id)
+        if !next.ids.contains(selection ?? "") { selection = id }
+        sidebarSelection = next
+    }
+    func sidebarActionIDs(for id: String) -> Set<String> {
+        sidebarSelection.ids.contains(id) ? sidebarSelection.ids : [id]
+    }
+    func moveRecordings(_ ids: Set<String>, to groupID: String) async {
+        guard let archive, deletingGroupID == nil, !deletingSidebarRecordings else { return }
+        do { try await archive.moveRecordings(ids, to: groupID); await reload() }
+        catch { errorHandler.report(error) }
+    }
+    func canDeleteSidebarRecordings(_ ids: Set<String>) -> Bool {
+        !ids.isEmpty && deletingGroupID == nil && !deletingSidebarRecordings
+            && Set([recordingID, finalizingRecordingID].compactMap { $0 }).isDisjoint(with: ids)
+    }
+    /// The confirmation view freezes the IDs; selection may change while it is open.
+    func deleteSidebarRecordings(_ ids: Set<String>) async {
+        guard let archive, canDeleteSidebarRecordings(ids) else { return }
+        deletingSidebarRecordings = true
+        deletingRecordingIDs.formUnion(ids)
+        // Bar every selected job before cancellation can yield to an enqueue response.
+        for id in ids {
+            recordingAdmission[id, default: 0] &+= 1
+            enqueuing.removeValue(forKey: id)
+        }
+        queued.removeAll { ids.contains($0) }
+        defer {
+            deletingSidebarRecordings = false
+            deletingRecordingIDs.subtract(recordings.map(\.id))
+            Task { await processQueue() }
+        }
+        for id in ids.sorted() { await cancel(id) }
+        do {
+            for manifest in recordings.filter({ ids.contains($0.id) }) {
+                try await archive.delete(manifest)
+            }
+        } catch { errorHandler.report(error) }
+        await reload()
     }
     var defaultGroup: RecordingGroup { recordingGroups.defaultGroup }
     func recordings(in groupID: String) -> [Manifest] {
@@ -882,9 +943,7 @@ import LocalScribeCore
         catch { errorHandler.report(error) }
     }
     func moveRecording(_ id: String, to groupID: String) async {
-        guard let archive, deletingGroupID == nil else { return }
-        do { try await archive.moveRecording(id, to: groupID); await reload() }
-        catch { errorHandler.report(error) }
+        await moveRecordings([id], to: groupID)
     }
     func revealRecording(_ id: String) async {
         guard let archive else { return }
@@ -903,7 +962,7 @@ import LocalScribeCore
     }
     /// Confirmation belongs to the view; this method rechecks live protection.
     func deleteGroup(_ id: String, deleteRecordings: Bool) async {
-        guard let archive, deletingGroupID == nil, id != RecordingGroup.ungroupedID else { return }
+        guard let archive, deletingGroupID == nil, !deletingSidebarRecordings, id != RecordingGroup.ungroupedID else { return }
         guard !deleteRecordings || canDeleteRecordings(in: id) else {
             errorHandler.report(message: "Сначала остановите запись"); return
         }

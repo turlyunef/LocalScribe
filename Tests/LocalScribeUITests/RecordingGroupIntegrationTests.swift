@@ -30,13 +30,162 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         _ = NSApplication.shared
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
         let hosting = NSHostingView(rootView: view)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
+        let window = SidebarTestWindow(contentRect: NSRect(x: 0, y: 0, width: 600, height: 700), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = hosting
         window.makeKeyAndOrderFront(nil); hosting.layoutSubtreeIfNeeded()
         return (hosting, window)
     }
     private func settle(_ view: NSView) async throws {
         try await Task.sleep(for: .milliseconds(180)); view.layoutSubtreeIfNeeded()
+    }
+
+    private func clickRecording(_ id: String, modifiers: NSEvent.ModifierFlags = [], context: Bool = false,
+                                view: NSView, window: NSWindow) async throws {
+        let row = try XCTUnwrap(element("sidebar.recording.\(id)", in: view))
+        let frame = try XCTUnwrap(row.accessibilityFrame?())
+        let location = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
+        // Deliver through NSApplication so local monitors see the actual event, then
+        // suppress the blocking system menu loop. Menu contents/actions are tested below.
+        (window as? SidebarTestWindow)?.suppressContextMenus = context
+        defer { (window as? SidebarTestWindow)?.suppressContextMenus = false }
+        let types: [NSEvent.EventType] = context ? [.rightMouseDown, .rightMouseUp] : [.leftMouseDown, .leftMouseUp]
+        let events = try types.map { type in
+            try XCTUnwrap(NSEvent.mouseEvent(with: type, location: location, modifierFlags: modifiers,
+                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                context: nil, eventNumber: 0, clickCount: 1, pressure: 1))
+        }
+        NSApplication.shared.postEvent(events[1], atStart: false)
+        NSApplication.shared.sendEvent(events[0])
+        while let event = NSApplication.shared.nextEvent(matching: [.leftMouseUp, .rightMouseUp],
+            until: Date(), inMode: .default, dequeue: true) {
+            NSApplication.shared.sendEvent(event)
+        }
+        try await settle(view)
+    }
+
+    func testNativeCommandShiftAndPlainClicksAcrossGroupsAndContextMenu() async throws {
+        let (repo, model) = try fixture()
+        let rows = try (0..<4).map { index in
+            var m = Manifest(sourceType: "import", title: "Row \(index)", filename: "a.wav")
+            m.createdAt = Date(timeIntervalSince1970: Double(10 - index))
+            try repo.save(m); return m
+        }
+        for row in rows { _ = try await model.archive?.refresh(row.id) }
+        try await model.saveGroupName("First")
+        let first = model.defaultGroup.id
+        await model.moveRecordings(Set(rows.prefix(2).map(\.id)), to: first)
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        XCTAssertEqual(model.sidebarRecordingOrder, rows.map(\.id))
+        try await clickRecording(rows[0].id, view: view, window: window)
+        try await clickRecording(rows[2].id, modifiers: .command, view: view, window: window)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id, rows[2].id])
+        // The menu must offer both existing source groups for a mixed selection.
+        XCTAssertEqual(try moveMenuTitles(recordingID: rows[0].id, in: view, window: window), ["First", "Без темы"])
+        try await clickRecording(rows[0].id, context: true, view: view, window: window)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id, rows[2].id])
+        XCTAssertEqual(try recordingMenu(recordingID: rows[0].id, in: view, window: window).items.last?.title,
+                       "Удалить выбранные записи…")
+        let menu = try moveMenu(recordingID: rows[0].id, in: view, window: window)
+        menu.performActionForItem(at: 0)
+        try await settle(view)
+        XCTAssertEqual(model.recordingGroups.groupID(for: rows[2].id), first)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id, rows[2].id])
+        await model.moveRecording(rows[2].id, to: RecordingGroup.ungroupedID)
+        try await settle(view)
+        try await clickRecording(rows[0].id, view: view, window: window)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id])
+        XCTAssertEqual(try recordingMenu(recordingID: rows[0].id, in: view, window: window).items.last?.title,
+                       "Удалить запись…")
+        try await clickRecording(rows[3].id, modifiers: .shift, view: view, window: window)
+        XCTAssertEqual(model.sidebarSelection.ids, Set(rows.map(\.id)))
+        try await clickRecording(rows[1].id, modifiers: .shift, view: view, window: window)
+        XCTAssertEqual(model.sidebarSelection.ids, Set(rows.prefix(2).map(\.id)))
+        try await clickRecording(rows[3].id, context: true, view: view, window: window)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[3].id])
+        await model.shutdown()
+    }
+
+    func testRangeUsesExpandedGroupsAndBatchMovePreservesSelection() async throws {
+        let (repo, model) = try fixture()
+        let rows = try (0..<4).map { index in
+            var m = Manifest(sourceType: "import", title: "Row \(index)", filename: "a.wav")
+            m.createdAt = Date(timeIntervalSince1970: Double(index)); try repo.save(m); return m
+        }
+        for row in rows { _ = try await model.archive?.refresh(row.id) }
+        try await model.saveGroupName("First")
+        let first = model.defaultGroup.id
+        await model.moveRecordings([rows[0].id, rows[1].id], to: first)
+        try await model.saveGroupName("Hidden")
+        let hidden = model.defaultGroup.id
+        await model.moveRecording(rows[2].id, to: hidden)
+        await model.changeGroups { try $0.setExpanded(hidden, false) }
+        model.selectSidebarRecording(rows[1].id)
+        model.selectSidebarRecording(rows[3].id, shift: true)
+        let ids: Set<String> = [rows[0].id, rows[1].id, rows[3].id]
+        XCTAssertEqual(model.sidebarSelection.ids, ids)
+        await model.moveRecordings(ids, to: hidden)
+        XCTAssertEqual(model.sidebarSelection.ids, ids)
+        XCTAssertEqual(model.selection, rows[3].id)
+        XCTAssertTrue(ids.allSatisfy { model.recordingGroups.groupID(for: $0) == hidden })
+        XCTAssertEqual(model.recordingGroups.groups.first { $0.id == hidden }?.expanded, false)
+        model.selection = rows[2].id
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[2].id])
+        await model.shutdown()
+    }
+
+    func testBatchDeletionProtectsMicrophoneAndConfirmationHasNoReturnShortcut() async throws {
+        let (repo, model) = try fixture()
+        let a = Manifest(sourceType: "microphone", title: "Capture", filename: "a.caf")
+        let b = Manifest(sourceType: "import", title: "Keep", filename: "b.wav")
+        for row in [a, b] { try repo.save(row); _ = try await model.archive?.refresh(row.id) }
+        await model.reload()
+        let ids: Set<String> = [a.id, b.id]
+        model.recordingID = a.id
+        await model.deleteSidebarRecordings(ids)
+        XCTAssertEqual(model.recordings.count, 2)
+        let (view, window) = host(DeleteSidebarRecordingsView(model: model, ids: ids, dismiss: {}))
+        defer { window.close() }
+        try await settle(view)
+        XCTAssertEqual(element("sidebar.confirmDeleteRecordings", in: view)?.isAccessibilityEnabled?(), false)
+        XCTAssertNil(window.defaultButtonCell)
+        model.recordingID = nil
+        try await settle(view)
+        XCTAssertEqual(element("sidebar.confirmDeleteRecordings", in: view)?.isAccessibilityEnabled?(), true)
+        await model.shutdown()
+    }
+
+    func testBatchDeletionUsesConfirmedIDsAndPreservesExternalFilesAndOtherSelection() async throws {
+        let (repo, model) = try fixture()
+        let sources = try (0..<3).map { index in
+            let url = repo.root.appendingPathComponent("external-\(index).wav")
+            try Data("audio \(index)".utf8).write(to: url)
+            return url
+        }
+        let export = repo.root.appendingPathComponent("export.txt")
+        try Data("export".utf8).write(to: export)
+        model.importURLs(sources)
+        await model.importQueue.waitUntilIdle()
+        let rows = model.recordings
+        XCTAssertEqual(rows.count, 3)
+        try await model.saveGroupName("Keep group")
+        let group = model.defaultGroup.id
+        await model.moveRecording(rows[0].id, to: group)
+        let confirmed: Set<String> = [rows[0].id, rows[1].id]
+        model.selectSidebarRecording(rows[2].id)
+        await model.deleteSidebarRecordings(confirmed)
+        XCTAssertEqual(model.recordings.map(\.id), [rows[2].id])
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[2].id])
+        XCTAssertEqual(model.selection, rows[2].id)
+        XCTAssertTrue(model.recordingGroups.groups.contains { $0.id == group })
+        for id in confirmed { XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(id).path)) }
+        for (index, source) in sources.enumerated() {
+            XCTAssertEqual(try Data(contentsOf: source), Data("audio \(index)".utf8))
+        }
+        XCTAssertEqual(try Data(contentsOf: export), Data("export".utf8))
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
     }
 
     func testImportBatchAndDelayedProvidersKeepDestinationAcrossDefaultChangesAndDuplicates() async throws {
@@ -130,7 +279,7 @@ final class RecordingGroupIntegrationTests: XCTestCase {
             let button = try XCTUnwrap(element(buttonID, in: view))
             let frame = try XCTUnwrap(button.accessibilityFrame?())
             XCTAssertEqual(frame.midY, addFrame.midY, accuracy: 1)
-            XCTAssertGreaterThan(frame.minX, addFrame.maxX)
+            XCTAssertLessThan(frame.maxX, addFrame.minX)
             XCTAssertTrue(button.accessibilityPerformPress?() ?? false)
             try await settle(view)
             XCTAssertTrue(model.recordingGroups.groups.allSatisfy { $0.expanded == expanded })
@@ -246,6 +395,8 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         let row = try XCTUnwrap(element("sidebar.recording.\(recording.id)", in: view))
         let operations = try await dragOperations(on: row, in: view, window: window)
         XCTAssertTrue(operations.contains(.move))
+        XCTAssertEqual(model.sidebarSelection.ids, [recording.id])
+        XCTAssertEqual(model.selection, recording.id)
         await model.shutdown()
     }
 
@@ -515,6 +666,17 @@ final class RecordingGroupIntegrationTests: XCTestCase {
     }
 
     private func moveMenuTitles(recordingID: String, in view: NSView, window: NSWindow) throws -> [String] {
+        try moveMenu(recordingID: recordingID, in: view, window: window).items.map(\.title)
+    }
+
+    private func moveMenu(recordingID: String, in view: NSView, window: NSWindow) throws -> NSMenu {
+        let menu = try recordingMenu(recordingID: recordingID, in: view, window: window)
+        let submenu = try XCTUnwrap(menu.items.first(where: { $0.title == "Переместить в" })?.submenu)
+        submenu.update()
+        return submenu
+    }
+
+    private func recordingMenu(recordingID: String, in view: NSView, window: NSWindow) throws -> NSMenu {
         let row = try XCTUnwrap(element("sidebar.recording.\(recordingID)", in: view))
         let frame = try XCTUnwrap(row.accessibilityFrame?())
         let location = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
@@ -525,10 +687,7 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         while let current = candidate {
             if let menu = current.menu(for: event) {
                 menu.update()
-                if let submenu = menu.items.first(where: { $0.title == "Переместить в" })?.submenu {
-                    submenu.update()
-                    return submenu.items.map(\.title)
-                }
+                if menu.items.contains(where: { $0.title == "Переместить в" }) { return menu }
             }
             candidate = current.superview
         }
@@ -649,4 +808,14 @@ private final class SidebarDropInfo: NSObject, NSDraggingInfo {
     nonisolated override func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
     func resetSpringLoading() {}
     func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions, for view: NSView?, classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any], using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
+}
+
+/// Avoid an interactive menu event loop in automated mouse-selection tests.
+@MainActor
+private final class SidebarTestWindow: NSWindow {
+    var suppressContextMenus = false
+    override func sendEvent(_ event: NSEvent) {
+        if suppressContextMenus && (event.type == .rightMouseDown || event.type == .rightMouseUp) { return }
+        super.sendEvent(event)
+    }
 }

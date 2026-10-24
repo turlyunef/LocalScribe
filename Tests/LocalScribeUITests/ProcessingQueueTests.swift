@@ -921,6 +921,40 @@ final class ProcessingQueueTests: XCTestCase {
         model.recordingID = nil
     }
 
+    func testSidebarBatchDeletionStopsSelectedJobsAcrossGroupsAndKeepsOtherQueueOrder() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, release) = try fixture(root)
+        let active = try completed(repo, title: "Delete active")
+        let waiting = try completed(repo, title: "Delete waiting")
+        let keep1 = try completed(repo, title: "Keep first")
+        let keep2 = try completed(repo, title: "Keep second")
+        try await model.saveGroupName("Delete")
+        let group = model.defaultGroup.id
+        await model.moveRecording(active.id, to: group)
+        await model.enqueue(active.id)
+        try await waitUntil { model.status == "fixture-ready-" + active.id }
+        for m in [keep1, waiting, keep2] { await model.enqueue(m.id) }
+        model.selectSidebarRecording(active.id)
+        model.selectSidebarRecording(waiting.id, command: true)
+        await model.deleteSidebarRecordings(model.sidebarSelection.ids)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(active.id).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(waiting.id).path))
+        XCTAssertNil(model.selection)
+        XCTAssertTrue(model.recordingGroups.groups.contains { $0.id == group })
+        XCTAssertTrue(model.sidebarSelection.ids.isEmpty)
+        await model.enqueue(waiting.id, allowCancelled: true)
+        XCTAssertNil(model.queuePosition(for: waiting.id))
+        try await waitUntil { model.status == "fixture-ready-" + keep1.id }
+        XCTAssertEqual(model.queuePosition(for: keep2.id), 1)
+        try Data().write(to: release)
+        try await waitUntil { !model.busy && (try? repo.load(keep2.id).state) == .completed }
+        XCTAssertEqual(try repo.load(keep1.id).state, .completed)
+        XCTAssertFalse(try events(root).contains { $0.jobId == waiting.id })
+        XCTAssertEqual(try events(root).filter { $0.stage == .preparingAudio }.map(\.jobId), [active.id, keep1.id, keep2.id])
+        await model.shutdown()
+    }
+
     func testGroupDeletionStopsOnlyMemberJobsAndKeepsOtherQueueOrder() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -983,6 +1017,38 @@ final class ProcessingQueueTests: XCTestCase {
         await model.shutdown()
     }
 
+    func testSidebarDeletionInvalidatesEnqueueWaitingForArchive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let gate = DispatchSemaphore(value: 0)
+        defer { gate.signal() }
+        let state = Mutex((enabled: false, blocked: false))
+        let (repo, model, _) = try fixture(root, observeIO: { operation in
+            guard operation == .manifestRead else { return }
+            let block = state.withLock { value in
+                guard value.enabled, !value.blocked else { return false }
+                value.blocked = true; return true
+            }
+            if block { gate.wait() }
+        })
+        let m = try completed(repo, title: "Late enqueue")
+        _ = try await model.archive?.refresh(m.id)
+        try await model.saveGroupName("Delete")
+        let group = model.defaultGroup.id
+        await model.moveRecording(m.id, to: group)
+        state.withLock { $0.enabled = true }
+        let enqueue = Task { await model.enqueue(m.id) }
+        try await waitUntil { state.withLock { $0.blocked } }
+        let unblock = Task { @MainActor in gate.signal() }
+        await model.deleteSidebarRecordings([m.id])
+        _ = await unblock.value; await enqueue.value
+        XCTAssertFalse(model.supervisor.running)
+        XCTAssertNil(model.queuePosition(for: m.id))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(m.id).path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("events.jsonl").path))
+        await model.shutdown()
+    }
+
     func testGroupDeletionInvalidatesEnqueueWaitingForArchive() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -1007,7 +1073,7 @@ final class ProcessingQueueTests: XCTestCase {
         try await waitUntil { state.withLock { $0.blocked } }
         let unblock = Task { @MainActor in gate.signal() }
         await model.deleteGroup(group, deleteRecordings: true)
-        await unblock.value; await enqueue.value
+        _ = await unblock.value; await enqueue.value
         XCTAssertFalse(model.supervisor.running)
         XCTAssertNil(model.queuePosition(for: m.id))
         XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(m.id).path))
@@ -1039,6 +1105,8 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertNil(model.recordingID)
         XCTAssertTrue(model.finalizingRecording)
         XCTAssertFalse(model.canDeleteRecordings(in: group))
+        XCTAssertFalse(model.canDeleteSidebarRecordings([m.id]))
+        await model.deleteSidebarRecordings([m.id])
         await model.deleteGroup(group, deleteRecordings: true)
         XCTAssertTrue(model.errorHandler.messages.contains("Сначала остановите запись"))
         gate.signal()

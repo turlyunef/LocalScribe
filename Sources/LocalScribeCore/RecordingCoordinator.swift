@@ -198,13 +198,19 @@ public actor RecordingCoordinator {
         publish(manifest)
     }
     public func moveRecording(_ id: String, to groupID: String) throws {
+        try moveRecordings([id], to: groupID)
+    }
+    /// Validate the entire batch before one atomic catalog publication.
+    public func moveRecordings(_ ids: Set<String>, to groupID: String) throws {
         try requireGroups()
-        guard !deletingGroups.contains(groups.groupID(for: id)), !deletingGroups.contains(groupID) else {
+        guard !deletingGroups.contains(groupID), ids.allSatisfy({ !deletingGroups.contains(groups.groupID(for: $0)) }) else {
             throw ScribeError.message("Дождитесь удаления группы")
         }
-        _ = try repository.load(id)
         var next = groups
-        try next.assign(id, to: groupID)
+        for id in ids.sorted() {
+            _ = try repository.load(id)
+            try next.assign(id, to: groupID)
+        }
         if next != groups { try commitGroups(next) }
     }
     /// Freeze membership while the GUI cancels just these jobs and joins worker.

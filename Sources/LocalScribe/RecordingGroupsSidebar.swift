@@ -32,6 +32,7 @@ struct RecordingGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @State private var editor: GroupNameDraft?
     @State private var deleting: RecordingGroup?
+    @State private var deletingRecordings: SidebarDeletion?
     @State private var draggedRecording: String?
     @State private var draggedGroup: String?
 
@@ -40,6 +41,8 @@ struct RecordingGroupsSidebar: View {
             HStack {
                 Text("Записи").font(.headline)
                 Spacer()
+                expansionButton(expanded: true)
+                expansionButton(expanded: false)
                 Button {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 } label: { Image(systemName: "folder.badge.plus") }
@@ -47,8 +50,6 @@ struct RecordingGroupsSidebar: View {
                     .help("Добавить группу").accessibilityLabel("Добавить группу")
                     .accessibilityIdentifier("groups.add")
                     .disabled(model.deletingGroupID != nil)
-                expansionButton(expanded: true)
-                expansionButton(expanded: false)
             }.padding(.horizontal, 12).padding(.vertical, 10)
             ScrollViewReader { proxy in
                 ScrollView {
@@ -78,28 +79,37 @@ struct RecordingGroupsSidebar: View {
                                         .frame(maxWidth: .infinity, alignment: .leading)
                                         .padding(.leading, 28).padding(.trailing, 10)
                                         .contentShape(Rectangle())
-                                        .onTapGesture { model.selection = recording.id }
+                                        .onTapGesture {} // Mouse-down selection also applies when the gesture becomes a drag.
                                         .focusable()
-                                        .onKeyPress(.return) { model.selection = recording.id; return .handled }
-                                        .onKeyPress(.space) { model.selection = recording.id; return .handled }
+                                        .focusEffectDisabled()
+                                        .onKeyPress(.return) { model.selectSidebarRecording(recording.id); return .handled }
+                                        .onKeyPress(.space) { model.selectSidebarRecording(recording.id); return .handled }
                                         .accessibilityElement(children: .contain)
-                                        .accessibilityAction { model.selection = recording.id }
-                                        .background(model.selection == recording.id ? Color.accentColor.opacity(0.16) : Color.clear)
-                                        .background(RecordingContextSelection {
-                                            if model.selection != recording.id { model.selection = recording.id }
+                                        .accessibilityAction { model.selectSidebarRecording(recording.id) }
+                                        .accessibilityAddTraits(model.sidebarSelection.ids.contains(recording.id) ? .isSelected : [])
+                                        .background(model.sidebarSelection.ids.contains(recording.id) ? Color.accentColor.opacity(0.16) : Color.clear)
+                                        .background(RecordingMouseSelection { event in
+                                            if event.type == .rightMouseDown || event.modifierFlags.contains(.control) {
+                                                model.selectSidebarContext(recording.id)
+                                            } else {
+                                                model.selectSidebarRecording(recording.id,
+                                                    command: event.modifierFlags.contains(.command),
+                                                    shift: event.modifierFlags.contains(.shift))
+                                            }
                                         })
                                         .clipShape(RoundedRectangle(cornerRadius: 6))
                                         .accessibilityIdentifier("sidebar.recording.\(recording.id)")
                                         .onDrag {
+                                            model.selectSidebarContext(recording.id)
                                             draggedGroup = nil; draggedRecording = recording.id
                                             return SidebarTransfer.provider(recording.id, type: SidebarTransfer.recording)
                                         }
                                         // The destination proposes .move; SwiftUI sources allow only .copy by default.
                                         .dragConfiguration(DragConfiguration(allowMove: true))
                                         .contextMenu {
-                                            Menu("Переместить в") {
-                                                RecordingMoveMenuItems(model: model, recordingID: recording.id)
-                                            }.disabled(model.deletingGroupID != nil)
+                                            RecordingContextMenuItems(model: model, recordingID: recording.id) { ids in
+                                                deletingRecordings = SidebarDeletion(ids: ids)
+                                            }
                                         }
                                         .id(recording.id)
                                     }
@@ -118,6 +128,9 @@ struct RecordingGroupsSidebar: View {
         }
         .sheet(item: $deleting) { group in
             DeleteRecordingGroupView(model: model, group: group) { deleting = nil }
+        }
+        .sheet(item: $deletingRecordings) { deletion in
+            DeleteSidebarRecordingsView(model: model, ids: deletion.ids) { deletingRecordings = nil }
         }
     }
     private func nameEditor(_ draft: GroupNameDraft) -> some View {
@@ -148,16 +161,16 @@ struct RecordingGroupsSidebar: View {
     }
 }
 
-/// Select before AppKit enters menu tracking, without intercepting clicks or drags.
-private struct RecordingContextSelection: NSViewRepresentable {
-    var select: () -> Void
+/// Read modifiers before menu/drag tracking starts; pass the original event through.
+private struct RecordingMouseSelection: NSViewRepresentable {
+    var select: (NSEvent) -> Void
 
     func makeNSView(context: Context) -> SelectionView { SelectionView() }
     func updateNSView(_ view: SelectionView, context: Context) { view.select = select }
     static func dismantleNSView(_ view: SelectionView, coordinator: ()) { view.stopMonitoring() }
 
     final class SelectionView: NSView {
-        var select: (() -> Void)?
+        var select: ((NSEvent) -> Void)?
         private var monitor: Any?
 
         override func hitTest(_ point: NSPoint) -> NSView? { nil }
@@ -168,10 +181,9 @@ private struct RecordingContextSelection: NSViewRepresentable {
             guard window != nil else { return }
             monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
                 guard let self, let window = self.window, event.window === window,
-                      event.type == .rightMouseDown || event.modifierFlags.contains(.control),
                       !self.isHiddenOrHasHiddenAncestor,
                       self.visibleRect.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
-                self.select?()
+                self.select?(event)
                 return event
             }
         }
@@ -183,6 +195,24 @@ private struct RecordingContextSelection: NSViewRepresentable {
     }
 }
 
+/// Observe selection inside the retained native menu, including its delete action.
+private struct RecordingContextMenuItems: View {
+    @ObservedObject var model: AppModel
+    let recordingID: String
+    let delete: (Set<String>) -> Void
+
+    var body: some View {
+        Menu("Переместить в") {
+            RecordingMoveMenuItems(model: model, recordingID: recordingID)
+        }.disabled(model.deletingGroupID != nil || model.deletingSidebarRecordings)
+        Divider()
+        let ids = model.sidebarActionIDs(for: recordingID)
+        Button(ids.count > 1 ? "Удалить выбранные записи…" : "Удалить запись…", role: .destructive) {
+            delete(ids)
+        }.disabled(!model.canDeleteSidebarRecordings(ids))
+    }
+}
+
 /// SwiftUI can retain a row's native context menu after the row moves between
 /// sections. Observe current membership by recording ID, not the former section.
 struct RecordingMoveMenuItems: View {
@@ -190,9 +220,11 @@ struct RecordingMoveMenuItems: View {
     let recordingID: String
 
     var body: some View {
-        let currentGroupID = model.recordingGroups.groupID(for: recordingID)
-        ForEach(model.recordingGroups.groups.filter { $0.id != currentGroupID }) { target in
-            Button(target.name) { Task { await model.moveRecording(recordingID, to: target.id) } }
+        let ids = model.sidebarActionIDs(for: recordingID)
+        ForEach(model.recordingGroups.groups.filter { target in
+            ids.contains { model.recordingGroups.groupID(for: $0) != target.id }
+        }) { target in
+            Button(target.name) { Task { await model.moveRecordings(ids, to: target.id) } }
         }
     }
 }
@@ -263,11 +295,6 @@ private struct RecordingGroupDropArea<Content: View>: View {
             .contentShape(Rectangle())
             .background(targeted ? Color.accentColor.opacity(0.16) : Color.clear)
             .clipShape(RoundedRectangle(cornerRadius: 6))
-            .overlay {
-                RoundedRectangle(cornerRadius: 6)
-                    .strokeBorder(Color.accentColor.opacity(targeted ? 1 : 0), lineWidth: 2)
-                    .allowsHitTesting(false)
-            }
             .animation(.easeInOut(duration: 0.15), value: targeted)
             .onDrop(of: [SidebarTransfer.recording, .fileURL], delegate: GroupContentDrop(
                 model: model, groupID: groupID, draggedRecording: draggedRecording, targeted: $targeted))
@@ -406,6 +433,37 @@ private struct GroupInsertionLine: View {
             Task { await model.changeGroups { try $0.move(id, before: before) } }
         }
         return true
+    }
+}
+
+private struct SidebarDeletion: Identifiable {
+    let id = UUID()
+    let ids: Set<String>
+}
+
+struct DeleteSidebarRecordingsView: View {
+    @ObservedObject var model: AppModel
+    let ids: Set<String>
+    let dismiss: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(ids.count > 1 ? "Удалить выбранные записи (\(ids.count))?" : "Удалить запись?").font(.title2)
+            Text("Копии аудио и результаты в LocalScribe будут удалены без возможности восстановления. Внешние оригиналы и ваши экспорты сохранятся.")
+            if !model.canDeleteSidebarRecordings(ids) {
+                Text("Дождитесь завершения текущей операции и остановите выбранную запись.").foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Удалить", role: .destructive) {
+                    dismiss()
+                    Task { await model.deleteSidebarRecordings(ids) }
+                }
+                .disabled(!model.canDeleteSidebarRecordings(ids))
+                .accessibilityIdentifier("sidebar.confirmDeleteRecordings")
+            }
+        }.padding(24).frame(width: 500).onExitCommand(perform: dismiss)
     }
 }
 
