@@ -40,7 +40,7 @@ final class TailReflectionTests: XCTestCase {
         let activity = try MLMultiArray(shape: [26, 1], dataType: .float32)
         let ids = try MLMultiArray(shape: [26, 100, 1], dataType: .float32)
         let overlap = try MLMultiArray(shape: [26, 100], dataType: .float32)
-        let context = SpeakerEmbedderContext(speakerActivity: activity, speakerIds: ids,
+        let context = try SpeakerEmbedderContext(speakerActivity: activity, speakerIds: ids,
                                             overlappedSpeakerActivity: overlap, windowsCount: 26,
                                             chunkStride: 26, secondsPerWindow: 5, waveformLength: 11.9)
         XCTAssertEqual(context.waveformLength, 11.9)

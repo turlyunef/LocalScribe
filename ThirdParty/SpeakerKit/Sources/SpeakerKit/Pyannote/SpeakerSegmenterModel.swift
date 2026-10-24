@@ -41,8 +41,28 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         let config = MLModelConfiguration()
         config.computeUnits = computeUnits
         let loadedModel = try await MLModel.load(contentsOf: modelURL, configuration: config)
+        let description = loadedModel.modelDescription
+        try Self.validateGeometry(
+            waveform: description.inputDescriptionsByName["waveform"]?.multiArrayConstraint?.shape.map(\.intValue) ?? [],
+            sliding: description.outputDescriptionsByName["sliding_window_waveform"]?.multiArrayConstraint?.shape.map(\.intValue) ?? [],
+            speakerIDs: description.outputDescriptionsByName["speaker_ids"]?.multiArrayConstraint?.shape.map(\.intValue) ?? [], sampleRate: sampleRate)
         model = prewarmMode ? nil : loadedModel
         modelState = prewarmMode ? .prewarmed : .loaded
+    }
+
+    static func validateGeometry(waveform: [Int], sliding: [Int], speakerIDs: [Int], sampleRate: Int) throws {
+        guard (1...384_000).contains(sampleRate), waveform.count == 1,
+              waveform[0] == 30 * sampleRate, sliding.count == 3, speakerIDs.count == 3,
+              sliding[0] > 1, sliding[0] <= waveform[0], sliding[1] > 0,
+              sliding[2] > 0, sliding[2] < waveform[0],
+              speakerIDs[0] == sliding[0], speakerIDs[1] > 0, speakerIDs[1] <= waveform[0], speakerIDs[2] > 0 else {
+            throw SpeakerKitError.invalidModelOutput("Invalid segmenter model geometry")
+        }
+        let stride = Float(waveform[0] - sliding[2]) / Float(sliding[0] - 1)
+        let offset = Float(sliding[2]) - stride
+        guard stride.isFinite, stride > 0, offset.isFinite, offset >= 0, offset < Float(waveform[0]) else {
+            throw SpeakerKitError.invalidModelOutput("Invalid segmenter window stride")
+        }
     }
 
     public func unloadModel() {
@@ -113,6 +133,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
 
         // Stride offset = window length - window stride
         let chunkStrideOffset = windowLength - windowStride
+        guard chunkStrideOffset.isFinite, chunkStrideOffset >= 0, chunkStrideOffset < Float(Int.max) else { return 0 }
         return Int(chunkStrideOffset)
     }
 
@@ -167,6 +188,7 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         audioRange: Range<Int>? = nil,
         predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
     ) async throws {
+        guard (1...384_000).contains(sampleRate) else { throw SpeakerKitError.invalidModelOutput("Invalid audio sample rate") }
         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
         let bounds = audioRange ?? audioArray.indices
         guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count,

@@ -60,9 +60,9 @@ struct SpeakerEmbedderContext {
         let framesPerWindow = Float(framesPerWindowCount)
         let framesPerSecond = framesPerWindow / secondsPerWindow
         let strideInFrames = secondsPerStride * framesPerSecond
-        let numWindows = 1 + ((Float(framesPerChunk) - framesPerWindow) / strideInFrames)
-        for windowIdx in stride(from: 0.0, to: numWindows, by: 1.0) {
-            let startFrame = Int(windowIdx * strideInFrames)
+        // The validated integer count bounds this loop even for malformed geometry.
+        for windowIdx in 0..<windowsCount {
+            let startFrame = Int(Float(windowIdx) * strideInFrames)
             var windowIndices: [Int] = []
             for frameIdx in 0..<Int(framesPerWindow) {
                 let startIdx = startFrame + frameIdx
@@ -81,7 +81,21 @@ struct SpeakerEmbedderContext {
          chunkStride: Int,
          secondsPerWindow: Float,
          waveformLength: Float
-    ) {
+    ) throws {
+        let activity = speakerActivity.shape.map(\.intValue)
+        let ids = speakerIds.shape.map(\.intValue)
+        let overlap = overlappedSpeakerActivity.shape.map(\.intValue)
+        guard windowsCount > 1, activity.count == 2, ids.count == 3, overlap.count == 2,
+              activity[0] == windowsCount, ids[0] == windowsCount, overlap[0] == windowsCount,
+              activity[1] > 0, ids[2] == activity[1], ids[1] > 0, overlap[1] == ids[1],
+              secondsPerWindow.isFinite, secondsPerWindow > 0, secondsPerWindow < 30,
+              waveformLength.isFinite, (0...30).contains(waveformLength), (1...30).contains(chunkStride) else {
+            throw SpeakerKitError.invalidModelOutput("Invalid embedder window geometry")
+        }
+        let frames = Float(ids[1]) * 30 / secondsPerWindow
+        guard frames.isFinite, frames > 0, frames < Float(Int.max) else {
+            throw SpeakerKitError.invalidModelOutput("Invalid embedder frame count")
+        }
         self.speakerActivity = speakerActivity
         self.speakerIds = speakerIds
         self.overlappedSpeakerActivity = overlappedSpeakerActivity
@@ -333,7 +347,7 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
             )
         }
 
-        let context = SpeakerEmbedderContext(speakerActivity: speakerActivity,
+        let context = try SpeakerEmbedderContext(speakerActivity: speakerActivity,
                                              speakerIds: speakerIds,
                                              overlappedSpeakerActivity: overlappedSpeakerActivity,
                                              windowsCount: segmenterOutput.windowsCount,

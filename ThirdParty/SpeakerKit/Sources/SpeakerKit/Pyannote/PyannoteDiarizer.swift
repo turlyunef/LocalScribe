@@ -282,7 +282,7 @@ actor PyannoteDiarizerActor {
 
         progressObj.completedUnitCount = 80
         progressCallback?(progressObj)
-        var diarizationResult = postProcess(speakerEmbeddings: clusteringResult.speakerEmbeddings,
+        var diarizationResult = try postProcess(speakerEmbeddings: clusteringResult.speakerEmbeddings,
                                             speakerCentroids: clusteringResult.speakerCentroids,
                                             originalLength: audioLength,
                                             useExclusiveReconciliation: resolvedOptions.useExclusiveReconciliation)
@@ -297,10 +297,22 @@ actor PyannoteDiarizerActor {
         return diarizationResult
     }
 
+    static func frameCount(framesPerWindow: Int, windowLength: Float, maxChunks: Int) throws -> Int {
+        let windows = 30 / windowLength
+        guard framesPerWindow > 0, maxChunks > 0, windowLength.isFinite, windowLength > 0,
+              windowLength < 30, windows.isFinite, windows >= 1, windows < Float(Int.max) else {
+            throw SpeakerKitError.invalidModelOutput("Invalid diarization frame geometry")
+        }
+        let (frames, overflow) = framesPerWindow.multipliedReportingOverflow(by: Int(windows))
+        let (total, totalOverflow) = frames.multipliedReportingOverflow(by: maxChunks)
+        guard !overflow, !totalOverflow else { throw SpeakerKitError.invalidModelOutput("Diarization frame count overflow") }
+        return total
+    }
+
     private func postProcess(speakerEmbeddings: [SpeakerEmbedding],
                              speakerCentroids: [Int: [Float]],
                              originalLength: Int,
-                             useExclusiveReconciliation: Bool) -> DiarizationResult {
+                             useExclusiveReconciliation: Bool) throws -> DiarizationResult {
         let startTime = CFAbsoluteTimeGetCurrent()
         defer {
             let totalTime = (CFAbsoluteTimeGetCurrent() - startTime) * 1_000
@@ -313,12 +325,11 @@ actor PyannoteDiarizerActor {
         }
 
         let speakerCount = (speakerEmbeddings.map { $0.clusterId }.max() ?? 0) + 1
-        let chunkLength = SpeakerSegmenterModel.chunkLengthInSeconds
         let maxChunks = config.segmenterModel.maxChunks(for: originalLength)
 
         let framesPerWindow = speakerEmbeddings[0].activeFrames.count
         let windowLength = config.segmenterModel.windowsLength
-        let framesCount = framesPerWindow * Int(chunkLength / windowLength) * maxChunks
+        let framesCount = try Self.frameCount(framesPerWindow: framesPerWindow, windowLength: windowLength, maxChunks: maxChunks)
 
         Logging.debug("[PyannoteDiarizer] Speakers: \(speakerCount), maxChunks: \(maxChunks), framesPerWindow \(framesPerWindow)")
 
