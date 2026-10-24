@@ -104,9 +104,8 @@ public struct RecordingRepository: Sendable {
         info.transcriptSourceRunID = summaryOnly ? manifest.activeRunId : nil
         // Verify provenance before creating any files or changing the pending run.
         var summaryTranscript: Transcript?
-        if summaryOnly {
-            guard let active = manifest.activeRunId, UUID(uuidString: active) != nil,
-                  manifest.sourceComplete, manifest.durationMs > 0 else {
+        if summaryOnly, let active = manifest.activeRunId {
+            guard UUID(uuidString: active) != nil, manifest.sourceComplete, manifest.durationMs > 0 else {
                 throw ScribeError.message("Нет проверенной расшифровки для пересоздания итогов")
             }
             let source = run(manifest.id, active)

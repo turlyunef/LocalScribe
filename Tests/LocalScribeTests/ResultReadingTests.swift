@@ -21,6 +21,21 @@ final class ResultReadingTests: XCTestCase {
         try check(repo, manifest, info, transcript, summary)
     }
 
+    func testExplicitSummaryWithoutActiveRunStartsFullAnalysisWithoutTrustingPendingPreview() throws {
+        try fixture { repo, original, previous, _, _ in
+            var manifest = original
+            manifest.activeRunId = nil; manifest.pendingRunId = previous.id
+            let oldTranscript = repo.run(manifest.id, previous.id).appendingPathComponent("transcript.json")
+            let bytes = try Data(contentsOf: oldTranscript)
+            let fresh = try repo.beginRun(&manifest, catalog: ModelCatalog(models: []), summaryLanguage: "en", summaryOnly: true)
+            XCTAssertEqual(fresh.summaryLanguage, "en")
+            XCTAssertNil(fresh.transcriptSourceRunID)
+            XCTAssertEqual(manifest.pendingRunId, fresh.id)
+            XCTAssertFalse(FileManager.default.fileExists(atPath: repo.run(manifest.id, fresh.id).appendingPathComponent("transcript.json").path))
+            XCTAssertEqual(try Data(contentsOf: oldTranscript), bytes)
+        }
+    }
+
     func testSummaryOnlyRejectsForeignTranscriptAndSourceWithoutCreatingRun() throws {
         try fixture { repo, original, info, transcript, _ in
             let path = repo.run(original.id, info.id)
