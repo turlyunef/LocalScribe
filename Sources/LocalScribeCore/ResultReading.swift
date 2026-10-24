@@ -71,7 +71,7 @@ extension RecordingRepository {
         return (transcript, summary)
     }
 
-    private func validateResultRun(_ info: RunInfo, id: String) throws {
+    func validateResultRun(_ info: RunInfo, id: String) throws {
         guard info.schemaVersion == 1, info.id == id, !info.pipelineVersion.isEmpty,
               !info.profileHash.isEmpty, !info.sourceHash.isEmpty,
               info.summaryLanguage == nil || ["ru", "en"].contains(info.summaryLanguage!),

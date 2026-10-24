@@ -4,6 +4,27 @@ import XCTest
 
 @MainActor
 final class ModelHardwareWorkerTests: XCTestCase {
+    func testSummaryStageRejectsForeignFingerprintEvenForEmptyTranscript() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        var manifest = Manifest(sourceType: "import", title: "Fixture", filename: "audio.wav")
+        let source = repo.folder(manifest.id).appendingPathComponent(manifest.originalRelativePath)
+        try Disk.directory(source.deletingLastPathComponent()); try Data("audio".utf8).write(to: source)
+        manifest.sha256 = try Disk.hash(source); manifest.sourceComplete = true; manifest.durationMs = 1000
+        let info = try repo.beginRun(&manifest, catalog: ModelCatalog(models: []))
+        let transcriptURL = repo.run(manifest.id, info.id).appendingPathComponent("transcript.json")
+        try Disk.write(Transcript(fingerprint: "foreign", diarized: true, segments: []), to: transcriptURL)
+        let command = WorkerCommand(jobId: manifest.id, runId: info.id, stage: .summarizing,
+            recordingPath: repo.folder(manifest.id).path, modelsPath: repo.models.path, toolsPath: root.path)
+        let pipeline = try Pipeline(command: command) { _, _, _ in }
+        do { _ = try await pipeline.summaryTranscript(); XCTFail("Foreign fingerprint accepted") }
+        catch { XCTAssertTrue(error.localizedDescription.contains("целостность")) }
+        try Disk.write(Transcript(fingerprint: info.fingerprint, diarized: true, segments: []), to: transcriptURL)
+        let valid = try await pipeline.summaryTranscript()
+        XCTAssertTrue(valid.segments.isEmpty)
+    }
+
     func testWorkerRejectsFrozenHeavyModelBeforeLoadingWithoutChangingRunOrCheckpoints() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

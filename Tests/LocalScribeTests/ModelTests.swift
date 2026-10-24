@@ -239,6 +239,7 @@ final class ModelTests: XCTestCase {
         XCTAssertEqual(current.models.first { $0.purpose == .tokenizer }?.id, tokenizer.id)
         XCTAssertNotEqual(original.fingerprint, current.fingerprint)
         var m = Manifest(sourceType: "import", title: "Keep", filename: "a.wav")
+        m.sourceComplete = true; m.sha256 = "source"
         let old = try repo.beginRun(&m, catalog: original)
         m.activeRunId = old.id; m.pendingRunId = nil; m.state = .completed; m.durationMs = 1000; try repo.save(m)
         let transcript = Transcript(fingerprint: old.fingerprint, diarized: true, segments: [Segment(id: "s", startMs: 0, endMs: 1000, text: "Keep this", language: "en")])

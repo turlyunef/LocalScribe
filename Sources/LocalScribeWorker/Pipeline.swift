@@ -65,13 +65,21 @@ actor Pipeline {
         case .transcribing: return try await transcribe(metrics: asrMetrics)
         case .diarizing: return try await diarize()
         case .summarizing:
-            let transcript = try Disk.read(Transcript.self, at: run.appendingPathComponent("transcript.json"))
+            let transcript = try summaryTranscript()
             if transcript.segments.isEmpty {
                 try Disk.write(Summary(language: info.summaryLanguage ?? "ru"), to: run.appendingPathComponent("summary.json")); return "summary.json"
             }
             try await SummaryEngine(modelFolder: modelFolder(.summary), run: run, emit: emit).summarize(transcript, language: info.summaryLanguage ?? transcript.primaryLanguage)
             return "summary.json"
         }
+    }
+    func summaryTranscript() throws -> Transcript {
+        let transcript = try Disk.read(Transcript.self, at: run.appendingPathComponent("transcript.json"))
+        guard transcript.fingerprint == info.fingerprint else {
+            throw ScribeError.message("Нарушена целостность расшифровки для итогов")
+        }
+        try transcript.validate(durationMs: manifest.durationMs)
+        return transcript
     }
     func transcribe(metrics: ASRMetricsRecorder? = nil) async throws -> String {
         let recognizer = try await SpeechRecognizer(info: info, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })

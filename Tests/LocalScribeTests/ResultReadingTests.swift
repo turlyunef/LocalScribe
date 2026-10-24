@@ -21,6 +21,44 @@ final class ResultReadingTests: XCTestCase {
         try check(repo, manifest, info, transcript, summary)
     }
 
+    func testSummaryOnlyRejectsForeignTranscriptAndSourceWithoutCreatingRun() throws {
+        try fixture { repo, original, info, transcript, _ in
+            let path = repo.run(original.id, info.id)
+            for changeSource in [false, true] {
+                var saved = transcript, source = info, manifest = original
+                if changeSource { source.sourceHash = "foreign" } else { saved.fingerprint = "foreign" }
+                try Disk.write(source, to: path.appendingPathComponent("run.json"))
+                try Disk.write(saved, to: path.appendingPathComponent("transcript.json"))
+                XCTAssertThrowsError(try repo.beginRun(&manifest, catalog: ModelCatalog(models: []), summaryOnly: true))
+                XCTAssertEqual(manifest.pendingRunId, original.pendingRunId)
+                XCTAssertEqual(try repo.load(original.id).pendingRunId, original.pendingRunId)
+                XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: path.deletingLastPathComponent().path), [info.id])
+            }
+        }
+    }
+
+    func testSummaryOnlyAcceptsLegacyManualAndSummaryOnlyTranscripts() throws {
+        try fixture { repo, original, info, transcript, summary in
+            var legacy = info; legacy.pipelineVersion = "legacy"; legacy.modelIDs = nil
+            var saved = transcript; saved.fingerprint = legacy.fingerprint
+            let path = repo.run(original.id, info.id)
+            try Disk.write(legacy, to: path.appendingPathComponent("run.json"))
+            try Disk.write(saved, to: path.appendingPathComponent("transcript.json"))
+            let draft = ResultEditDraft(recordingID: original.id, runID: legacy.id, transcript: saved, summary: summary)
+            let edited = try repo.saveResultEdits(draft)
+            for source in [original, edited] {
+                var manifest = source
+                for _ in 0..<2 {
+                    let fresh = try repo.beginRun(&manifest, catalog: ModelCatalog(models: []), summaryOnly: true)
+                    let copied = try Disk.read(Transcript.self, at: repo.run(manifest.id, fresh.id).appendingPathComponent("transcript.json"))
+                    XCTAssertEqual(copied.segments, saved.segments)
+                    XCTAssertEqual(copied.fingerprint, fresh.fingerprint)
+                    manifest.activeRunId = fresh.id; try repo.save(manifest)
+                }
+            }
+        }
+    }
+
     func testCorruptTranscriptIsRejectedWithoutFallbackOrFileChanges() throws {
         try fixture { repo, manifest, info, transcript, _ in
             let path = repo.run(manifest.id, info.id), url = path.appendingPathComponent("transcript.json")

@@ -84,24 +84,32 @@ public struct RecordingRepository: Sendable {
         info.modelIDs = modelIDs
         if liveCapture { info.liveCapture = true; info.sourceHash = "capture:" + info.id }
         info.transcriptSourceRunID = summaryOnly ? manifest.activeRunId : nil
+        // Verify provenance before creating any files or changing the pending run.
+        var summaryTranscript: Transcript?
+        if summaryOnly {
+            guard let active = manifest.activeRunId, UUID(uuidString: active) != nil,
+                  manifest.sourceComplete, manifest.durationMs > 0 else {
+                throw ScribeError.message("Нет проверенной расшифровки для пересоздания итогов")
+            }
+            let source = run(manifest.id, active)
+            let activeInfo = try Disk.read(RunInfo.self, at: source.appendingPathComponent("run.json"))
+            try validateResultRun(activeInfo, id: active)
+            var transcript = try Disk.read(Transcript.self, at: source.appendingPathComponent("transcript.json"))
+            guard activeInfo.sourceHash == manifest.sha256, transcript.fingerprint == activeInfo.fingerprint else {
+                throw ScribeError.message("Нарушена целостность расшифровки. Пересоздание итогов отменено; исходные файлы сохранены.")
+            }
+            try transcript.validate(durationMs: manifest.durationMs)
+            transcript.fingerprint = info.fingerprint
+            summaryTranscript = transcript
+        }
         let path = run(manifest.id, info.id)
         var published = false
         defer { if !published { try? FileManager.default.removeItem(at: path) } }
         try Disk.directory(path)
         try Disk.write(info, to: path.appendingPathComponent("run.json"))
         if liveCapture { try Disk.write(info, to: path.appendingPathComponent("capture-run.json")) }
-        if summaryOnly, let active = manifest.activeRunId {
-            for name in ["asr-transcript.json", "transcript.json", "diarization.json"] {
-                let source = run(manifest.id, active).appendingPathComponent(name)
-                if FileManager.default.fileExists(atPath: source.path) {
-                    if name != "diarization.json" {
-                        var transcript = try Disk.read(Transcript.self, at: source)
-                        try transcript.validate(durationMs: manifest.durationMs)
-                        transcript.fingerprint = info.fingerprint
-                        try Disk.write(transcript, to: path.appendingPathComponent(name))
-                    } else { try FileManager.default.copyItem(at: source, to: path.appendingPathComponent(name)) }
-                }
-            }
+        if let summaryTranscript {
+            try Disk.write(summaryTranscript, to: path.appendingPathComponent("transcript.json"))
         }
         var updated = manifest
         updated.pendingRunId = info.id; updated.state = liveCapture ? .recording : .queued; updated.captureProcessing = liveCapture ? .queued : nil; updated.lastError = nil; try save(updated)
