@@ -55,13 +55,14 @@ public struct RecordingRepository: Sendable {
         try save(manifest)
     }
     public func importFile(_ source: URL, info: AudioInfo, allowDuplicate: Bool = false,
+                           existingRecordings: [Manifest]? = nil,
                            beforePublish: (Manifest) throws -> Void = { _ in }) throws -> Manifest {
         try Task.checkCancellation()
         let fm = FileManager.default
         let input = try ImportSource(source)
         defer { input.close() }
         let digest = try input.hash()
-        if !allowDuplicate, let duplicate = list().first(where: { $0.sha256 == digest }) { throw DuplicateRecording(id: duplicate.id) }
+        if !allowDuplicate, let duplicate = (existingRecordings ?? list()).first(where: { $0.sha256 == digest }) { throw DuplicateRecording(id: duplicate.id) }
         try Disk.requireSpace(input.size + Int64(info.duration * 32_000) + 500_000_000, at: root)
         var manifest = Manifest(sourceType: "import", title: source.deletingPathExtension().lastPathComponent, filename: source.lastPathComponent)
         let folder = folder(manifest.id)

@@ -13,6 +13,39 @@ final class RepositoryPerformanceTests: XCTestCase {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(manifests.sorted { $0.id < $1.id })
     }
+    func testBatchImportDeduplicatesAgainstSnapshotWithoutRepeatedArchiveScans() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var repo = try RecordingRepository(root: root)
+        let counts = Counts(); repo.observeIO = { counts.record($0) }
+        let archive = RecordingCoordinator(repository: repo, indexDelay: .seconds(60), importProbe: { _, _ in
+            AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le")
+        })
+        var imported: [Manifest] = []
+        for index in 0..<12 {
+            let source = root.appendingPathComponent("input-\(index).wav")
+            try Data("unique-\(index)".utf8).write(to: source)
+            let manifest = try await archive.importFile(source, tools: root)
+            imported.append(manifest)
+            do { _ = try await archive.importFile(source, tools: root); XCTFail("Duplicate was imported") }
+            catch let duplicate as DuplicateRecording { XCTAssertEqual(duplicate.id, manifest.id) }
+            let repeated = try await archive.importFile(source, tools: root, allowDuplicate: true)
+            XCTAssertEqual(repeated.sha256, manifest.sha256)
+            XCTAssertNotEqual(repeated.id, manifest.id)
+        }
+        XCTAssertEqual(counts.count(.archiveScan), 1)
+        XCTAssertEqual(counts.count(.manifestRead), 0)
+        let snapshot = await archive.snapshot()
+        XCTAssertEqual(snapshot.manifests.count, 24)
+        // A newly constructed coordinator also recognizes existing duplicates.
+        let reopened = RecordingCoordinator(repository: repo, importProbe: { _, _ in
+            AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le")
+        })
+        do { _ = try await reopened.importFile(root.appendingPathComponent("input-0.wav"), tools: root); XCTFail() }
+        catch is DuplicateRecording { }
+        await archive.flushIndex()
+    }
+
     func testGroupDeletionWritesOneIndexForSuccessAndPartialFailure() async throws {
         for fail in [false, true] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

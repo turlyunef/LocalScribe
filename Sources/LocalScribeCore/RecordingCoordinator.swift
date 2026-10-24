@@ -157,7 +157,7 @@ public actor RecordingCoordinator {
         try Task.checkCancellation()
         initialize()
         let info = try importProbe(source, tools)
-        let manifest = try repository.importFile(source, info: info, allowDuplicate: allowDuplicate) { manifest in
+        let manifest = try repository.importFile(source, info: info, allowDuplicate: allowDuplicate, existingRecordings: manifests) { manifest in
             try reserveDestination(manifest.id, groupID: groupID)
         }
         publish(manifest)
