@@ -238,7 +238,7 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         }
         // Block the import slot before the batch is added, then change the default.
         var release = false
-        model.importQueue.enqueue { while !release { try? await Task.sleep(for: .milliseconds(10)) } }
+        try model.importQueue.enqueue { while !release { try? await Task.sleep(for: .milliseconds(10)) } }
         model.importURLs(Array(urls.prefix(2)))
         let provider = NSItemProvider(object: urls[2] as NSURL)
         model.importProviders([provider])

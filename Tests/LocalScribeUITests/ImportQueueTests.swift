@@ -7,6 +7,29 @@ import XCTest
 
 @MainActor
 final class ImportQueueTests: XCTestCase {
+    func testSubmissionDuringCancellationUnwindReportsErrorAndSlotCanBeReused() async throws {
+        let queue = ImportQueue()
+        let started = expectation(description: "Active import is waiting")
+        var release: CheckedContinuation<Void, Never>?
+        var exited = false, rejectedRan = false, nextRan = false
+        try queue.enqueue {
+            await withCheckedContinuation { continuation in release = continuation; started.fulfill() }
+            exited = true
+        }
+        await fulfillment(of: [started], timeout: 2)
+        queue.cancel()
+        XCTAssertThrowsError(try queue.enqueue { rejectedRan = true }) {
+            XCTAssertTrue($0.localizedDescription.contains("Импорт отменяется"))
+        }
+        XCTAssertFalse(exited)
+        release?.resume(); release = nil
+        await queue.waitUntilIdle()
+        XCTAssertTrue(exited); XCTAssertFalse(rejectedRan)
+        try queue.enqueue { nextRan = true }
+        await queue.waitUntilIdle()
+        XCTAssertTrue(nextRan)
+    }
+
     private struct Counts {
         var active = 0, maximum = 0, providers = 0, probes = 0
         var order: [String] = []

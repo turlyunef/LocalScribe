@@ -406,29 +406,31 @@ import LocalScribeCore
     }
     private func enqueueImport(groupID: String, _ loadURL: @escaping @MainActor () async throws -> URL?) {
         guard !preparingStorage, !shuttingDown, let archive else { return }
-        importQueue.enqueue { [self] in
-            do {
-                guard let url = try await loadURL() else { return }
-                try Task.checkCancellation()
-                let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-                let tools = self.tools
+        do {
+            try importQueue.enqueue { [self] in
                 do {
-                    let manifest = try await archive.importFile(url, tools: tools, groupID: groupID)
-                    await completeImport(manifest)
-                } catch let duplicate as DuplicateRecording {
+                    guard let url = try await loadURL() else { return }
                     try Task.checkCancellation()
-                    guard !shuttingDown else { return }
-                    switch resolveDuplicateImport(duplicate) {
-                    case .openExisting: selection = duplicate.id
-                    case .importAgain:
-                        try Task.checkCancellation()
-                        let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true, groupID: groupID)
+                    let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
+                    let tools = self.tools
+                    do {
+                        let manifest = try await archive.importFile(url, tools: tools, groupID: groupID)
                         await completeImport(manifest)
-                    case .cancel: break
+                    } catch let duplicate as DuplicateRecording {
+                        try Task.checkCancellation()
+                        guard !shuttingDown else { return }
+                        switch resolveDuplicateImport(duplicate) {
+                        case .openExisting: selection = duplicate.id
+                        case .importAgain:
+                            try Task.checkCancellation()
+                            let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true, groupID: groupID)
+                            await completeImport(manifest)
+                        case .cancel: break
+                        }
                     }
-                }
-            } catch { errorHandler.report(error) }
-        }
+                } catch { errorHandler.report(error) }
+            }
+        } catch { errorHandler.report(error) }
     }
     func completeImport(_ manifest: Manifest) async {
         // Import may finish while a result sheet owns an unsaved local draft.

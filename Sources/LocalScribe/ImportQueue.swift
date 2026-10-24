@@ -1,5 +1,6 @@
 import AppKit
 import Synchronization
+import LocalScribeCore
 
 /// One slot shared by drops, the open panel and duplicate retries. A slot covers
 /// provider loading, security scope, probe, hash/copy and publication in the UI.
@@ -7,8 +8,10 @@ import Synchronization
     private var pending: [@MainActor () async -> Void] = []
     private var task: Task<Void, Never>?
 
-    func enqueue(_ operation: @escaping @MainActor () async -> Void) {
-        guard task?.isCancelled != true else { return }
+    func enqueue(_ operation: @escaping @MainActor () async -> Void) throws {
+        guard task?.isCancelled != true else {
+            throw ScribeError.message("Импорт отменяется. Дождитесь завершения и повторите добавление файлов.")
+        }
         pending.append(operation)
         guard task == nil else { return }
         task = Task {
