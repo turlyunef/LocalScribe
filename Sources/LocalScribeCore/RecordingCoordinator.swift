@@ -8,6 +8,7 @@ public actor RecordingCoordinator {
         public let manifests: [Manifest]
         public let groups: RecordingGroups
         public let groupsError: String?
+        public let unreadableRecordingIDs: [String]
     }
     private let repository: RecordingRepository
     private var manifests: [Manifest] = []
@@ -16,6 +17,7 @@ public actor RecordingCoordinator {
     private var groupsInitialized = false
     private var groups = RecordingGroups()
     private var groupsError: String?
+    private var unreadableRecordingIDs: [String] = []
     private var deletingGroups: Set<String> = []
     private let removeRecording: @Sendable (RecordingRepository, Manifest) throws -> Void
     private var revision: UInt64 = 0
@@ -35,15 +37,20 @@ public actor RecordingCoordinator {
 
     public func snapshot() -> Snapshot {
         initialize()
-        return Snapshot(revision: revision, manifests: manifests, groups: groups, groupsError: groupsError)
+        return Snapshot(revision: revision, manifests: manifests, groups: groups, groupsError: groupsError, unreadableRecordingIDs: unreadableRecordingIDs)
     }
     public func recover() throws -> Snapshot {
         initializeGroups()
         cancelIndexTask()
-        do { replace(try repository.recover()) }
+        do {
+            var invalid: [String] = []
+            let recovered = try repository.recover(reportInvalid: { invalid.append($0) })
+            unreadableRecordingIDs = invalid.sorted()
+            replace(recovered)
+        }
         catch {
             // A failed batch may already have committed some manifests.
-            replace(repository.list())
+            replace(readListing())
             scheduleIndex()
             throw error
         }
@@ -52,7 +59,13 @@ public actor RecordingCoordinator {
     }
     private func initialize() {
         initializeGroups()
-        if !initialized { replace(repository.list()) }
+        if !initialized { replace(readListing()) }
+    }
+    private func readListing() -> [Manifest] {
+        var invalid: [String] = []
+        let values = repository.list(reportInvalid: { invalid.append($0) })
+        unreadableRecordingIDs = invalid.sorted()
+        return values
     }
     private func initializeGroups() {
         guard !groupsInitialized else { return }
@@ -66,6 +79,7 @@ public actor RecordingCoordinator {
         initialized = true; revision &+= 1
     }
     private func publish(_ manifest: Manifest) {
+        unreadableRecordingIDs.removeAll { $0 == manifest.id }
         if let position = positions[manifest.id] {
             manifests[position] = manifest
             revision &+= 1
@@ -154,7 +168,7 @@ public actor RecordingCoordinator {
         catch {
             // Removal may have made progress before failing. Re-read the source
             // of truth instead of publishing an already removed manifest again.
-            replace(repository.list())
+            replace(readListing())
             scheduleIndex(); flushIndex()
             throw error
         }

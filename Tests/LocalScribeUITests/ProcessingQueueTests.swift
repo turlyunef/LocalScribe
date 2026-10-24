@@ -11,6 +11,7 @@ final class ProcessingQueueTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let (repo, model, _) = try fixture(root)
         let manifest = try completed(repo, title: "Corrupt")
+        await model.reload()
         let path = repo.folder(manifest.id).appendingPathComponent("manifest.json")
         let bytes = Data("broken manifest".utf8)
         try bytes.write(to: path)

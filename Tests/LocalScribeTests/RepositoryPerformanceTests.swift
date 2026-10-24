@@ -13,6 +13,42 @@ final class RepositoryPerformanceTests: XCTestCase {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(manifests.sorted { $0.id < $1.id })
     }
+    func testArchiveDiagnosticsDistinguishDamagedRecordingsFromGarbageWithoutChangingFiles() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var repo = try RecordingRepository(root: root)
+        let healthy = Manifest(sourceType: "import", title: "Healthy", filename: "a.wav")
+        try repo.save(healthy)
+        var damaged: [String] = []
+        var preserved: [URL: Data] = [:]
+        for kind in 0..<3 {
+            var item = healthy; item.id = UUID().uuidString
+            try repo.save(item)
+            let manifest = repo.folder(item.id).appendingPathComponent("manifest.json")
+            let audio = repo.folder(item.id).appendingPathComponent("source/original.wav")
+            try Disk.directory(audio.deletingLastPathComponent()); try Data("keep audio".utf8).write(to: audio)
+            if kind == 0 { try Data("broken".utf8).write(to: manifest) }
+            if kind == 1 { try FileManager.default.removeItem(at: manifest) }
+            if kind == 2 { var wrong = healthy; wrong.id = UUID().uuidString; try Disk.write(wrong, to: manifest) }
+            preserved[audio] = try Data(contentsOf: audio)
+            if kind != 1 { preserved[manifest] = try Data(contentsOf: manifest) }
+            damaged.append(item.id)
+        }
+        for name in ["unrelated", UUID().uuidString] { try Disk.directory(root.appendingPathComponent("recordings/" + name)) }
+        var invalid: [String] = []
+        XCTAssertEqual(repo.list(reportInvalid: { invalid.append($0) }).map(\.id), [healthy.id])
+        XCTAssertEqual(invalid.sorted(), damaged.sorted())
+        let counts = Counts(); repo.observeIO = { counts.record($0) }
+        let coordinator = RecordingCoordinator(repository: repo)
+        let snapshot = try await coordinator.recover()
+        XCTAssertEqual(snapshot.unreadableRecordingIDs, damaged.sorted())
+        XCTAssertEqual(snapshot.manifests.map(\.id), [healthy.id])
+        XCTAssertEqual(counts.count(.archiveScan), 1)
+        for (url, bytes) in preserved { XCTAssertEqual(try Data(contentsOf: url), bytes) }
+        _ = await coordinator.snapshot()
+        XCTAssertEqual(counts.count(.archiveScan), 1)
+    }
+
     func testRecoveryReadsEachOf1000ManifestsOnceAndPublishesOneIndex() throws {
         for size in [250, 1000] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

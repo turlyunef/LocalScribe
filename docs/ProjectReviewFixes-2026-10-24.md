@@ -70,3 +70,17 @@ orderFront. AppKit восстанавливает их сам. isVisible нед�
 
 Добавлять обработчик didBecomeActive по этой находке оснований нет.
 Свойство сверено с [документацией Apple](https://developer.apple.com/documentation/appkit/nswindow/hidesondeactivate).
+
+## N06 — диагностика повреждённых manifests
+
+Подтверждено. Сканирование сообщает UUID повреждённых записей отдельно от
+доступных manifests; посторонние/пустые каталоги и симлинки не считаются записями.
+Для распознавания повреждённой записи достаточно manifest/source/runs/capture
+в UUID-каталоге. Snapshot передаёт UUID в GUI; AppErrorHandler сообщает о них
+один раз при изменении набора. Исправленный и опубликованный manifest убирает
+свой UUID из диагностики. Схемы файлов не менялись.
+
+RepositoryPerformanceTests и AppErrorHandlerTests прошли: битый/отсутствующий
+manifest, неверный UUID, сохранность файлов, одна диагностика в GUI и один
+проход при восстановлении. Прежние проверки 250/1000 manifests сохранили
+ровно один scan и один index write.

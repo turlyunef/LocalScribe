@@ -30,10 +30,21 @@ public struct RecordingRepository: Sendable {
         guard manifest.id == id else { throw ScribeError.message("Идентификатор записи не совпадает с её каталогом") }
         return manifest
     }
-    public func list() -> [Manifest] {
+    public func list(reportInvalid: (String) -> Void = { _ in }) -> [Manifest] {
         observeIO?(.archiveScan)
-        let dirs = (try? FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("recordings"), includingPropertiesForKeys: nil)) ?? []
-        return dirs.compactMap { try? load($0.lastPathComponent) }.sorted { $0.createdAt > $1.createdAt }
+        let dirs = (try? FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("recordings"), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])) ?? []
+        return dirs.compactMap { url -> Manifest? in
+            let id = url.lastPathComponent
+            guard UUID(uuidString: id) != nil,
+                  let values = try? url.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey]),
+                  values.isDirectory == true, values.isSymbolicLink != true else { return nil }
+            // Ignore unrelated/empty folders, but never hide a recognizable damaged recording.
+            guard ["manifest.json", "source", "runs", "capture"].contains(where: {
+                FileManager.default.fileExists(atPath: url.appendingPathComponent($0).path)
+            }) else { return nil }
+            do { return try load(id) }
+            catch { reportInvalid(id); return nil }
+        }.sorted { $0.createdAt > $1.createdAt }
     }
     public func rename(_ id: String, title: String) throws {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -218,8 +229,8 @@ public struct RecordingRepository: Sendable {
         guard try Disk.hash(original) == manifest.sha256 else { return }
         for url in disposable { try fm.removeItem(at: url) }
     }
-    @discardableResult public func recover() throws -> [Manifest] {
-        var manifests = list()
+    @discardableResult public func recover(reportInvalid: (String) -> Void = { _ in }) throws -> [Manifest] {
+        var manifests = list(reportInvalid: reportInvalid)
         for index in manifests.indices {
             var m = manifests[index]
             guard m.schemaVersion == 1 else { continue }

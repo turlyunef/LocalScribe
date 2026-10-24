@@ -12,6 +12,7 @@ import LocalScribeCore
     @Published private(set) var sidebarSelection = SidebarSelection()
     @Published private(set) var deletingSidebarRecordings = false
     private var reportedGroupsError: String?
+    private var reportedUnreadableRecordingIDs: [String] = []
     private var deletingRecordingIDs: Set<String> = []
     private var recordingAdmission: [String: UInt64] = [:]
     private var finalizingRecordingID: String?
@@ -194,6 +195,12 @@ import LocalScribeCore
             }
             sidebarSelection = retained
             retainSearchSelection()
+            if snapshot.unreadableRecordingIDs != reportedUnreadableRecordingIDs {
+                reportedUnreadableRecordingIDs = snapshot.unreadableRecordingIDs
+                if !snapshot.unreadableRecordingIDs.isEmpty {
+                    errorHandler.report(message: "Не удалось прочитать записи архива: " + snapshot.unreadableRecordingIDs.joined(separator: ", ") + ". Файлы сохранены для восстановления. Проверьте manifest.json в каталогах этих записей.")
+                }
+            }
             if let error = snapshot.groupsError, error != reportedGroupsError {
                 reportedGroupsError = error; errorHandler.report(message: error)
             }

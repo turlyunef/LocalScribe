@@ -5,6 +5,27 @@ import LocalScribeCore
 
 @MainActor
 final class AppErrorHandlerTests: XCTestCase {
+    func testUnreadableArchiveItemsAreReportedOnceAcrossReloads() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let item = Manifest(sourceType: "import", title: "Damaged", filename: "audio.wav")
+        try repo.save(item)
+        let file = repo.folder(item.id).appendingPathComponent("manifest.json")
+        try Data("broken".utf8).write(to: file)
+        let suite = "ArchiveDiagnostics." + UUID().uuidString
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        await model.reload(); await model.reload()
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
+        XCTAssertTrue(model.errorHandler.messages[0].contains(item.id))
+        XCTAssertTrue(model.errorHandler.messages[0].contains("Файлы сохранены"))
+        XCTAssertTrue(model.recordings.isEmpty)
+        XCTAssertEqual(try Data(contentsOf: file), Data("broken".utf8))
+        await model.shutdown()
+    }
+
     func testStartupErrorsWaitForPresentationAndReuseOneWindowWithoutLosingMessages() throws {
         _ = NSApplication.shared
         let handler = AppErrorHandler()
