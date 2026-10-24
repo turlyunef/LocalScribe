@@ -164,19 +164,22 @@ public actor RecordingCoordinator {
         return manifest
     }
     public func delete(_ manifest: Manifest) throws {
+        try delete(manifest, immediatelyFlushIndex: true)
+    }
+    private func delete(_ manifest: Manifest, immediatelyFlushIndex: Bool) throws {
         initialize()
+        defer { if immediatelyFlushIndex { flushIndex() } }
         do { try removeRecording(repository, manifest) }
         catch {
             // Removal may have made progress before failing. Re-read the source
             // of truth instead of publishing an already removed manifest again.
             replace(readListing())
-            scheduleIndex(); flushIndex()
+            scheduleIndex()
             throw error
         }
         replace(manifests.filter { $0.id != manifest.id })
         scheduleIndex()
-        // Avoid retaining deleted metadata even during the coalescing interval.
-        flushIndex()
+        // Single deletion flushes on exit; group deletion flushes once per batch.
     }
     private func pruneDeletedMembership() throws {
         guard groupsError == nil, deletingGroups.isEmpty else { return }
@@ -258,8 +261,10 @@ public actor RecordingCoordinator {
         guard deletingGroups.contains(id) else { throw ScribeError.message("Удаление группы не подготовлено") }
         defer { deletingGroups.remove(id) }
         if deleteRecordings {
+            // Also flush partial progress if any removal or validation fails.
+            defer { flushIndex() }
             let members = manifests.filter { groups.groupID(for: $0.id) == id }
-            for manifest in members { try delete(manifest) }
+            for manifest in members { try delete(manifest, immediatelyFlushIndex: false) }
             // Do not silently discard membership of damaged archive entries.
             let known = Set(members.map(\.id))
             for (recordingID, groupID) in groups.membership where groupID == id && !known.contains(recordingID) {

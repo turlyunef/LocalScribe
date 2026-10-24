@@ -13,6 +13,38 @@ final class RepositoryPerformanceTests: XCTestCase {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]; encoder.dateEncodingStrategy = .iso8601
         return try encoder.encode(manifests.sorted { $0.id < $1.id })
     }
+    func testGroupDeletionWritesOneIndexForSuccessAndPartialFailure() async throws {
+        for fail in [false, true] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            var repo = try RecordingRepository(root: root)
+            for index in 0..<20 {
+                var manifest = Manifest(sourceType: "import", title: "meeting-\(index)", filename: "a.wav")
+                manifest.createdAt = Date(timeIntervalSince1970: Double(index))
+                try repo.save(manifest)
+            }
+            let counts = Counts(); repo.observeIO = { counts.record($0) }
+            let archive = RecordingCoordinator(repository: repo, indexDelay: .seconds(60), removeRecording: { repository, manifest in
+                if fail && manifest.displayTitle == "meeting-10" { throw ScribeError.message("fixture failure") }
+                try repository.delete(manifest)
+            })
+            try await archive.editGroups { try $0.create(name: "Batch") }
+            let initial = await archive.snapshot(), group = initial.groups.defaultID
+            try await archive.moveRecordings(Set(initial.manifests.map(\.id)), to: group)
+            _ = try await archive.prepareGroupDeletion(group)
+            do { try await archive.finishGroupDeletion(group, deleteRecordings: true); XCTAssertFalse(fail) }
+            catch { XCTAssertTrue(fail) }
+            XCTAssertEqual(counts.count(.indexWrite), 1)
+            let after = await archive.snapshot()
+            let saved = try Disk.read([Manifest].self, at: root.appendingPathComponent("index.json"))
+            XCTAssertEqual(saved.map(\.id), after.manifests.map(\.id))
+            XCTAssertEqual(after.manifests.count, fail ? 11 : 0)
+            XCTAssertEqual(after.groups.groups.contains { $0.id == group }, fail)
+            await archive.flushIndex()
+            XCTAssertEqual(counts.count(.indexWrite), 1)
+        }
+    }
+
     func testArchiveDiagnosticsDistinguishDamagedRecordingsFromGarbageWithoutChangingFiles() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
