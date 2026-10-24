@@ -125,15 +125,15 @@ struct ContentView: View {
                 }
                 ActivityStatusView(indicators: model.indicators)
             }.background(Color(nsColor: .textBackgroundColor))
+                .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
+                    model.importProviders(providers); return true
+                }
         }
         .toolbar {
             ToolbarItemGroup {
                 Button { recordingSheet = true } label: { Label("Новая запись", systemImage: "mic") }.disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording || model.installing).help("Настроить и начать запись встроенного микрофона")
                 Button(action: model.chooseImport) { Label("Импорт", systemImage: "square.and.arrow.down") }.help("Выбрать аудиофайлы для расшифровки")
             }
-        }
-        .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-            model.importProviders(providers); return true
         }
         .sheet(isPresented: $recordingSheet) {
             VStack(alignment: .leading, spacing: 18) {

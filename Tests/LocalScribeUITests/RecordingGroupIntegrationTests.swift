@@ -103,6 +103,54 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         await model.shutdown()
     }
 
+    func testSidebarBulkExpansionButtonsHandleMixedGroupsAndPreserveSelectionAndQueue() async throws {
+        let (repo, model) = try fixture()
+        var m = Manifest(sourceType: "import", title: "Open", filename: "a.wav")
+        m.sourceComplete = true
+        try repo.save(m)
+        model.installing = true; model.modelsReady = true
+        await model.enqueue(m.id)
+        try await model.saveGroupName("First")
+        let first = model.defaultGroup.id
+        try await model.saveGroupName("Second")
+        let second = model.defaultGroup.id
+        await model.moveRecording(m.id, to: first)
+        model.selection = m.id
+        let (view, window) = host(RecordingGroupsSidebar(model: model))
+        defer { window.close() }
+        try await settle(view)
+        let addFrame = try XCTUnwrap(element("groups.add", in: view)?.accessibilityFrame?())
+        for (expanded, buttonID) in [(false, "groups.collapseAll"), (true, "groups.expandAll")] {
+            await model.changeGroups { groups in
+                try groups.setExpanded(first, !expanded)
+                try groups.setExpanded(second, expanded)
+                try groups.setExpanded(RecordingGroup.ungroupedID, !expanded)
+            }
+            try await settle(view)
+            let button = try XCTUnwrap(element(buttonID, in: view))
+            let frame = try XCTUnwrap(button.accessibilityFrame?())
+            XCTAssertEqual(frame.midY, addFrame.midY, accuracy: 1)
+            XCTAssertGreaterThan(frame.minX, addFrame.maxX)
+            XCTAssertTrue(button.accessibilityPerformPress?() ?? false)
+            try await settle(view)
+            XCTAssertTrue(model.recordingGroups.groups.allSatisfy { $0.expanded == expanded })
+            XCTAssertEqual(try repo.loadGroups(), model.recordingGroups)
+            XCTAssertEqual(model.selection, m.id)
+            XCTAssertEqual(model.defaultGroup.id, second)
+            XCTAssertEqual(model.recordingGroups.groupID(for: m.id), first)
+            XCTAssertEqual(model.queuePosition(for: m.id), 1)
+            XCTAssertEqual(element("sidebar.recording.\(m.id)", in: view) != nil, expanded)
+            XCTAssertEqual(element("groups.empty.\(second)", in: view) != nil, expanded)
+            let before = await model.archive?.snapshot()
+            XCTAssertTrue(button.accessibilityPerformPress?() ?? false)
+            try await settle(view)
+            let after = await model.archive?.snapshot()
+            XCTAssertEqual(after?.revision, before?.revision)
+        }
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
+    }
+
     func testSidebarCollapseKeepsOpenRecordingAndDefault() async throws {
         let (repo, model) = try fixture()
         let m = Manifest(sourceType: "import", title: "Open", filename: "a.wav")
@@ -171,6 +219,208 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         XCTAssertEqual(SidebarTransfer.identifier(Data(id.utf8)), id)
         XCTAssertNil(SidebarTransfer.identifier(Data("../../outside".utf8)))
     }
+
+    func testInternalDragProvidersLoadTheirUUIDAsData() async throws {
+        let id = UUID().uuidString
+        for type in [SidebarTransfer.recording, SidebarTransfer.group] {
+            let provider = SidebarTransfer.provider(id, type: type)
+            let data: Data = try await withCheckedThrowingContinuation { continuation in
+                _ = provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, error in
+                    if let error { continuation.resume(throwing: error) }
+                    else { continuation.resume(returning: data ?? Data()) }
+                }
+            }
+            XCTAssertEqual(SidebarTransfer.identifier(data), id)
+        }
+    }
+
+    func testRecordingDragSourceAllowsMove() async throws {
+        let (repo, model) = try fixture()
+        let recording = Manifest(sourceType: "import", title: "Drag me", filename: "a.wav")
+        try repo.save(recording)
+        _ = try await model.archive?.refresh(recording.id)
+        await model.reload()
+        let (view, window) = host(ContentView(model: model))
+        defer { window.close() }
+        try await settle(view)
+        let row = try XCTUnwrap(element("sidebar.recording.\(recording.id)", in: view))
+        let operations = try await dragOperations(on: row, in: view, window: window)
+        XCTAssertTrue(operations.contains(.move))
+        await model.shutdown()
+    }
+
+    func testLoadedRecordingTransferMovesToCollapsedGroupAndBackWithoutChangingSelectionOrDefault() async throws {
+        let (repo, model) = try fixture()
+        let recording = Manifest(sourceType: "import", title: "Transfer", filename: "a.wav")
+        try repo.save(recording)
+        _ = try await model.archive?.refresh(recording.id)
+        try await model.saveGroupName("Destination")
+        let destination = model.defaultGroup.id
+        await model.changeGroups { try $0.setExpanded(destination, false) }
+        model.selection = recording.id
+        for group in [destination, RecordingGroup.ungroupedID] {
+            let moved = expectation(description: "Loaded drag UUID is moved")
+            let provider = SidebarTransfer.provider(recording.id, type: SidebarTransfer.recording)
+            SidebarTransfer.load(provider, type: SidebarTransfer.recording) { id in
+                Task {
+                    await model.moveRecording(id, to: group)
+                    moved.fulfill()
+                }
+            }
+            await fulfillment(of: [moved], timeout: 2)
+            XCTAssertEqual(model.recordingGroups.groupID(for: recording.id), group)
+            XCTAssertEqual(try RecordingRepository(root: repo.root).loadGroups().groupID(for: recording.id), group)
+            XCTAssertEqual(model.selection, recording.id)
+            XCTAssertEqual(model.defaultGroup.id, destination)
+            XCTAssertEqual(model.recordingGroups.groups.first { $0.id == destination }?.expanded, false)
+            XCTAssertEqual(model.recordings.count, 1)
+        }
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
+    }
+
+    func testInternalDragTypesAreExportedByApplicationBundle() throws {
+        let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let data = try Data(contentsOf: root.appendingPathComponent("Resources/Info.plist"))
+        let info = try XCTUnwrap(PropertyListSerialization.propertyList(from: data, format: nil) as? [String: Any])
+        let declarations = try XCTUnwrap(info["UTExportedTypeDeclarations"] as? [[String: Any]])
+        for type in [SidebarTransfer.recording, SidebarTransfer.group] {
+            let declaration = try XCTUnwrap(declarations.first { $0["UTTypeIdentifier"] as? String == type.identifier })
+            XCTAssertTrue((declaration["UTTypeConformsTo"] as? [String] ?? []).contains("public.data"))
+        }
+    }
+
+    func testNativeRecordingDropOnGroupHeader() async throws {
+        try requireRegisteredDragTypes()
+        let (repo, model) = try fixture()
+        let recording = Manifest(sourceType: "import", title: "Drop me", filename: "a.wav")
+        try repo.save(recording)
+        _ = try await model.archive?.refresh(recording.id)
+        try await model.saveGroupName("Destination")
+        let group = model.defaultGroup.id
+        await model.changeGroups { try $0.setExpanded(group, false) }
+        let (view, window) = host(ContentView(model: model))
+        defer { window.close() }
+        try await settle(view)
+        let header = try XCTUnwrap(element("groups.header.\(group)", in: view))
+        let frame = try XCTUnwrap(header.accessibilityFrame?())
+        let point = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
+        let target = try nativeDropTarget(at: point, in: view)
+        let drag = SidebarDropInfo(window: window, point: point, data: Data(recording.id.utf8), type: SidebarTransfer.recording.identifier)
+        XCTAssertNotNil(drag.draggingPasteboard.availableType(from: target.registeredDraggedTypes),
+            "AppKit must accept the pasteboard before delivering dragEntered; calling the delegate directly bypasses this check")
+        defer { drag.draggingPasteboard.releaseGlobally() }
+        XCTAssertFalse(target.draggingEntered(drag).isEmpty)
+        try await settle(view)
+        XCTAssertEqual(accessibilityValue("groups.header.\(group)", in: view),
+                       "Отпустите для добавления в группу")
+        XCTAssertTrue(target.prepareForDragOperation(drag))
+        XCTAssertTrue(target.performDragOperation(drag))
+        try await settle(view)
+        XCTAssertEqual(model.recordingGroups.groupID(for: recording.id), group)
+        XCTAssertEqual(try repo.loadGroups().groupID(for: recording.id), group)
+        XCTAssertEqual(accessibilityValue("groups.header.\(group)", in: view), "")
+        XCTAssertEqual(model.recordingGroups.groups.first { $0.id == group }?.expanded, false)
+        await model.shutdown()
+    }
+
+    func testNativeDropOverEmptyGroupShowsFeedbackClearsOnExitAndMovesOnRelease() async throws {
+        try requireRegisteredDragTypes()
+        let (repo, model) = try fixture()
+        let recording = Manifest(sourceType: "import", title: "Drop on empty space", filename: "a.wav")
+        try repo.save(recording)
+        _ = try await model.archive?.refresh(recording.id)
+        try await model.saveGroupName("Empty")
+        let group = model.defaultGroup.id
+        model.selection = recording.id
+        let (view, window) = host(ContentView(model: model))
+        defer { window.close() }
+        try await settle(view)
+        let empty = try XCTUnwrap(element("groups.empty.\(group)", in: view))
+        let frame = try XCTUnwrap(empty.accessibilityFrame?())
+        let point = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
+        let target = try nativeDropTarget(at: point, in: view)
+        let drag = SidebarDropInfo(window: window, point: point, data: Data(recording.id.utf8), type: SidebarTransfer.recording.identifier)
+        defer { drag.draggingPasteboard.releaseGlobally() }
+        XCTAssertNotNil(drag.draggingPasteboard.availableType(from: target.registeredDraggedTypes))
+        XCTAssertFalse(target.draggingEntered(drag).isEmpty)
+        try await settle(view)
+        XCTAssertEqual(accessibilityValue("groups.header.\(group)", in: view),
+                       "Отпустите для добавления в группу")
+        target.draggingExited(drag)
+        try await settle(view)
+        XCTAssertEqual(accessibilityValue("groups.header.\(group)", in: view), "")
+        XCTAssertEqual(model.recordingGroups.groupID(for: recording.id), RecordingGroup.ungroupedID)
+        XCTAssertFalse(target.draggingEntered(drag).isEmpty)
+        XCTAssertTrue(target.prepareForDragOperation(drag))
+        XCTAssertTrue(target.performDragOperation(drag))
+        try await settle(view)
+        XCTAssertEqual(model.recordingGroups.groupID(for: recording.id), group)
+        XCTAssertEqual(try repo.loadGroups().groupID(for: recording.id), group)
+        XCTAssertEqual(model.selection, recording.id)
+        XCTAssertEqual(model.defaultGroup.id, group)
+        XCTAssertEqual(model.recordingGroups.groups.first { $0.id == group }?.expanded, true)
+
+        // Group payloads belong to insertion lines, not the group's content area.
+        let currentTarget = try nativeDropTarget(at: point, in: view)
+        let groupDrag = SidebarDropInfo(window: window, point: point, data: Data(group.utf8), type: SidebarTransfer.group.identifier)
+        defer { groupDrag.draggingPasteboard.releaseGlobally() }
+        XCTAssertTrue(currentTarget.draggingEntered(groupDrag).isEmpty)
+        XCTAssertFalse(currentTarget.performDragOperation(groupDrag))
+        XCTAssertEqual(model.recordingGroups.groupID(for: recording.id), group)
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
+    }
+
+    private func accessibilityValue(_ id: String, in view: NSView) -> String? {
+        // SwiftUI nodes implement the public selector without declaring NSAccessibilityProtocol conformance.
+        guard let object = element(id, in: view) as? NSObject else { return nil }
+        let selector = NSSelectorFromString("accessibilityValue")
+        guard object.responds(to: selector) else { return nil }
+        return object.perform(selector)?.takeUnretainedValue() as? String
+    }
+
+    private func nativeDropTarget(at point: NSPoint, in view: NSView) throws -> NSView {
+        func targets(_ v: NSView) -> [NSView] {
+            let own = !v.registeredDraggedTypes.isEmpty && v.bounds.contains(v.convert(point, from: nil)) ? [v] : []
+            return own + v.subviews.flatMap { targets($0) }
+        }
+        let candidates = targets(view)
+        XCTAssertEqual(candidates.count, 1, "The global file-import destination must not overlap the sidebar group destination")
+        return try XCTUnwrap(candidates.first)
+    }
+
+    private func requireRegisteredDragTypes() throws {
+        guard let path = ProcessInfo.processInfo.environment["LOCALSCRIBE_DND_APP"] else {
+            throw XCTSkip("Requires a registered .app; set LOCALSCRIBE_DND_APP to its path")
+        }
+        XCTAssertTrue(FileManager.default.fileExists(atPath: path + "/Contents/Info.plist"))
+    }
+
+    private func dragOperations(on row: AnyObject, in view: NSView, window: NSWindow) async throws -> NSDragOperation {
+        let frame = try XCTUnwrap(row.accessibilityFrame?())
+        let start = window.convertPoint(fromScreen: NSPoint(x: frame.midX, y: frame.midY))
+        let inspection = DragSourceInspection()
+        defer { inspection.restore() }
+        var events: [NSEvent] = []
+        for (index, type) in [NSEvent.EventType.leftMouseDown, .leftMouseDragged, .leftMouseDragged, .leftMouseUp].enumerated() {
+            let event = try XCTUnwrap(NSEvent.mouseEvent(with: type,
+                location: NSPoint(x: start.x + CGFloat(index * 15), y: start.y), modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime + Double(index) * 0.1, windowNumber: window.windowNumber,
+                context: nil, eventNumber: index, clickCount: 1, pressure: type == .leftMouseUp ? 0 : 1))
+            events.append(event)
+        }
+        // Context-menu tracking can consume the drag/up events inside mouseDown.
+        for event in events.dropFirst() { NSApplication.shared.postEvent(event, atStart: false) }
+        NSApplication.shared.sendEvent(events[0])
+        while let event = NSApplication.shared.nextEvent(matching: [.leftMouseDragged, .leftMouseUp],
+            until: Date(), inMode: .default, dequeue: true) {
+            NSApplication.shared.sendEvent(event)
+        }
+        try await settle(view)
+        return try XCTUnwrap(inspection.sourceOperations, "The gesture must reach the native drag source")
+    }
+
     func testEditorCommitsOnBlurAndEmptyDraftOrRenameEscapeCancels() async throws {
         let (_, model) = try fixture()
         await model.reload()
@@ -340,4 +590,63 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         await model.shutdown()
     }
 
+}
+
+/// Intercepts the public NSView entry point, including nested hosting views in ScrollView.
+/// No system drag loop is started; the original implementation is restored after each test.
+@MainActor
+private final class DragSourceInspection {
+    var sourceOperations: NSDragOperation?
+    private var methods: [(Method, IMP, IMP)] = []
+
+    init() {
+        let capture: @convention(block) (NSView, NSArray, AnyObject, AnyObject) -> NSDraggingSession = { [weak self] _, _, _, source in
+            let session = NSDraggingSession()
+            MainActor.assumeIsolated {
+                self?.sourceOperations = (source as? NSDraggingSource)?.draggingSession(session, sourceOperationMaskFor: .withinApplication)
+            }
+            return session
+        }
+        var selectors = [#selector(NSView.beginDraggingSession(with:event:source:))]
+        if #available(macOS 27.0, *) {
+            selectors.append(#selector(NSView.beginDraggingSession(items:gesture:source:)))
+        }
+        for selector in selectors {
+            guard let method = class_getInstanceMethod(NSView.self, selector) else { continue }
+            let replacement = imp_implementationWithBlock(capture)
+            methods.append((method, method_setImplementation(method, replacement), replacement))
+        }
+    }
+    func restore() {
+        for (method, original, replacement) in methods {
+            method_setImplementation(method, original)
+            imp_removeBlock(replacement)
+        }
+        methods.removeAll()
+    }
+}
+
+@MainActor
+private final class SidebarDropInfo: NSObject, NSDraggingInfo {
+    let draggingDestinationWindow: NSWindow?
+    let draggingLocation: NSPoint
+    let draggingPasteboard = NSPasteboard.withUniqueName()
+    var draggingSourceOperationMask: NSDragOperation { [.copy, .move] }
+    var draggedImageLocation: NSPoint { draggingLocation }
+    nonisolated var draggedImage: NSImage? { nil }
+    var draggingSource: Any? { nil }
+    var draggingSequenceNumber: Int { 1 }
+    var draggingFormation: NSDraggingFormation = .none
+    var animatesToDestination = false
+    var numberOfValidItemsForDrop = 0
+    var springLoadingHighlight: NSSpringLoadingHighlight { .none }
+    init(window: NSWindow, point: NSPoint, data: Data, type: String) {
+        draggingDestinationWindow = window; draggingLocation = point
+        super.init()
+        draggingPasteboard.setData(data, forType: .init(type))
+    }
+    func slideDraggedImage(to screenPoint: NSPoint) {}
+    nonisolated override func namesOfPromisedFilesDropped(atDestination dropDestination: URL) -> [String]? { nil }
+    func resetSpringLoading() {}
+    func enumerateDraggingItems(options enumOpts: NSDraggingItemEnumerationOptions, for view: NSView?, classes classArray: [AnyClass], searchOptions: [NSPasteboard.ReadingOptionKey: Any], using block: (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {}
 }

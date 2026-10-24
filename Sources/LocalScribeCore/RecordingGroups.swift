@@ -57,6 +57,11 @@ public struct RecordingGroups: Codable, Equatable, Sendable {
     }
     public mutating func setDefault(_ id: String) throws { _ = try position(id); defaultID = id }
     public mutating func setExpanded(_ id: String, _ expanded: Bool) throws { groups[try position(id)].expanded = expanded }
+    public mutating func setAllExpanded(_ expanded: Bool) {
+        for index in groups.indices where groups[index].expanded != expanded {
+            groups[index].expanded = expanded
+        }
+    }
     public mutating func move(_ id: String, before target: String) throws {
         let source = try position(id); _ = try position(target)
         guard !groups[source].isSystem else { throw ScribeError.message("Нельзя переставить «Без темы»") }

@@ -62,6 +62,69 @@ final class RecordingGroupsTests: XCTestCase {
         XCTAssertEqual(try repo.load(m.id).activeRunId, m.activeRunId)
     }
 
+    func testBulkExpansionPersistsMixedGroupsAndRepeatedActionIsNoOp() async throws {
+        let repo = try fixture(), m = try recording(repo)
+        let archive = RecordingCoordinator(repository: repo)
+        let a = try await create(archive, "A"), b = try await create(archive, "B")
+        try await archive.moveRecording(m.id, to: a.id)
+        let manifestURL = repo.folder(m.id).appendingPathComponent("manifest.json")
+        let manifestBefore = try Data(contentsOf: manifestURL)
+        for expanded in [false, true] {
+            try await archive.editGroups { groups in
+                try groups.setExpanded(a.id, expanded)
+                try groups.setExpanded(b.id, !expanded)
+                try groups.setExpanded(RecordingGroup.ungroupedID, !expanded)
+            }
+            let before = await archive.snapshot()
+            try await archive.editGroups { $0.setAllExpanded(expanded) }
+            let after = await archive.snapshot()
+            XCTAssertEqual(after.revision, before.revision + 1)
+            XCTAssertTrue(after.groups.groups.allSatisfy { $0.expanded == expanded })
+            XCTAssertEqual(after.groups.groups.map(\.id), before.groups.groups.map(\.id))
+            XCTAssertEqual(after.groups.groups.map(\.name), before.groups.groups.map(\.name))
+            XCTAssertEqual(after.groups.defaultID, before.groups.defaultID)
+            XCTAssertEqual(after.groups.membership, before.groups.membership)
+            let reopened = await RecordingCoordinator(repository: repo).snapshot()
+            XCTAssertEqual(reopened.groups, after.groups)
+            try await archive.editGroups { $0.setAllExpanded(expanded) }
+            let repeated = await archive.snapshot()
+            XCTAssertEqual(repeated.revision, after.revision)
+            XCTAssertEqual(repeated.groups, after.groups)
+        }
+        XCTAssertEqual(try Data(contentsOf: manifestURL), manifestBefore)
+    }
+
+    func testBulkExpansionWorksWithOnlySystemGroup() async throws {
+        let repo = try fixture()
+        let archive = RecordingCoordinator(repository: repo)
+        for expanded in [false, true] {
+            try await archive.editGroups { $0.setAllExpanded(expanded) }
+            let groups = try repo.loadGroups()
+            XCTAssertEqual(groups.groups.map(\.id), [RecordingGroup.ungroupedID])
+            XCTAssertEqual(groups.groups.first?.expanded, expanded)
+        }
+    }
+
+    func testBulkExpansionWriteFailureDoesNotPublishPartialChanges() async throws {
+        let repo = try fixture()
+        let archive = RecordingCoordinator(repository: repo)
+        let a = try await create(archive, "A")
+        try await archive.editGroups { try $0.setExpanded(a.id, false) }
+        let before = await archive.snapshot()
+        let path = repo.root.appendingPathComponent("groups.json")
+        try FileManager.default.removeItem(at: path)
+        try Disk.directory(path)
+        for expanded in [false, true] {
+            do {
+                try await archive.editGroups { $0.setAllExpanded(expanded) }
+                XCTFail("Saving to a directory must fail")
+            } catch {}
+            let after = await archive.snapshot()
+            XCTAssertEqual(after.groups, before.groups)
+            XCTAssertEqual(after.revision, before.revision)
+        }
+    }
+
     func testInvalidNamesAndSystemOperationsAreRejectedWithoutChangingDefault() throws {
         var groups = RecordingGroups()
         let a = try groups.create(name: "Работа")

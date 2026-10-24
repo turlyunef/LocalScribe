@@ -8,7 +8,13 @@ enum SidebarTransfer {
     static let group = UTType(exportedAs: "app.localscribe.group", conformingTo: .data)
 
     static func provider(_ id: String, type: UTType) -> NSItemProvider {
-        NSItemProvider(item: Data(id.utf8) as NSData, typeIdentifier: type.identifier)
+        let provider = NSItemProvider()
+        let data = Data(id.utf8)
+        provider.registerDataRepresentation(forTypeIdentifier: type.identifier, visibility: .ownProcess) { completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
     }
     static func identifier(_ data: Data?) -> String? {
         guard let data, let id = String(data: data, encoding: .utf8), UUID(uuidString: id) != nil else { return nil }
@@ -41,6 +47,8 @@ struct RecordingGroupsSidebar: View {
                     .help("Добавить группу").accessibilityLabel("Добавить группу")
                     .accessibilityIdentifier("groups.add")
                     .disabled(model.deletingGroupID != nil)
+                expansionButton(expanded: true)
+                expansionButton(expanded: false)
             }.padding(.horizontal, 12).padding(.vertical, 10)
             ScrollViewReader { proxy in
                 ScrollView {
@@ -48,45 +56,53 @@ struct RecordingGroupsSidebar: View {
                         if let draft = editor, draft.groupID == nil { nameEditor(draft).id(draft.id) }
                         ForEach(model.recordingGroups.groups) { group in
                             GroupInsertionLine(model: model, before: group.id, draggedGroup: $draggedGroup)
-                            if let draft = editor, draft.groupID == group.id {
-                                nameEditor(draft).id(draft.id)
-                            } else {
-                                RecordingGroupHeader(model: model, group: group,
-                                    draggedRecording: $draggedRecording, draggedGroup: $draggedGroup,
-                                    rename: { editor = GroupNameDraft(groupID: group.id, name: group.name) },
-                                    delete: { deleting = group })
-                            }
-                            if group.expanded {
-                                let members = model.recordings(in: group.id)
-                                if members.isEmpty {
-                                    Text("Перетащите записи сюда или начните новую запись")
-                                        .font(.caption).foregroundStyle(.secondary)
-                                        .padding(.leading, 28).padding(.trailing, 12).padding(.vertical, 10)
+                            RecordingGroupDropArea(model: model, groupID: group.id, draggedRecording: draggedRecording) { targeted in
+                                if let draft = editor, draft.groupID == group.id {
+                                    nameEditor(draft).id(draft.id)
+                                } else {
+                                    RecordingGroupHeader(model: model, group: group,
+                                        draggedRecording: $draggedRecording, draggedGroup: $draggedGroup, dropTargeted: targeted,
+                                        rename: { editor = GroupNameDraft(groupID: group.id, name: group.name) },
+                                        delete: { deleting = group })
                                 }
-                                ForEach(members) { recording in
-                                    SidebarRecordingRow(model: model, recording: recording)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .padding(.leading, 28).padding(.trailing, 10)
-                                    .contentShape(Rectangle())
-                                    .onTapGesture { model.selection = recording.id }
-                                    .focusable()
-                                    .onKeyPress(.return) { model.selection = recording.id; return .handled }
-                                    .onKeyPress(.space) { model.selection = recording.id; return .handled }
-                                    .accessibilityElement(children: .contain)
-                                    .accessibilityAction { model.selection = recording.id }
-                                    .background(model.selection == recording.id ? Color.accentColor.opacity(0.16) : Color.clear)
-                                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                                    .accessibilityIdentifier("sidebar.recording.\(recording.id)")
-                                    .onDrag {
-                                        draggedGroup = nil; draggedRecording = recording.id
-                                        return SidebarTransfer.provider(recording.id, type: SidebarTransfer.recording)
+                                if group.expanded {
+                                    let members = model.recordings(in: group.id)
+                                    if members.isEmpty {
+                                        Text("Перетащите записи сюда или начните новую запись")
+                                            .accessibilityIdentifier("groups.empty.\(group.id)")
+                                            .font(.caption).foregroundStyle(.secondary)
+                                            .padding(.leading, 28).padding(.trailing, 12).padding(.vertical, 10)
                                     }
-                                    .contextMenu {
-                                        Menu("Переместить в") {
-                                            RecordingMoveMenuItems(model: model, recordingID: recording.id)
-                                        }.disabled(model.deletingGroupID != nil)
+                                    ForEach(members) { recording in
+                                        SidebarRecordingRow(model: model, recording: recording)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .padding(.leading, 28).padding(.trailing, 10)
+                                        .contentShape(Rectangle())
+                                        .onTapGesture { model.selection = recording.id }
+                                        .focusable()
+                                        .onKeyPress(.return) { model.selection = recording.id; return .handled }
+                                        .onKeyPress(.space) { model.selection = recording.id; return .handled }
+                                        .accessibilityElement(children: .contain)
+                                        .accessibilityAction { model.selection = recording.id }
+                                        .background(model.selection == recording.id ? Color.accentColor.opacity(0.16) : Color.clear)
+                                        .background(RecordingContextSelection {
+                                            if model.selection != recording.id { model.selection = recording.id }
+                                        })
+                                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                                        .accessibilityIdentifier("sidebar.recording.\(recording.id)")
+                                        .onDrag {
+                                            draggedGroup = nil; draggedRecording = recording.id
+                                            return SidebarTransfer.provider(recording.id, type: SidebarTransfer.recording)
+                                        }
+                                        // The destination proposes .move; SwiftUI sources allow only .copy by default.
+                                        .dragConfiguration(DragConfiguration(allowMove: true))
+                                        .contextMenu {
+                                            Menu("Переместить в") {
+                                                RecordingMoveMenuItems(model: model, recordingID: recording.id)
+                                            }.disabled(model.deletingGroupID != nil)
+                                        }
+                                        .id(recording.id)
                                     }
-                                    .id(recording.id)
                                 }
                             }
                         }
@@ -109,6 +125,61 @@ struct RecordingGroupsSidebar: View {
             try await model.saveGroupName(name, id: draft.groupID)
             editor = nil
         }, cancel: { editor = nil }).id(draft.id)
+    }
+
+    private func expansionButton(expanded: Bool) -> some View {
+        let title = expanded ? "Развернуть все группы" : "Свернуть все группы"
+        return Button {
+            Task { await model.changeGroups { $0.setAllExpanded(expanded) } }
+        } label: {
+            VStack(spacing: 3) {
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                Image(systemName: expanded ? "chevron.down" : "chevron.up")
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: 20, height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(title).accessibilityLabel(title)
+        .accessibilityIdentifier(expanded ? "groups.expandAll" : "groups.collapseAll")
+        .disabled(model.deletingGroupID != nil)
+    }
+}
+
+/// Select before AppKit enters menu tracking, without intercepting clicks or drags.
+private struct RecordingContextSelection: NSViewRepresentable {
+    var select: () -> Void
+
+    func makeNSView(context: Context) -> SelectionView { SelectionView() }
+    func updateNSView(_ view: SelectionView, context: Context) { view.select = select }
+    static func dismantleNSView(_ view: SelectionView, coordinator: ()) { view.stopMonitoring() }
+
+    final class SelectionView: NSView {
+        var select: (() -> Void)?
+        private var monitor: Any?
+
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            stopMonitoring()
+            guard window != nil else { return }
+            monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
+                guard let self, let window = self.window, event.window === window,
+                      event.type == .rightMouseDown || event.modifierFlags.contains(.control),
+                      !self.isHiddenOrHasHiddenAncestor,
+                      self.visibleRect.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
+                self.select?()
+                return event
+            }
+        }
+
+        func stopMonitoring() {
+            if let monitor { NSEvent.removeMonitor(monitor) }
+            monitor = nil
+        }
     }
 }
 
@@ -172,15 +243,46 @@ struct GroupNameEditor: View {
     }
 }
 
+/// A group accepts drops over its header, empty-state hint and member rows.
+private struct RecordingGroupDropArea<Content: View>: View {
+    @ObservedObject var model: AppModel
+    let groupID: String
+    let draggedRecording: String?
+    let content: (Bool) -> Content
+    @State private var targeted = false
+
+    init(model: AppModel, groupID: String, draggedRecording: String?,
+         @ViewBuilder content: @escaping (Bool) -> Content) {
+        self.model = model; self.groupID = groupID
+        self.draggedRecording = draggedRecording; self.content = content
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) { content(targeted) }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contentShape(Rectangle())
+            .background(targeted ? Color.accentColor.opacity(0.16) : Color.clear)
+            .clipShape(RoundedRectangle(cornerRadius: 6))
+            .overlay {
+                RoundedRectangle(cornerRadius: 6)
+                    .strokeBorder(Color.accentColor.opacity(targeted ? 1 : 0), lineWidth: 2)
+                    .allowsHitTesting(false)
+            }
+            .animation(.easeInOut(duration: 0.15), value: targeted)
+            .onDrop(of: [SidebarTransfer.recording, .fileURL], delegate: GroupContentDrop(
+                model: model, groupID: groupID, draggedRecording: draggedRecording, targeted: $targeted))
+    }
+}
+
 private struct RecordingGroupHeader: View {
     @ObservedObject var model: AppModel
     let group: RecordingGroup
     @Binding var draggedRecording: String?
     @Binding var draggedGroup: String?
+    let dropTargeted: Bool
     let rename: () -> Void
     let delete: () -> Void
     @State private var hovered = false
-    @State private var targeted = false
     private enum HeaderFocus: Hashable { case disclosure, delete }
     @FocusState private var focus: HeaderFocus?
     private var controlsVisible: Bool { hovered || focus != nil }
@@ -195,17 +297,20 @@ private struct RecordingGroupHeader: View {
                         draggedRecording = nil; draggedGroup = group.id
                         return SidebarTransfer.provider(group.id, type: SidebarTransfer.group)
                     }
+                    .dragConfiguration(DragConfiguration(allowMove: true))
             } else { Color.clear.frame(width: 14, height: 14) }
             Button {
                 Task { await model.changeGroups { try $0.setExpanded(group.id, !group.expanded) } }
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: group.expanded ? "chevron.down" : "chevron.right").frame(width: 10)
-                    Text("\(group.name) · \(model.recordings(in: group.id).count)").lineLimit(1)
+                    Text(dropTargeted ? "Отпустите → \(group.name)" : "\(group.name) · \(model.recordings(in: group.id).count)")
+                        .lineLimit(1).contentTransition(.opacity)
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain).focused($focus, equals: .disclosure)
                 .accessibilityIdentifier("groups.header.\(group.id)")
+                .accessibilityValue(dropTargeted ? "Отпустите для добавления в группу" : "")
                 .accessibilityLabel("\(group.name), записей: \(model.recordings(in: group.id).count), \(group.expanded ? "раскрыта" : "свёрнута")")
             if !group.isSystem {
                 Button(role: .destructive, action: delete) { Image(systemName: "trash") }
@@ -215,14 +320,13 @@ private struct RecordingGroupHeader: View {
                     .help("Удалить группу").accessibilityLabel("Удалить группу \(group.name)")
                     .accessibilityIdentifier("groups.delete.\(group.id)")
             } else { Color.clear.frame(width: 16, height: 16) }
-            Image(systemName: "checkmark").frame(width: 16)
-                .opacity(model.recordingGroups.defaultID == group.id ? 1 : 0)
-                .help("Группа для новых записей")
-                .accessibilityLabel(model.recordingGroups.defaultID == group.id ? "Группа для новых записей" : "")
+            Image(systemName: dropTargeted ? "arrow.down.to.line" : "checkmark").frame(width: 16)
+                .foregroundStyle(dropTargeted ? Color.accentColor : Color.primary)
+                .opacity(dropTargeted || model.recordingGroups.defaultID == group.id ? 1 : 0)
+                .help(dropTargeted ? "Отпустите для добавления в группу" : "Группа для новых записей")
+                .accessibilityLabel(dropTargeted ? "Отпустите для добавления в группу" : model.recordingGroups.defaultID == group.id ? "Группа для новых записей" : "")
         }
         .font(.subheadline.weight(.semibold)).padding(.vertical, 8).padding(.horizontal, 6)
-        .background(targeted ? Color.accentColor.opacity(0.2) : Color.clear)
-        .clipShape(RoundedRectangle(cornerRadius: 6))
         .onHover { hovered = $0 }
         .contextMenu {
             Button("Сделать группой по умолчанию") { Task { await model.changeGroups { try $0.setDefault(group.id) } } }
@@ -232,8 +336,6 @@ private struct RecordingGroupHeader: View {
                 Button("Удалить группу", role: .destructive, action: delete)
             }
         }
-        .onDrop(of: [SidebarTransfer.recording, .fileURL], delegate: GroupContentDrop(
-            model: model, groupID: group.id, draggedRecording: draggedRecording, targeted: $targeted))
         .disabled(model.deletingGroupID != nil)
     }
 }
