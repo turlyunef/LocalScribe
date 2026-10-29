@@ -51,11 +51,11 @@ enum ASRContextReviewPlanner {
             let start = max(coreStartMs, segment.startMs), end = min(coreEndMs, segment.endMs)
             if start < end { targets.append((start..<end, [.uncertainText])) }
         }
-        if let end = Analysis.missingASRPrefixEnd(segments: segments, samples: samples,
+        if let end = WhisperASRWindowing.missingASRPrefixEnd(segments: segments, samples: samples,
             readStartMs: readStartMs, coreStartMs: coreStartMs, coreEndMs: coreEndMs) {
             targets.append((coreStartMs..<end, [.uncoveredSignal]))
         }
-        targets += Analysis.missingASRInteriorRanges(segments: segments, samples: samples,
+        targets += WhisperASRWindowing.missingASRInteriorRanges(segments: segments, samples: samples,
             readStartMs: readStartMs, coreStartMs: coreStartMs, coreEndMs: coreEndMs)
             .map { ($0, [.uncoveredSignal]) }
         targets.sort { $0.0.lowerBound < $1.0.lowerBound }

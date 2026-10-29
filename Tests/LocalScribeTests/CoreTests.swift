@@ -181,13 +181,7 @@ final class CoreTests: XCTestCase {
         do { try await ModelInstaller().install(profile,root:models,localSource:source) { _ in }; XCTFail("Corrupt model accepted") }
         catch { XCTAssertFalse(FileManager.default.fileExists(atPath:models.appendingPathComponent("test").path)) }
     }
-    func testPauseSplittingDoesNotShiftTimeline() {
-        let rate = 1000
-        let samples = [Float](repeating: 0.1,count: 5000) + [Float](repeating:0,count:1000) + [Float](repeating:0.1,count:5000)
-        let length = Analysis.nextASRWindowLength(samples,rate:rate)
-        XCTAssertGreaterThan(length,5000); XCTAssertLessThan(length,6000)
-        XCTAssertEqual(Analysis.nextASRWindowLength([Float](repeating:0.1,count:30000),rate:rate),30000)
-    }
+
     func testOverlapDoesNotEraseLaterRepetition() {
         let a = Segment(id: "a", startMs: 100, endMs: 1000, text: "Да", language: "ru")
         let b = Segment(id: "b", startMs: 800, endMs: 1200, text: "Да", language: "ru")
@@ -195,31 +189,9 @@ final class CoreTests: XCTestCase {
         let result = Analysis.mergeParts([ASRPart(fingerprint: "f", index: 0, startMs: 0, endMs: 1000, segments: [a]), ASRPart(fingerprint: "f", index: 1, startMs: 800, endMs: 6000, segments: [b,c])], fingerprint: "f")
         XCTAssertEqual(result.segments.count, 2)
     }
-    func testEmptyOrLateASRRetriesAudiblePrefix() {
-        let samples = [Float](repeating: 0.01, count: 16000 * 15)
-        XCTAssertEqual(Analysis.missingASRPrefixEnd(segments: [], samples: samples, readStartMs: 0, coreStartMs: 0, coreEndMs: 13_840), 13_840)
-        let late = Segment(id: "late", startMs: 13_380, endMs: 14_500, text: "Речь", language: "ru")
-        XCTAssertEqual(Analysis.missingASRPrefixEnd(segments: [late], samples: samples, readStartMs: 0, coreStartMs: 0, coreEndMs: 15_000), 13_380)
-        let recovered = Segment(id: "early", startMs: 940, endMs: 3240, text: "Начало", language: "ru")
-        XCTAssertNil(Analysis.missingASRPrefixEnd(segments: [recovered, late], samples: samples, readStartMs: 0, coreStartMs: 0, coreEndMs: 15_000))
-    }
-    func testLeadingSilenceAndBriefNoiseDoNotRequestASRRetry() {
-        var samples = [Float](repeating: 0, count: 16000 * 15)
-        let speech = Segment(id: "speech", startMs: 13_000, endMs: 14_500, text: "Речь после паузы", language: "ru")
-        for i in 13 * 16000..<samples.count { samples[i] = 0.1 }
-        XCTAssertNil(Analysis.missingASRPrefixEnd(segments: [speech], samples: samples, readStartMs: 0, coreStartMs: 0, coreEndMs: 15_000))
-        for i in 16000..<17600 { samples[i] = 0.1 }
-        XCTAssertNil(Analysis.missingASRPrefixEnd(segments: [speech], samples: samples, readStartMs: 0, coreStartMs: 0, coreEndMs: 15_000))
-        XCTAssertNil(Analysis.missingASRPrefixEnd(segments: [], samples: [Float](repeating: 0.00001, count: 16000 * 15), readStartMs: 0, coreStartMs: 0, coreEndMs: 15_000))
-    }
-    func testASRPrefixRetryUsesOriginalTimelineAndExcludesContext() {
-        var samples = [Float](repeating: 0, count: 16000 * 5)
-        // Sound in the preceding context belongs to the previous window.
-        for i in 0..<16000 { samples[i] = 0.1 }
-        XCTAssertNil(Analysis.missingASRPrefixEnd(segments: [], samples: samples, readStartMs: 29_000, coreStartMs: 30_000, coreEndMs: 33_000))
-        for i in 16000..<32000 { samples[i] = 0.01 }
-        XCTAssertEqual(Analysis.missingASRPrefixEnd(segments: [], samples: samples, readStartMs: 29_000, coreStartMs: 30_000, coreEndMs: 33_000), 33_000)
-    }
+
+
+
     func testWordSpeakerChangesAndOverlap() {
         let t = Transcript(fingerprint: "f", diarized: false, segments: [Segment(id: "a", startMs: 0, endMs: 3000, text: "one two three", language: "en", words: [Word(text: "one", startMs: 0, endMs: 1000), Word(text: " two", startMs: 1000, endMs: 2000), Word(text: " three", startMs: 2000, endMs: 3000)])])
         let mapped = Analysis.assignSpeakers(t, intervals: [VoiceInterval(startMs: 0, endMs: 1000, speakerId: "x"), VoiceInterval(startMs: 1000, endMs: 3000, speakerId: "y"), VoiceInterval(startMs: 2000, endMs: 3000, speakerId: "x")])

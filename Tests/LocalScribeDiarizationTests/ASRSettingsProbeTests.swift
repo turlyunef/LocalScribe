@@ -52,7 +52,7 @@ final class ASRSettingsProbeTests: XCTestCase {
     }
 
     static func options(_ label: String, prompt: [Int]) -> DecodingOptions {
-        var options = SpeechRecognizer.decodingOptions
+        var options = WhisperASREngine.decodingOptions
         switch label {
         case "noSpeech": options.noSpeechThreshold = nil
         case "logprob": options.logProbThreshold = -1.5
@@ -65,7 +65,7 @@ final class ASRSettingsProbeTests: XCTestCase {
 
     // Replay only: use the production ownership mapper without allowing global
     // decoding scores to delete text. Restore uncertainty from the original scores.
-    static func preserve(_ results: [TranscriptionResult], mapper: SpeechRecognizer,
+    static func preserve(_ results: [TranscriptionResult], mapper: WhisperASREngine,
                          readStart: Int, start: Int, end: Int, duration: Int) -> [Segment] {
         results.flatMap { result in
             result.segments.flatMap { raw -> [Segment] in
@@ -84,7 +84,7 @@ final class ASRSettingsProbeTests: XCTestCase {
     }
 
     func testGlobalConfidenceReplayKeepsOriginalWordsAndUncertainty() throws {
-        let mapper = SpeechRecognizer { _, _ in [] }
+        let mapper = WhisperASREngine { _, _ in [] }
         let raw = TranscriptionSegment(id: 0, start: 1, end: 2, text: "private test",
             avgLogprob: -1.2, compressionRatio: 3.7, noSpeechProb: 0.8,
             words: [WordTiming(word: "private test", tokens: [], start: 1, end: 2, probability: 0.8)])
@@ -126,8 +126,8 @@ final class ASRSettingsProbeTests: XCTestCase {
                     var offset = partStart
                     while offset < partEnd {
                         let samples = try Media.samples(wave, start: Double(offset) / 1000,
-                            duration: Double(min(partEnd - offset, Analysis.asrCoreWindowMs)) / 1000)
-                        let end = min(partEnd, offset + max(1, Analysis.nextASRWindowLength(samples, policy: .firstPause) / 16))
+                            duration: Double(min(partEnd - offset, WhisperASRWindowing.asrCoreWindowMs)) / 1000)
+                        let end = min(partEnd, offset + max(1, WhisperASRWindowing.nextASRWindowLength(samples, policy: .firstPause) / 16))
                         if source.intervals.contains(where: { $0.startMs < end && offset < $0.endMs }) {
                             windows.append(Window(sourceID: source.id, startMs: offset, endMs: end,
                                 readStartMs: max(0, offset - 1000), readEndMs: min(source.durationMs, end + 1000)))
@@ -167,7 +167,7 @@ final class ASRSettingsProbeTests: XCTestCase {
             try Disk.write(baseOptions, to: destination.appendingPathComponent("decoding-options.json"))
             try Disk.write(prompt, to: destination.appendingPathComponent("lexicon-tokens.json"))
             var checks: [LanguageCheck] = []
-            let mapper = SpeechRecognizer { _, _ in [] }
+            let mapper = WhisperASREngine { _, _ in [] }
             for (index, window) in windows.enumerated() {
                 try Task.checkCancellation()
                 recorder.window(milliseconds: window.endMs - window.startMs, silent: false)
@@ -215,9 +215,9 @@ final class ASRSettingsProbeTests: XCTestCase {
                     let callStart = ProcessInfo.processInfo.systemUptime
                     do {
                         call.results = try await kit.transcribe(audioArray: samples, decodeOptions: options)
-                        recorder.finishCall(seconds: ProcessInfo.processInfo.systemUptime - callStart, phase: phase, results: call.results)
+                        recorder.finishWhisperCall(seconds: ProcessInfo.processInfo.systemUptime - callStart, phase: phase, results: call.results)
                     } catch {
-                        recorder.finishCall(seconds: ProcessInfo.processInfo.systemUptime - callStart, phase: phase, results: nil)
+                        recorder.finishWhisperCall(seconds: ProcessInfo.processInfo.systemUptime - callStart, phase: phase, results: nil)
                         recorder.finish(status: "failed")
                         throw error
                     }
@@ -230,7 +230,7 @@ final class ASRSettingsProbeTests: XCTestCase {
                     else { segments += mapped; preserved += kept }
                     calls[callIndex] = call
                     if label == "baseline" && callIndex == 0,
-                       let missingEnd = Analysis.missingASRPrefixEnd(segments: mapped, samples: samples,
+                       let missingEnd = WhisperASRWindowing.missingASRPrefixEnd(segments: mapped, samples: samples,
                             readStartMs: call.startMs, coreStartMs: window.startMs, coreEndMs: window.endMs) {
                         let retryEnd = min(source.durationMs, window.readStartMs + 30_000)
                         calls.append(Call(phase: "prefixRecovery", startMs: max(0, retryEnd - 30_000),

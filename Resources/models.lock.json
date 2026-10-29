@@ -1728,6 +1728,309 @@
       "recommendedMemoryGB": 128,
       "workingMemoryGB": 88,
       "recommendationRank": 8
+    },
+    {
+      "id": "tokenizer-qwen3",
+      "role": "tokenizer",
+      "repository": "mlx-community/Qwen3-ASR-1.7B-bf16",
+      "revision": "e1f6c266914abc5a46e8756e02580f834a6cf8a7",
+      "license": "Apache-2.0",
+      "name": "Токенизатор Qwen3-ASR",
+      "files": [
+        {
+          "path": "merges.txt",
+          "localPath": "merges.txt",
+          "size": 1671853,
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "localPath": "tokenizer_config.json",
+          "size": 12487,
+          "sha256": "4942d005604266809309cabc9f4e9cb89ce855d59b14681fdc0e1cc62ea26c4c"
+        },
+        {
+          "path": "vocab.json",
+          "localPath": "vocab.json",
+          "size": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+        }
+      ]
+    },
+    {
+      "id": "asr-qwen3-1.7b-bf16",
+      "repository": "mlx-community/Qwen3-ASR-1.7B-bf16",
+      "revision": "e1f6c266914abc5a46e8756e02580f834a6cf8a7",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "config.json",
+          "localPath": "config.json",
+          "size": 6983,
+          "sha256": "62fe9a2ba2de536820229e126fdfb35f9910b9a337dc46d3737c3b1ac0a9caa9"
+        },
+        {
+          "path": "generation_config.json",
+          "localPath": "generation_config.json",
+          "size": 142,
+          "sha256": "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c"
+        },
+        {
+          "path": "model.safetensors",
+          "localPath": "model.safetensors",
+          "size": 4076186653,
+          "sha256": "2f080a3b769ae469aeaaa2dcb9e13a94141e54c9e6d5a7aa63392e0dc5a51789"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "localPath": "preprocessor_config.json",
+          "size": 330,
+          "sha256": "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d"
+        }
+      ],
+      "name": "Qwen3-ASR-1.7B-bf16",
+      "recommendedMemoryGB": 16,
+      "workingMemoryGB": 10,
+      "role": "asr",
+      "asrBackend": "qwen3",
+      "asrPolicy": "qwen3-pause28-context250-greedy1024-rawalign-v2",
+      "alignerID": "aligner-qwen3-0.6b-bf16",
+      "tokenizerID": "tokenizer-qwen3",
+      "recommendationRank": 0,
+      "experimental": true,
+      "profileDescription": "Кандидат Qwen3-ASR + ForcedAligner. Исходный язык RU/EN, готовые записи. Качество на встречах ещё не принято. Рабочая память включает обе модели, буферы и контекст до 30 с."
+    },
+    {
+      "id": "aligner-qwen3-0.6b-bf16",
+      "repository": "mlx-community/Qwen3-ForcedAligner-0.6B-bf16",
+      "revision": "53c8c0e46733eec430e4b53dd6471d0e5dee45f8",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "config.json",
+          "localPath": "config.json",
+          "size": 6735,
+          "sha256": "dffdf2e17fa13effca4b165540c8eeea6d3f3211dcdb6c21978e68578460858d"
+        },
+        {
+          "path": "generation_config.json",
+          "localPath": "generation_config.json",
+          "size": 115,
+          "sha256": "948d089b23bca1d214e768d59c4438365665f52ec6d33678f4062206b3fbbb8c"
+        },
+        {
+          "path": "merges.txt",
+          "localPath": "merges.txt",
+          "size": 1671853,
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+        },
+        {
+          "path": "model.safetensors",
+          "localPath": "model.safetensors",
+          "size": 1835539240,
+          "sha256": "9d0728e17e28ee122c366bfaa9748ccbbb8fc3df4c0ce09dd8a5eac8202989e8"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "localPath": "preprocessor_config.json",
+          "size": 330,
+          "sha256": "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "localPath": "tokenizer_config.json",
+          "size": 12666,
+          "sha256": "3ab80063f8511deb9566e6ad438d17b7a6277fcffd52d92854112f19d36bd81c"
+        },
+        {
+          "path": "vocab.json",
+          "localPath": "vocab.json",
+          "size": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+        }
+      ],
+      "name": "Qwen3-ForcedAligner-0.6B-bf16",
+      "recommendedMemoryGB": 16,
+      "workingMemoryGB": 10
+    },
+    {
+      "id": "asr-qwen3-1.7b-8bit",
+      "repository": "mlx-community/Qwen3-ASR-1.7B-8bit",
+      "revision": "a8379a2e2f9e313c9292cdf1af4055ab56d50d55",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "config.json",
+          "localPath": "config.json",
+          "size": 7188,
+          "sha256": "1b76b3b6c655fc54595da025f7a96474ad9fa86363303fbdd61a7d8483ccfaf7"
+        },
+        {
+          "path": "generation_config.json",
+          "localPath": "generation_config.json",
+          "size": 142,
+          "sha256": "1da527824d81e07118facff437e03f2e24a23311e3bdeb2368973fe77e5f275c"
+        },
+        {
+          "path": "model.safetensors",
+          "localPath": "model.safetensors",
+          "size": 2463307541,
+          "sha256": "bf304b009cc7eca79283056f787b44c952d24ac22cec787b39732bba3c23c13c"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "localPath": "preprocessor_config.json",
+          "size": 330,
+          "sha256": "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d"
+        }
+      ],
+      "name": "Qwen3-ASR-1.7B-8bit",
+      "recommendedMemoryGB": 16,
+      "workingMemoryGB": 7,
+      "role": "asr",
+      "asrBackend": "qwen3",
+      "asrPolicy": "qwen3-pause28-context250-greedy1024-rawalign-v2",
+      "alignerID": "aligner-qwen3-0.6b-8bit",
+      "tokenizerID": "tokenizer-qwen3",
+      "recommendationRank": 0,
+      "experimental": true,
+      "profileDescription": "Кандидат Qwen3-ASR + ForcedAligner. Исходный язык RU/EN, готовые записи. Качество на встречах ещё не принято. Рабочая память включает обе модели, буферы и контекст до 30 с."
+    },
+    {
+      "id": "aligner-qwen3-0.6b-8bit",
+      "repository": "mlx-community/Qwen3-ForcedAligner-0.6B-8bit",
+      "revision": "0e1a68e91d815300c7c9754b2a7639378b23db15",
+      "license": "Apache-2.0",
+      "files": [
+        {
+          "path": "config.json",
+          "localPath": "config.json",
+          "size": 6940,
+          "sha256": "8dc126e1a4ac001acb02f3a9ca6277c8a20a25485fde293bc99eeab3aedc604d"
+        },
+        {
+          "path": "generation_config.json",
+          "localPath": "generation_config.json",
+          "size": 115,
+          "sha256": "948d089b23bca1d214e768d59c4438365665f52ec6d33678f4062206b3fbbb8c"
+        },
+        {
+          "path": "merges.txt",
+          "localPath": "merges.txt",
+          "size": 1671853,
+          "sha256": "8831e4f1a044471340f7c0a83d7bd71306a5b867e95fd870f74d0c5308a904d5"
+        },
+        {
+          "path": "model.safetensors",
+          "localPath": "model.safetensors",
+          "size": 1271924386,
+          "sha256": "be19ef8ac4326d032e7673342930b14c2df30bd68c1632493b0f563e30829f91"
+        },
+        {
+          "path": "preprocessor_config.json",
+          "localPath": "preprocessor_config.json",
+          "size": 330,
+          "sha256": "45e120a4eda2c20c5d7f2ea9354e63536bf35e27aa573fb7cdf78017b378770d"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "localPath": "tokenizer_config.json",
+          "size": 12666,
+          "sha256": "3ab80063f8511deb9566e6ad438d17b7a6277fcffd52d92854112f19d36bd81c"
+        },
+        {
+          "path": "vocab.json",
+          "localPath": "vocab.json",
+          "size": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+        }
+      ],
+      "name": "Qwen3-ForcedAligner-0.6B-8bit",
+      "recommendedMemoryGB": 16,
+      "workingMemoryGB": 7
+    },
+    {
+      "id": "tokenizer-vibevoice",
+      "repository": "Qwen/Qwen2.5-7B",
+      "revision": "d149729398750b98c0af14eb82c78cfe92750796",
+      "files": [
+        {
+          "path": "LICENSE",
+          "localPath": "LICENSE",
+          "size": 11343,
+          "sha256": "832dd9e00a68dd83b3c3fb9f5588dad7dcf337a0db50f7d9483f310cd292e92e"
+        },
+        {
+          "path": "merges.txt",
+          "localPath": "merges.txt",
+          "size": 1671839,
+          "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+        },
+        {
+          "path": "tokenizer.json",
+          "localPath": "tokenizer.json",
+          "size": 7031645,
+          "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+        },
+        {
+          "path": "tokenizer_config.json",
+          "localPath": "tokenizer_config.json",
+          "size": 7228,
+          "sha256": "c91efca15ceff6e9ee9424db58a6f59cd41294e550a86cbd07e3c1fb500b34f9"
+        },
+        {
+          "path": "vocab.json",
+          "localPath": "vocab.json",
+          "size": 2776833,
+          "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+        }
+      ],
+      "role": "tokenizer",
+      "license": "Apache-2.0",
+      "name": "Токенизатор VibeVoice-ASR · Qwen2.5"
+    },
+    {
+      "id": "asr-vibevoice-4bit",
+      "repository": "mlx-community/VibeVoice-ASR-4bit",
+      "revision": "a1a15cb6c7b70f76b588af7e12f6fab34d5ab654",
+      "files": [
+        {
+          "path": "config.json",
+          "localPath": "config.json",
+          "size": 4372,
+          "sha256": "5ac3a43f61743b00d7e26e72aa26c04716033fa913ea2e55c9667a69d4c7ea2d"
+        },
+        {
+          "path": "model-00001-of-00002.safetensors",
+          "localPath": "model-00001-of-00002.safetensors",
+          "size": 5366951429,
+          "sha256": "811dc8e5aa0f322f2b40778c2eee5437d5d8dde6e2133740e69ab2b9db7e319e"
+        },
+        {
+          "path": "model-00002-of-00002.safetensors",
+          "localPath": "model-00002-of-00002.safetensors",
+          "size": 346896560,
+          "sha256": "45aab2d00ded3c502cbc1523ff46218cedccc0d798f0f363b9a6d2fe2dec3301"
+        },
+        {
+          "path": "model.safetensors.index.json",
+          "localPath": "model.safetensors.index.json",
+          "size": 130385,
+          "sha256": "92f16ddbaca2b010d9785533395dcffa406b2acf8f353b2fd46ce34f0e21920b"
+        }
+      ],
+      "role": "asr",
+      "license": "MIT",
+      "name": "VibeVoice-ASR · 4-bit · экспериментальный",
+      "asrBackend": "vibevoice-asr",
+      "asrPolicy": "vibevoice-longform-300s-greedy8192-speakerkit-v1",
+      "tokenizerID": "tokenizer-vibevoice",
+      "recommendedMemoryGB": 32,
+      "workingMemoryGB": 20,
+      "maximumRecordingMs": 300000,
+      "experimental": true,
+      "recommendationRank": 0,
+      "profileDescription": "Готовые записи до 5 минут на Mac от 32 ГБ RAM. Только таймкоды сегментов; участники определяются SpeakerKit. Качество на встречах ещё не принято."
     }
   ]
 }

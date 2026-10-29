@@ -46,16 +46,29 @@ final class ModelHardwareTests: XCTestCase {
         var invalid = large; invalid.workingMemoryGB = -1
         XCTAssertFalse(machine(128).compatibility(for: invalid).isCompatible)
     }
+    func testExperimentalASRProfilesAccountForFullContextWorkingBudget() throws {
+        let catalog = try catalog()
+        let vibe = try XCTUnwrap(catalog.models.first { $0.id == "asr-vibevoice-4bit" })
+        XCTAssertFalse(machine(16).compatibility(for: vibe).isCompatible)
+        XCTAssertTrue(machine(32).compatibility(for: vibe).isCompatible)
+        XCTAssertFalse(machine(32, gpu: 16).compatibility(for: vibe).isCompatible)
+        let qwen = try XCTUnwrap(catalog.models.first { $0.id == "asr-qwen3-1.7b-8bit" })
+        XCTAssertFalse(machine(16, gpu: 6).compatibility(for: qwen).isCompatible)
+        XCTAssertTrue(machine(16).compatibility(for: qwen).isCompatible)
+    }
+
     func testCatalogRequirementsTokenizerAndMetadataDoNotChangeFingerprint() throws {
         let catalog = try catalog()
-        XCTAssertEqual(catalog.models.count, 16)
-        XCTAssertEqual(Set(catalog.models.map(\.id)).count, 16)
+        let originalIDs: Set<String> = ["asr", "diarization", "summary", "tokenizer", "asr-small", "asr-medium", "asr-turbo", "summary-4b", "summary-27b", "tokenizer-multilingual", "asr-base", "summary-2b", "summary-9b-8bit", "summary-27b-6bit", "summary-27b-8bit", "summary-122b"]
+        XCTAssertTrue(originalIDs.isSubset(of: Set(catalog.models.map(\.id))))
+        XCTAssertEqual(Set(catalog.models.map(\.id)).count, catalog.models.count)
         for profile in catalog.models {
             try profile.validatePaths()
             XCTAssertEqual(profile.revision.count, 40)
             XCTAssertTrue(profile.files.allSatisfy { $0.sha256.count == 64 && $0.size >= 0 })
             if profile.purpose == .asr || profile.purpose == .summary {
-                XCTAssertGreaterThan(profile.recommendationRank ?? 0, 0)
+                if profile.experimental == true { XCTAssertEqual(profile.recommendationRank, 0) }
+                else { XCTAssertGreaterThan(profile.recommendationRank ?? 0, 0) }
                 XCTAssertGreaterThan(profile.recommendedMemoryGB ?? 0, 0)
                 XCTAssertGreaterThan(profile.workingMemoryGB ?? 0, 0)
             }

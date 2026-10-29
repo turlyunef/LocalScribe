@@ -12,9 +12,12 @@ struct LiveTranscriber {
     let emit: @Sendable (String, String, String?) -> Void
     var metrics: ASRMetricsRecorder? = nil
 
+    var engineFactory = ASREngineFactory()
+
     func perform() async throws -> String {
         emit("progress", "Загружаем модель фонового распознавания…", nil)
-        let recognizer = try await SpeechRecognizer(info: info, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
+        let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
+        let recognizer = try await engineFactory.make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
         let folder = recording.appendingPathComponent("capture")
         let work = run.appendingPathComponent("work/live")
         try Disk.directory(work)
@@ -38,10 +41,10 @@ struct LiveTranscriber {
                 guard fragments == seal.fragments else { throw ScribeError.message("Состав завершённого потока изменился") }
             }
             let available = Int(Double(fragments.reduce(0) { $0 + $1.frames }) / (fragments.first?.sampleRate ?? 1) * 1000)
-            let end = min(offset + 30_000, available)
+            let end = min(offset + ASRCheckpointLayout.livePartMs, available)
             if sealed && offset == available { break }
             // Wait for right context; only a sealed stream may commit a short tail.
-            if end <= offset || (!sealed && available < offset + 31_000) {
+            if end <= offset || (!sealed && available < offset + ASRCheckpointLayout.livePartMs + ASRCheckpointLayout.liveContextMs) {
                 emit("progress", "Фоновое распознавание: ожидаем закрытые фрагменты", nil)
                 try await Task.sleep(for: .seconds(1)); continue
             }
@@ -49,7 +52,7 @@ struct LiveTranscriber {
                 emit("progress", "Распознавание ожидает охлаждения Mac; звук сохраняется", nil)
                 try await Task.sleep(for: .seconds(2)); continue
             }
-            let readStart = max(0, offset - 1000), readEnd = min(available, end + 1000)
+            let readStart = max(0, offset - ASRCheckpointLayout.liveContextMs), readEnd = min(available, end + ASRCheckpointLayout.liveContextMs)
             let inputs = fragments.filter { $0.index * 10_000 < readEnd && $0.index * 10_000 + $0.durationMs > readStart }
             let path = run.appendingPathComponent("live/part-\(parts.count).json")
             if FileManager.default.fileExists(atPath: path.path) {
@@ -63,7 +66,8 @@ struct LiveTranscriber {
                 let audio = work.appendingPathComponent("input.caf"), wave = work.appendingPathComponent("audio.wav")
                 _ = try Media.assembleCaptureParts(inputs.map { folder.appendingPathComponent($0.filename) }, destination: audio)
                 _ = try Media.prepare(audio, to: wave, tools: tools)
-                var segments = try await recognizer.recognize(wave: wave, coreStart: offset, coreEnd: end, durationMs: readEnd, originMs: inputs[0].index * 10_000)
+                var segments = try await recognizer.recognize(ASRRequest(audioURL: wave, originMs: inputs[0].index * 10_000,
+                    availableEndMs: readEnd, coreRange: offset..<end, mode: .closedFragments)).segments
                 for i in segments.indices { segments[i].id = "live-\(parts.count)-seg-\(i)" }
                 // Detect a changed input before committing its recognition.
                 for fragment in inputs where try Disk.hash(folder.appendingPathComponent(fragment.filename)) != fragment.sha256 {

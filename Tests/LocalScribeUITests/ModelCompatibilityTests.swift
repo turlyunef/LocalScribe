@@ -77,6 +77,32 @@ final class ModelCompatibilityTests: XCTestCase {
         XCTAssertTrue(model.modelsReady)
         XCTAssertEqual(model.activeCatalog?.models.first { $0.purpose == .summary }?.id, "summary")
     }
+    func testQwenInstallationIncludesAlignerAndSelectionDoesNotRewriteArchive() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, base, _) = try fixture(root)
+        var catalog = base
+        var qwen = catalog.models[0]
+        qwen.id = "qwen"; qwen.asrBackend = "qwen3"; qwen.alignerID = "aligner"; qwen.tokenizerID = "tokenizer"
+        catalog.models.append(qwen)
+        var aligner = qwen; aligner.id = "aligner"; aligner.role = nil; aligner.alignerID = nil
+        catalog.models.append(aligner)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "LocalScribeTests." + UUID().uuidString))
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults, catalog: catalog, hardware: hardware)
+        let batch = model.profilesToInstall(asrID: qwen.id, summaryID: "summary")
+        XCTAssertEqual(batch.map(\.id), ["tokenizer", "aligner", "qwen", "diarization", "summary"])
+        for profile in catalog.models where profile.id != "summary-heavy" { model.modelLibrary.installed(profile, catalog: catalog) }
+        var manifest = Manifest(sourceType: "import", title: "keep", filename: "a.wav")
+        manifest.state = .queued; try repo.save(manifest)
+        let path = repo.folder(manifest.id).appendingPathComponent("manifest.json"), before = try Data(contentsOf: path)
+        let oldPosition = model.queuePosition(for: manifest.id)
+        model.selectModel(qwen)
+        XCTAssertEqual(try Data(contentsOf: path), before)
+        XCTAssertEqual(model.queuePosition(for: manifest.id), oldPosition)
+        XCTAssertEqual(model.activeCatalog?.models.last?.id, "aligner")
+        XCTAssertFalse(qwen.supportsClosedFragments)
+    }
+
     func testNativeMenuUsesBoldDisabledColorAndAccessibleReasons() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

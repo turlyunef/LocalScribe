@@ -1,6 +1,5 @@
 import Foundation
 import LocalScribeCore
-import WhisperKit
 
 enum ASRCallPhase { case primary, prefixRecovery, gapRecovery, contextReview }
 
@@ -24,6 +23,7 @@ struct ASRWindowLengths: Codable {
     }
 }
 
+/// Historical Whisper diagnostics, not mandatory metrics for other ASR engines.
 struct ASRCallMetrics: Codable {
     var inputs = ASRWindowLengths()
     var completedCalls = 0
@@ -40,29 +40,13 @@ struct ASRCallMetrics: Codable {
     // WhisperKit 1.1.1 assigns a zero-based attempt index, not a total count.
     // Preserve the raw value without presenting it as an exact retry count.
     var sdkReportedFallbacks = 0.0
-
-    mutating func finish(seconds: Double, results: [TranscriptionResult]?) {
-        wallSeconds += seconds
-        guard let results else { failedCalls += 1; return }
-        completedCalls += 1
-        for result in results {
-            let timing = result.timings
-            encoderSeconds += finite(timing.encoding)
-            encoderRuns += finite(timing.totalEncodingRuns)
-            decoderInferenceSeconds += finite(timing.decodingPredictions)
-            decoderTokenLoops += finite(timing.totalDecodingLoops)
-            wordAlignmentSeconds += finite(timing.decodingWordTimestamps)
-            logMelSeconds += finite(timing.logmels)
-            sdkDecodingLoopSeconds += finite(timing.decodingLoop)
-            sdkReportedFallbacks += finite(timing.totalDecodingFallbacks)
-        }
-    }
-
-    private func finite(_ value: Double) -> Double { value.isFinite && value >= 0 ? value : 0 }
 }
 
 struct ASRMetrics: Codable {
     var schemaVersion = 1
+    var backend: String?
+    var backendASRSeconds: Double?
+    var backendAlignmentSeconds: Double?
     var status = "running"
     var startedAt = Date()
     var elapsedSeconds = 0.0
@@ -109,6 +93,14 @@ final class ASRMetricsRecorder {
         save()
     }
 
+    func backend(_ id: String, policy: String) {
+        value.backend = id; value.windowPolicy = policy; save()
+    }
+    func backendCall(seconds: Double, alignment: Bool) {
+        if alignment { value.backendAlignmentSeconds = (value.backendAlignmentSeconds ?? 0) + seconds }
+        else { value.backendASRSeconds = (value.backendASRSeconds ?? 0) + seconds }
+        save()
+    }
     func modelLoaded(seconds: Double) {
         value.modelLoadSeconds += seconds
         save()
@@ -125,8 +117,20 @@ final class ASRMetricsRecorder {
         save()
     }
 
-    func finishCall(seconds: Double, phase: ASRCallPhase, results: [TranscriptionResult]?) {
-        value.update(phase) { $0.finish(seconds: seconds, results: results) }
+    func finishCall(seconds: Double, phase: ASRCallPhase, measurements: ASRCallMetrics?) {
+        value.update(phase) { call in
+            call.wallSeconds += seconds
+            guard let measurements else { call.failedCalls += 1; return }
+            call.completedCalls += 1
+            call.encoderSeconds += measurements.encoderSeconds
+            call.encoderRuns += measurements.encoderRuns
+            call.decoderInferenceSeconds += measurements.decoderInferenceSeconds
+            call.decoderTokenLoops += measurements.decoderTokenLoops
+            call.wordAlignmentSeconds += measurements.wordAlignmentSeconds
+            call.logMelSeconds += measurements.logMelSeconds
+            call.sdkDecodingLoopSeconds += measurements.sdkDecodingLoopSeconds
+            call.sdkReportedFallbacks += measurements.sdkReportedFallbacks
+        }
         save()
     }
 

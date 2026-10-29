@@ -35,6 +35,9 @@ public struct ModelLibrary: Codable, Sendable {
         if role == .asr, let tokenizerID = profile.tokenizerID, installedAt[tokenizerID] == nil {
             throw ScribeError.message("Сначала загрузите токенизатор для этой модели речи")
         }
+        if let alignerID = profile.alignerID, installedAt[alignerID] == nil {
+            throw ScribeError.message("Сначала загрузите модель выравнивания для этой модели речи")
+        }
         selectedByRole[role.rawValue] = profile.id
         reconcile(catalog: catalog, hardware: hardware)
     }
@@ -63,10 +66,15 @@ public struct ModelLibrary: Codable, Sendable {
         }
     }
     public func activeCatalog(from catalog: ModelCatalog) -> ModelCatalog? {
-        let profiles = ModelRole.allCases.compactMap { role in
+        var profiles = ModelRole.allCases.compactMap { role in
             catalog.models.first { $0.purpose == role && $0.id == selectedByRole[role.rawValue] && isInstalled($0) }
         }
         guard profiles.count == ModelRole.allCases.count else { return nil }
+        if let id = profiles.first(where: { $0.purpose == .asr })?.alignerID {
+            guard let aligner = catalog.models.first(where: { $0.id == id && $0.purpose == nil }),
+                  isInstalled(aligner) else { return nil }
+            profiles.append(aligner)
+        }
         return ModelCatalog(models: profiles)
     }
 }

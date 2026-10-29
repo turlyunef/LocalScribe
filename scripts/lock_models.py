@@ -87,4 +87,7 @@ for key, role, name, repo, prefix, license, ram, working, tokenizer in profiles:
     if tokenizer: model['tokenizerID'] = tokenizer
     catalog['models'].append(model)
     print(key, model['revision'], len(model['files']), sum(f['size'] for f in model['files']), flush=True)
+# Keep separately reviewed backend profiles and their immutable dependencies.
+known = {m['id'] for m in catalog['models']}
+catalog['models'].extend(model for key, model in existing.items() if key not in known)
 OUTPUT.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + '\n')

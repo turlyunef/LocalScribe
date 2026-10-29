@@ -14,7 +14,7 @@ import LocalScribeSpeakerKit
     }
     static func main() async {
         if CommandLine.arguments.contains("--versions") {
-            print("LocalScribeWorker protocol=1 ArgmaxOSS=1.1.1 SpeakerKitPatch=tail-reflection1-inference-errors1 MLXSwiftLM=2.31.3 macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)")
+            print("LocalScribeWorker protocol=1 ArgmaxOSS=1.1.1 SpeakerKitPatch=tail-reflection1-inference-errors1 MLXSwiftLM=2.31.3 QwenRuntime=0.1.3-acoustic6fd9386 VibeVoiceRuntime=6fd9386 macOS=\(ProcessInfo.processInfo.operatingSystemVersionString)")
             return
         }
         // run() returns only after its processing context and monitors are gone.

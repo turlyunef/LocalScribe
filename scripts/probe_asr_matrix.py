@@ -370,7 +370,10 @@ def repair_replay(args, output):
     shutil.copytree(source / "E", output / "E")
     hashes = {name: digest(REPO / name) for name in [
         "Sources/LocalScribeWorker/ASRWordRepair.swift", "Sources/LocalScribeWorker/ASRContextReview.swift",
-        "Sources/LocalScribeWorker/SpeechRecognizer.swift", "Tests/LocalScribeDiarizationTests/ASRMatrixProbeTests.swift",
+        "Sources/LocalScribeWorker/SpeechRecognizer.swift",
+        "Sources/LocalScribeWorker/WhisperASREngine.swift", "Sources/LocalScribeWorker/WhisperASRWindowing.swift",
+        "Sources/LocalScribeWorker/WhisperASRMetrics.swift", "Sources/LocalScribeWorker/ASREngine.swift",
+        "Sources/LocalScribeCore/ASR.swift", "Tests/LocalScribeDiarizationTests/WhisperTestSupport.swift", "Tests/LocalScribeDiarizationTests/ASRMatrixProbeTests.swift",
         "Tests/LocalScribeDiarizationTests/ASRWordRepairTests.swift", "scripts/probe_asr_matrix.py", "Package.swift", "Package.resolved"]}
     for name in sorted((REPO / "Sources/LocalScribeCore").glob("*.swift")):
         hashes[str(name.relative_to(REPO))] = digest(name)
@@ -722,7 +725,10 @@ def main():
         raise ValueError("Original SHA/completeness does not match the frozen run")
     output.mkdir(parents=True, mode=0o700)
     hashes = {str(p.relative_to(REPO)): digest(p) for p in sorted((REPO / "Sources/LocalScribeCore").glob("*.swift"))}
-    for name in ["Sources/LocalScribeWorker/SpeechRecognizer.swift", "Sources/LocalScribeWorker/ASRMetrics.swift",
+    for name in ["Sources/LocalScribeWorker/SpeechRecognizer.swift",
+        "Sources/LocalScribeWorker/WhisperASREngine.swift", "Sources/LocalScribeWorker/WhisperASRWindowing.swift",
+        "Sources/LocalScribeWorker/WhisperASRMetrics.swift", "Sources/LocalScribeWorker/ASREngine.swift",
+        "Sources/LocalScribeCore/ASR.swift", "Tests/LocalScribeDiarizationTests/WhisperTestSupport.swift", "Sources/LocalScribeWorker/ASRMetrics.swift",
                  "Sources/LocalScribeWorker/ASRContextReview.swift",
                  "Sources/LocalScribeWorker/ASRWordRepair.swift",
                  "Tests/LocalScribeDiarizationTests/ASRMatrixProbeTests.swift", "Package.swift", "Package.resolved", "scripts/probe_asr_matrix.py"]:

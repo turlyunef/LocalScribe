@@ -1,6 +1,5 @@
 import Foundation
 import LocalScribeCore
-import WhisperKit
 import LocalScribeSpeakerKit
 import ArgmaxCore
 
@@ -9,12 +8,13 @@ actor Pipeline {
     let emit: @Sendable (String, String, String?) -> Void
     let recording: URL; let run: URL; let models: URL; let tools: URL
     let manifest: Manifest; let info: RunInfo
+    let engineFactory: ASREngineFactory
     let hardware: ModelHardware
     var wave: URL { run.appendingPathComponent("work/audio.wav") }
     private func modelFolder(_ role: ModelRole) throws -> URL { models.appendingPathComponent(try info.modelID(for: role)) }
-    init(command: WorkerCommand, hardware: ModelHardware = .current, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
+    init(command: WorkerCommand, hardware: ModelHardware = .current, engineFactory: ASREngineFactory = .init(), emit: @escaping @Sendable (String, String, String?) -> Void) throws {
         guard UUID(uuidString: command.jobId) != nil, UUID(uuidString: command.runId) != nil else { throw ScribeError.message("Некорректный идентификатор задания") }
-        self.command = command; self.emit = emit; self.hardware = hardware
+        self.engineFactory = engineFactory; self.command = command; self.emit = emit; self.hardware = hardware
         recording = URL(fileURLWithPath: command.recordingPath); run = recording.appendingPathComponent("runs/\(command.runId)")
         models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: command.toolsPath)
         manifest = try Disk.read(Manifest.self, at: recording.appendingPathComponent("manifest.json"))
@@ -28,7 +28,7 @@ actor Pipeline {
             let capture = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
             guard command.stage == .transcribing, info.liveCapture == true, info.sourceHash == "capture:" + info.id,
                   manifest.pendingRunId == info.id, capture.id == info.id, capture.fingerprint == info.fingerprint,
-                  capture.modelIDs == info.modelIDs, info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else { throw ScribeError.message("Некорректное задание фонового распознавания") }
+                  capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs, info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else { throw ScribeError.message("Некорректное задание фонового распознавания") }
         } else {
             guard info.sourceHash == manifest.sha256, manifest.sourceComplete, manifest.durationMs > 0,
                   try Disk.hash(recording.appendingPathComponent(manifest.originalRelativePath)) == info.sourceHash else { throw ScribeError.message("Исходник изменился или не завершён") }
@@ -53,8 +53,16 @@ actor Pipeline {
             guard let profile = pinned.models.first(where: { $0.purpose == role }) else { throw ScribeError.message("Модель этапа отсутствует") }
             try hardware.requireCompatibility(for: profile)
         }
+        if command.stage == .preparingAudio || command.stage == .transcribing {
+            let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
+            let pinned = try catalog.pinned(to: info)
+            if pinned.models.first(where: { $0.purpose == .asr })?.resolvedASRBackend == "vibevoice-asr" {
+                guard command.liveCapture != true else { throw ScribeError.message("VibeVoice поддерживает только готовые записи") }
+                try VibeVoiceASREngine.requireDuration(manifest.durationMs)
+            }
+        }
         if command.liveCapture == true {
-            return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit, metrics: asrMetrics).perform()
+            return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit, metrics: asrMetrics, engineFactory: engineFactory).perform()
         }
         switch command.stage {
         case .preparingAudio:
@@ -82,11 +90,13 @@ actor Pipeline {
         return transcript
     }
     func transcribe(metrics: ASRMetricsRecorder? = nil) async throws -> String {
-        let recognizer = try await SpeechRecognizer(info: info, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
-        let count = max(1, Int(ceil(Double(manifest.durationMs) / 300_000)))
+        let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
+        let recognizer = try await engineFactory.make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
+        let partMs = ASRCheckpointLayout.offlinePartMs
+        let count = max(1, Int(ceil(Double(manifest.durationMs) / Double(partMs))))
         var parts: [ASRPart] = []
         for index in 0..<count {
-            let coreStart = index * 300_000, coreEnd = min(manifest.durationMs, (index + 1) * 300_000)
+            let coreStart = index * partMs, coreEnd = min(manifest.durationMs, (index + 1) * partMs)
             let path = run.appendingPathComponent("asr/part-\(index).json")
             if let saved = try? Disk.read(ASRPart.self, at: path), saved.fingerprint == info.fingerprint, saved.index == index, saved.startMs == coreStart, saved.endMs == coreEnd {
                 try Transcript(fingerprint: info.fingerprint, diarized: false, segments: saved.segments).validate(durationMs: manifest.durationMs)
@@ -94,7 +104,8 @@ actor Pipeline {
                 parts.append(saved); continue
             }
             emit("progress", "Распознаём речь — часть \(index + 1) из \(count)", nil)
-            var segments = try await recognizer.recognize(wave: wave, coreStart: coreStart, coreEnd: coreEnd, durationMs: manifest.durationMs)
+            var segments = try await recognizer.recognize(ASRRequest(audioURL: wave, availableEndMs: manifest.durationMs,
+                coreRange: coreStart..<coreEnd, mode: .offline)).segments
             for i in segments.indices { segments[i].id = "part-\(index)-seg-\(i)" }
             let part = ASRPart(fingerprint: info.fingerprint, index: index, startMs: coreStart, endMs: coreEnd, segments: segments)
             try Disk.write(part, to: path); parts.append(part); emit("checkpoint", "", "asr/part-\(index).json")

@@ -87,7 +87,15 @@ public struct RecordingRepository: Sendable {
         return manifest
     }
     public func beginRun(_ manifest: inout Manifest, catalog: ModelCatalog, summaryLanguage: String? = nil, summaryOnly: Bool = false, liveCapture: Bool = false) throws -> RunInfo {
+        if !summaryOnly, manifest.sourceComplete,
+           let maximum = catalog.models.first(where: { $0.purpose == .asr })?.maximumRecordingMs,
+           manifest.durationMs > maximum {
+            throw ScribeError.message("Выбранный профиль поддерживает записи до \(maximum / 60_000) минут. Запись не обрезана; выберите другой профиль.")
+        }
         if liveCapture {
+            guard catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments != false else {
+                throw ScribeError.message("Выбранная модель поддерживает только обработку готовой записи")
+            }
             guard !summaryOnly, !manifest.sourceComplete, manifest.state == .recording, manifest.sourceType == "microphone" else {
                 throw ScribeError.message("Фоновое распознавание требует незавершённой записи микрофона")
             }
@@ -100,6 +108,10 @@ public struct RecordingRepository: Sendable {
             modelIDs[role.rawValue] = profile.id
         }
         info.modelIDs = modelIDs
+        if let aligner = catalog.models.first(where: { $0.purpose == .asr })?.alignerID {
+            info.auxiliaryModelIDs = ["aligner": aligner]
+            _ = try catalog.pinned(to: info)
+        }
         if liveCapture { info.liveCapture = true; info.sourceHash = "capture:" + info.id }
         info.transcriptSourceRunID = summaryOnly ? manifest.activeRunId : nil
         // Verify provenance before creating any files or changing the pending run.

@@ -22,6 +22,16 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     public var recommendedMemoryGB: Int?
     public var workingMemoryGB: Int?
     public var tokenizerID: String?
+    /// Absent in legacy catalogs, which use Whisper.
+    public var asrBackend: String?
+    public var resolvedASRBackend: String { asrBackend ?? "whisper" }
+    /// Optional dependency; never a fifth mandatory legacy role.
+    public var alignerID: String?
+    public var asrPolicy: String?
+    public var profileDescription: String?
+    public var experimental: Bool?
+    public var maximumRecordingMs: Int?
+    public var supportsClosedFragments: Bool { purpose == .asr && resolvedASRBackend == "whisper" }
     public var recommendationRank: Int?
     public var purpose: ModelRole? { role ?? ModelRole(rawValue: id) }
     public var displayName: String { name ?? repository.components(separatedBy: "/").last ?? id }
@@ -50,7 +60,17 @@ public struct ModelCatalog: Codable, Sendable {
         // Preserve checkpoints made with the original four profiles. Variants in the
         // same repository can share a revision, so their identity must also be hashed.
         let legacy = models.allSatisfy { $0.id == $0.purpose?.rawValue }
-        return Disk.fingerprint(models.map { legacy ? $0.revision : "\($0.id):\($0.revision):\($0.files.map(\.sha256).joined())" }.joined(separator: ":"))
+        let identities = models.map { profile in
+            let identity = legacy ? profile.revision : "\(profile.id):\(profile.revision):\(profile.files.map(\.sha256).joined())"
+            // An explicit Whisper annotation is identical to the historical default.
+            // Other backends cannot reuse the same checkpoints, even with equal files.
+            var result = profile.purpose == .asr && profile.resolvedASRBackend != "whisper"
+                ? identity + ":asr-backend:" + profile.resolvedASRBackend : identity
+            if let aligner = profile.alignerID { result += ":aligner:" + aligner }
+            if let policy = profile.asrPolicy { result += ":asr-policy:" + policy }
+            return result
+        }
+        return Disk.fingerprint(identities.joined(separator: ":"))
     }
     public init(schemaVersion: Int = 1, models: [ModelProfile]) { self.schemaVersion = schemaVersion; self.models = models }
     /// Resolve the run's frozen selection, never the preferences for new jobs.
@@ -60,11 +80,27 @@ public struct ModelCatalog: Codable, Sendable {
         if let ids = info.modelIDs, Set(ids.keys) != Set(ModelRole.allCases.map(\.rawValue)) {
             throw ScribeError.message("Некорректный закреплённый комплект моделей")
         }
-        let profiles = try ModelRole.allCases.map { role in
+        var profiles = try ModelRole.allCases.map { role in
             let id = try info.modelID(for: role)
             let matches = models.filter { $0.id == id && $0.purpose == role }
             guard matches.count == 1 else { throw ScribeError.message("Закреплённая модель \(id) недоступна в каталоге") }
             return matches[0]
+        }
+        if let asr = profiles.first(where: { $0.purpose == .asr }), asr.resolvedASRBackend != "whisper",
+           let tokenizerID = asr.tokenizerID,
+           profiles.first(where: { $0.purpose == .tokenizer })?.id != tokenizerID {
+            throw ScribeError.message("Закреплённый токенизатор не соответствует модели распознавания")
+        }
+        if let alignerID = profiles.first(where: { $0.purpose == .asr })?.alignerID {
+            guard info.auxiliaryModelIDs == ["aligner": alignerID], ModelProfile.safeComponent(alignerID),
+                  !profiles.contains(where: { $0.id == alignerID }) else {
+                throw ScribeError.message("Не совпала закреплённая модель выравнивания")
+            }
+            let matches = models.filter { $0.id == alignerID && $0.purpose == nil && $0.alignerID == nil }
+            guard matches.count == 1 else { throw ScribeError.message("Закреплённая модель выравнивания недоступна") }
+            profiles.append(matches[0])
+        } else if info.auxiliaryModelIDs?.isEmpty == false {
+            throw ScribeError.message("Лишние зависимости в закреплённом комплекте")
         }
         let pinned = ModelCatalog(models: profiles)
         guard pinned.fingerprint == info.profileHash else {

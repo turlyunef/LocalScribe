@@ -49,6 +49,9 @@ def prepare(root, previous):
                 targetStartMs=target[0], targetEndMs=target[1]))
     matrix.write(root / "retry-plan.json", retries)
     paths = ["Sources/LocalScribeCore/Analysis.swift", "Sources/LocalScribeWorker/SpeechRecognizer.swift",
+        "Sources/LocalScribeWorker/WhisperASREngine.swift", "Sources/LocalScribeWorker/WhisperASRWindowing.swift",
+        "Sources/LocalScribeWorker/WhisperASRMetrics.swift", "Sources/LocalScribeWorker/ASREngine.swift",
+        "Sources/LocalScribeCore/ASR.swift", "Tests/LocalScribeDiarizationTests/WhisperTestSupport.swift",
         "Sources/LocalScribeWorker/LiveTranscriber.swift", "Sources/LocalScribeWorker/ASRContextReview.swift",
         "Sources/LocalScribeWorker/ASRWordRepair.swift", "Sources/LocalScribeCore/Contracts.swift",
         "Tests/LocalScribeDiarizationTests/ASRBoundaryProbeTests.swift", "scripts/probe_asr_boundaries.py",

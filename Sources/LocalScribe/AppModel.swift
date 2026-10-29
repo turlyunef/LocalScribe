@@ -287,7 +287,11 @@ import LocalScribeCore
               let summary = catalog.models.first(where: { $0.id == summaryID && $0.purpose == .summary }),
               let tokenizer = catalog.models.first(where: { $0.id == (asr.tokenizerID ?? "tokenizer") && $0.purpose == .tokenizer }),
               let diarization = catalog.models.first(where: { $0.id == "diarization" && $0.purpose == .diarization }) else { return [] }
-        let profiles = [tokenizer, asr, diarization, summary]
+        var profiles = [tokenizer, asr, diarization, summary]
+        if let id = asr.alignerID {
+            guard let aligner = catalog.models.first(where: { $0.id == id && $0.purpose == nil }) else { return [] }
+            profiles.insert(aligner, at: 1)
+        }
         guard profiles.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return [] }
         return profiles.filter { !modelLibrary.isInstalled($0) }
     }
@@ -472,7 +476,8 @@ import LocalScribeCore
             recorder = capture; recordingID = m.id; selection = m.id; elapsed = 0; soundNotice = nil
             supervisor.recordingActive = true
             // Model selection is frozen now, even if this job waits behind older work.
-            if backgroundRecognition, modelsReady, let catalog = activeCatalog {
+            if backgroundRecognition, modelsReady, let catalog = activeCatalog,
+               catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true {
                 do {
                     m = try await archive.beginRun(m.id, catalog: catalog, liveCapture: true)
                     await enqueueCapture(m.id)

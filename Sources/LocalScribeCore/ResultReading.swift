@@ -27,7 +27,7 @@ extension RecordingRepository {
             let capture = try Disk.read(RunInfo.self, at: path.appendingPathComponent("capture-run.json"))
             try validateResultRun(capture, id: selected)
             guard capture.liveCapture == true, capture.sourceHash == info.sourceHash,
-                  capture.fingerprint == info.fingerprint, capture.modelIDs == info.modelIDs else { throw invalidResult() }
+                  capture.fingerprint == info.fingerprint, capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs else { throw invalidResult() }
         } else {
             guard manifest.sourceComplete, manifest.durationMs > 0,
                   !manifest.sha256.isEmpty, info.sourceHash == manifest.sha256 else { throw invalidResult() }

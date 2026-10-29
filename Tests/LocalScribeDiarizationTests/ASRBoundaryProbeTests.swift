@@ -47,8 +47,8 @@ final class ASRBoundaryProbeTests: XCTestCase {
                 var start = outer
                 while start < outerEnd {
                     let samples = try Media.samples(wave, start: Double(start) / 1000,
-                        duration: Double(min(outerEnd - start, Analysis.asrCoreWindowMs)) / 1000)
-                    let end = min(outerEnd, start + max(1, Analysis.nextASRWindowLength(samples) / 16))
+                        duration: Double(min(outerEnd - start, WhisperASRWindowing.asrCoreWindowMs)) / 1000)
+                    let end = min(outerEnd, start + max(1, WhisperASRWindowing.nextASRWindowLength(samples) / 16))
                     if source.intervals.contains(where: { $0.startMs < end && start < $0.endMs }) {
                         windows.append(Window(sourceID: source.id, startMs: start, endMs: end,
                             outerStartMs: outer, outerEndMs: outerEnd,
@@ -135,20 +135,20 @@ final class ASRBoundaryProbeTests: XCTestCase {
             recorder.modelLoaded(seconds: ProcessInfo.processInfo.systemUptime - load)
             if label == "retries" {
                 let retries = try Disk.read([Retry].self, at: root.appendingPathComponent("retry-plan.json"))
-                let mapper = SpeechRecognizer { _, _ in [] }
+                let mapper = WhisperASREngine { _, _ in [] }
                 for retry in retries {
                     let source = try XCTUnwrap(input.sources.first { $0.id == retry.sourceID })
                     guard retry.startMs >= 0, retry.endMs <= source.durationMs,
                           retry.endMs - retry.startMs <= 30000 else { throw ScribeError.message("Неверный контекст повтора") }
                     let samples = try Media.samples(URL(fileURLWithPath: source.wavePath), start: Double(retry.startMs) / 1000,
                         duration: Double(retry.endMs - retry.startMs) / 1000)
-                    let recognizer = SpeechRecognizer(metrics: recorder) { audio, options in
+                    let recognizer = WhisperASREngine(metrics: recorder) { audio, options in
                         try await kit.transcribe(audioArray: audio, decodeOptions: options)
                     }
-                    let raw = try await recognizer.decode(samples, options: SpeechRecognizer.decodingOptions, phase: .contextReview)
+                    let raw = try await recognizer.decode(samples, options: WhisperASREngine.decodingOptions, phase: .contextReview)
                     let segments = mapper.mappedSegments(raw, readStart: retry.startMs, start: retry.targetStartMs,
                         end: retry.targetEndMs, durationMs: source.durationMs)
-                    try Disk.write(Call(startMs: retry.startMs, endMs: retry.endMs, options: SpeechRecognizer.decodingOptions, results: raw),
+                    try Disk.write(Call(startMs: retry.startMs, endMs: retry.endMs, options: WhisperASREngine.decodingOptions, results: raw),
                         to: destination.appendingPathComponent("raw/\(retry.id).json"))
                     try Disk.write(segments, to: destination.appendingPathComponent("mapped/\(retry.id).json"))
                 }
@@ -176,7 +176,7 @@ final class ASRBoundaryProbeTests: XCTestCase {
                     let warnings = WarningCounter()
                     let primaryStart = max(window.originMs, window.startMs - 1000)
                     let primaryEnd = min(window.availableEndMs, window.endMs + 1000)
-                    let recognizer = SpeechRecognizer(metrics: recorder, warning: { _ in warnings.increment() }) { samples, options in
+                    let recognizer = WhisperASREngine(metrics: recorder, warning: { _ in warnings.increment() }) { samples, options in
                         // One primary plus at most one prefix. No recursive retries.
                         XCTAssertLessThan(calls.count, 2)
                         let end = calls.isEmpty ? primaryEnd : min(window.availableEndMs, primaryStart + 30000)

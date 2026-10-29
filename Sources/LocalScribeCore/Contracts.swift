@@ -94,9 +94,10 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public var pipelineVersion = "1.0.0-audio2-asr8-live1-diarization4-summary16"
+    public var pipelineVersion = "1.0.0-audio2-asr9-live1-diarization4-summary16"
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
+    public var auxiliaryModelIDs: [String: String]?
     public var transcriptSourceRunID: String?
     /// Nil identifies archives written before explicit result provenance.
     public var manualEdits: Bool? = false

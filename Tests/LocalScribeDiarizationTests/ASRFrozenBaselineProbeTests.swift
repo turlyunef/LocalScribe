@@ -69,8 +69,8 @@ final class ASRFrozenBaselineProbeTests: XCTestCase {
             while offset < part.endMs {
                 try Task.checkCancellation()
                 let planning = try Media.samples(wave, start: Double(offset) / 1000,
-                    duration: Double(min(part.endMs - offset, Analysis.asrCoreWindowMs)) / 1000)
-                let end = min(part.endMs, offset + max(1, Analysis.nextASRWindowLength(planning, policy: .latePause) / 16))
+                    duration: Double(min(part.endMs - offset, WhisperASRWindowing.asrCoreWindowMs)) / 1000)
+                let end = min(part.endMs, offset + max(1, WhisperASRWindowing.nextASRWindowLength(planning, policy: .latePause) / 16))
                 let readStart = max(0, offset - 1000), readEnd = min(duration, end + 1000)
                 let samples = try Media.samples(wave, start: Double(readStart) / 1000, duration: Double(readEnd - readStart) / 1000)
                 let silent = samples.reduce(0.0) { $0 + Double($1 * $1) } / Double(max(1, samples.count)) <= 1e-12
@@ -200,7 +200,7 @@ final class ASRFrozenBaselineProbeTests: XCTestCase {
                   sameLengths(lengths, baselineMetrics.plannedWindows), sameLengths(primaryInputs, baselineMetrics.primary.inputs),
                   plan.windows.filter(\.silent).count == baselineMetrics.silentWindows,
                   try JSONSerialization.jsonObject(with: Data(contentsOf: output.appendingPathComponent("C/decoding-options.json"))) as? NSDictionary
-                    == JSONSerialization.jsonObject(with: JSONEncoder().encode(SpeechRecognizer.decodingOptions)) as? NSDictionary else {
+                    == JSONSerialization.jsonObject(with: JSONEncoder().encode(WhisperASREngine.decodingOptions)) as? NSDictionary else {
                 throw ScribeError.message("План или декодер не соответствует C")
             }
             let planPath = output.appendingPathComponent("frozen-plan.json")
@@ -215,8 +215,8 @@ final class ASRFrozenBaselineProbeTests: XCTestCase {
             let before = ProcessInfo.processInfo.thermalState.rawValue
             let recorder = ASRMetricsRecorder(run: destination, liveCapture: false, windowPolicy: "frozen-C-selective-context")
             metrics = recorder
-            try Disk.write(SpeechRecognizer.decodingOptions, to: destination.appendingPathComponent("decoding-options.json"))
-            let recognizer = try await SpeechRecognizer(info: input.run, models: models, metrics: recorder, warning: { _ in })
+            try Disk.write(WhisperASREngine.decodingOptions, to: destination.appendingPathComponent("decoding-options.json"))
+            let recognizer = try await WhisperASREngine(info: input.run, models: models, metrics: recorder, warning: { _ in })
             var reviewedWindows = 0, edits = 0
             for window in plan.windows where window.selected {
                 try Task.checkCancellation()
@@ -233,7 +233,7 @@ final class ASRFrozenBaselineProbeTests: XCTestCase {
                     } else {
                         let samples = try Media.samples(wave, start: Double(request.contextStartMs) / 1000,
                             duration: Double(request.contextEndMs - request.contextStartMs) / 1000)
-                        results = try await recognizer.decode(samples, options: SpeechRecognizer.decodingOptions, phase: .contextReview)
+                        results = try await recognizer.decode(samples, options: WhisperASREngine.decodingOptions, phase: .contextReview)
                         try Task.checkCancellation()
                         cached = (request, results)
                     }

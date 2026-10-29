@@ -47,9 +47,15 @@ final class ASRModelFixtureTests: XCTestCase {
 
     private func measure(wave: URL, models: URL, run: URL, duration: Int) async throws -> (Transcript, ASRMetrics) {
         let metrics = ASRMetricsRecorder(run: run, liveCapture: false)
-        let info = RunInfo(sourceHash: "technical-fixture", profileHash: "technical-fixture")
-        let recognizer = try await SpeechRecognizer(info: info, models: models, metrics: metrics, warning: { _ in })
-        let segments = try await recognizer.recognize(wave: wave, coreStart: 0, coreEnd: duration, durationMs: duration)
+        let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let catalog = try Disk.read(ModelCatalog.self, at: repository.appendingPathComponent("Resources/models.lock.json"))
+        let legacy = ModelCatalog(models: try ModelRole.allCases.map { role in
+            try XCTUnwrap(catalog.models.first { $0.id == role.rawValue })
+        })
+        let info = RunInfo(sourceHash: "technical-fixture", profileHash: legacy.fingerprint)
+        let recognizer = try await ASREngineFactory().make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { _ in })
+        let segments = try await recognizer.recognize(ASRRequest(audioURL: wave, availableEndMs: duration,
+            coreRange: 0..<duration, mode: .offline)).segments
         metrics.finish(status: "completed")
         // Production assigns stable unique IDs at the part boundary.
         var identified = segments

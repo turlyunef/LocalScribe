@@ -59,8 +59,8 @@ public struct LiveASRPart: Codable, Sendable {
         guard availableMs > 0, availableMs <= 10_800_000, startMs >= 0, startMs < availableMs,
               index >= 0, index <= 360, schemaVersion == 1, part.schemaVersion == 1, part.fingerprint == info.fingerprint,
               part.index == index, part.startMs == startMs, part.endMs > startMs,
-              part.endMs <= min(startMs + 30_000, availableMs), readStartMs == max(0, startMs - 1000),
-              readEndMs >= part.endMs, readEndMs <= min(part.endMs + 1000, availableMs),
+              part.endMs <= min(startMs + ASRCheckpointLayout.livePartMs, availableMs), readStartMs == max(0, startMs - ASRCheckpointLayout.liveContextMs),
+              readEndMs >= part.endMs, readEndMs <= min(part.endMs + ASRCheckpointLayout.liveContextMs, availableMs),
               fragments == current else { throw ScribeError.message("Контрольная точка фонового распознавания не соответствует звуку") }
         try Transcript(fingerprint: info.fingerprint, diarized: false, segments: part.segments).validate(durationMs: availableMs)
     }

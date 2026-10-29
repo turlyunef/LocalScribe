@@ -122,7 +122,7 @@ final class ASRMatrixProbeTests: XCTestCase {
               let variant = env["LOCALSCRIBE_ASR_MATRIX_VARIANT"] else {
             throw XCTSkip("Run scripts/probe_asr_matrix.py with explicit local source and model paths")
         }
-        let policies: [String: ASRRecognitionPolicy] = [
+        let policies: [String: WhisperRecognitionPolicy] = [
             "A": .production,
             "B": .init(window: .firstPause, recoverInteriorGaps: true),
             "C": .init(window: .latePause, recoverInteriorGaps: false),
@@ -155,9 +155,9 @@ final class ASRMatrixProbeTests: XCTestCase {
         let before = ProcessInfo.processInfo.thermalState.rawValue
         let metrics = ASRMetricsRecorder(run: output, liveCapture: false, windowPolicy: policy.metricsName)
         do {
-            try Disk.write(SpeechRecognizer.decodingOptions, to: output.appendingPathComponent("decoding-options.json"))
+            try Disk.write(WhisperASREngine.decodingOptions, to: output.appendingPathComponent("decoding-options.json"))
             try Disk.write(["stage": "loading-model"], to: output.appendingPathComponent("probe-state.json"))
-            let recognizer = try await SpeechRecognizer(info: input.run, models: models, metrics: metrics, policy: policy,
+            let recognizer = try await WhisperASREngine(info: input.run, models: models, metrics: metrics, policy: policy,
                 contextReview: { batch in
                     try Disk.write(batch, to: output.appendingPathComponent("context-reviews/window-\(batch.coreStartMs).json"))
                 }, warning: { _ in })

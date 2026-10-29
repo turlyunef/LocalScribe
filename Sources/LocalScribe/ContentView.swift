@@ -317,6 +317,21 @@ struct ModelSettings: View {
                 modelPicker("Распознавание", role: .asr, selection: $asrID)
                 modelPicker("Итоги", role: .summary, selection: $summaryID)
                 ForEach(profiles.filter { $0.id == asrID || $0.id == summaryID }) { profile in
+                    if profile.experimental == true {
+                        Text("Экспериментальный профиль · качество на встречах ещё не принято")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let ram = profile.recommendedMemoryGB, let working = profile.workingMemoryGB {
+                        Text("RAM: от \(ram) ГБ · рабочий объём этапа: \(working) ГБ")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let description = profile.profileDescription {
+                        Text(description).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if profile.purpose == .asr {
+                        Text(profile.supportsClosedFragments ? "Фоновое распознавание: доступно" : "Только готовые записи; фоновое распознавание недоступно")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                     if let warning = model.hardware.warning(for: profile) {
                         Label(warning, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
                     }
@@ -325,7 +340,7 @@ struct ModelSettings: View {
                     Button("Загрузить выбранные") { model.installModels(downloads) }.buttonStyle(.borderedProminent).disabled(downloads.isEmpty).help("Скачать выбранные модели и необходимые зависимости")
                     Text(!downloadSelectionCompatible ? "Нет совместимого комплекта" : downloads.isEmpty ? "Уже установлены" : "Всего: \(size(downloads.reduce(0) { $0 + $1.bytes }))").font(.caption).foregroundStyle(.secondary)
                 }
-                Text("Нужные токенизатор и модель участников загрузятся автоматически. После успешной установки новая модель станет выбранной; ранее загруженные останутся на диске.")
+                Text("Нужные токенизатор, выравниватель и модель участников загрузятся автоматически. После успешной установки новая модель станет выбранной; ранее загруженные останутся на диске.")
                     .font(.caption).foregroundStyle(.secondary)
                 ModelPopup(options: profiles.map(menuOption), selection: .constant(""), prompt: "Импортировать из папки…", imports: true) { id in
                     if let profile = profiles.first(where: { $0.id == id }) { model.importModel(profile) }
@@ -333,6 +348,9 @@ struct ModelSettings: View {
                     .accessibilityIdentifier("settings.models.import")
             }.disabled(!model.canManageModels)
             Section("Загруженные модели") {
+                ForEach(profiles.filter { $0.purpose == nil && model.modelLibrary.isInstalled($0) }) { profile in
+                    installedRow(profile)
+                }
                 if model.modelLibrary.installedAt.isEmpty { Text("Пока нет загруженных моделей").foregroundStyle(.secondary) }
                 ForEach(ModelRole.allCases, id: \.self) { role in
                     let installed = profiles.filter { $0.purpose == role && model.modelLibrary.isInstalled($0) }
@@ -343,6 +361,10 @@ struct ModelSettings: View {
                 }
             }
             Section {
+                if let profile = model.activeCatalog?.models.first(where: { $0.purpose == .asr }), !profile.supportsClosedFragments {
+                    Text("Выбранный профиль обрабатывает запись после остановки микрофона. Фоновое распознавание для него пока недоступно.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
                 Toggle("Распознавать во время записи", isOn: $model.backgroundRecognition)
                     .toggleStyle(.checkbox)
                     .disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording)

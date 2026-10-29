@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/Blaizzy/mlx-audio-swift",
+  "revision": "6fd938669e45412f5c35e011e7086ecd20397dbd",
+  "files": {
+    "Sources/MLXAudioSTT/Models/VibeVoiceASR/VibeVoiceAudio.swift": "ff8f6aa4ce40080f34bb67884d44bada9ce8dd297d1a5899ab2a4391215c7c47",
+    "Sources/MLXAudioSTT/Models/VibeVoiceASR/VibeVoiceConfig.swift": "c8a5d8aa701b49a364a34cd2c0713da351faf8d468740f188fcdb882b74fc0b3",
+    "Sources/MLXAudioSTT/Models/VibeVoiceASR/VibeVoiceModel.swift": "73d0e6c4d5c9e6c0ef13f4a9b7a90cf1163af989e28cb19f1da5252378a321ff",
+    "Sources/MLXAudioCore/LM/Models/Qwen2.swift": "375703c86e1d69a75d303053b6cac136d95fc6c547eaa8a39932f7ee2276e65d"
+  }
+}

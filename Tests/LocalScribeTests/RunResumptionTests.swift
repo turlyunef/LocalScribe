@@ -42,6 +42,24 @@ final class RunResumptionTests: XCTestCase {
         }
     }
 
+    func testExplicitWhisperBackendResumesSameRunWithoutRewritingStoredFiles() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, catalog, manifest, info) = try fixture(root)
+        let checkpoint = repo.run(manifest.id, info.id).appendingPathComponent("asr/part-0.json")
+        try Disk.write(ASRPart(fingerprint: info.fingerprint, index: 0, startMs: 0, endMs: 1000, segments: []), to: checkpoint)
+        let files = [repo.folder(manifest.id).appendingPathComponent("manifest.json"),
+                     repo.run(manifest.id, info.id).appendingPathComponent("run.json"), checkpoint]
+        let before = try files.map { try Data(contentsOf: $0) }
+        var annotated = catalog
+        annotated.models[0].asrBackend = "whisper"
+        XCTAssertEqual(try repo.resumeRun(manifest.id, catalog: annotated).id, info.id)
+        XCTAssertEqual(try files.map { try Data(contentsOf: $0) }, before)
+        annotated.models[0].asrBackend = "future-engine"
+        XCTAssertThrowsError(try repo.resumeRun(manifest.id, catalog: annotated))
+        XCTAssertEqual(try files.map { try Data(contentsOf: $0) }, before)
+    }
+
     func testMissingProfileAndSameSizeCorruptionAreRejected() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -120,7 +138,7 @@ final class RunResumptionTests: XCTestCase {
         }
     }
 
-    func testRejectedASR7ResumeAndFailedASR8ReprocessingKeepReadableActiveResult() throws {
+    func testRejectedASR7ResumeAndFailedCurrentReprocessingKeepReadableActiveResult() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (repo, catalog, initial, current) = try fixture(root)
@@ -164,7 +182,7 @@ final class RunResumptionTests: XCTestCase {
         XCTAssertEqual(try repo.results(repo.load(manifest.id)).1, summary)
 
         let fresh = try repo.beginRun(&manifest, catalog: catalog)
-        XCTAssertEqual(fresh.pipelineVersion, "1.0.0-audio2-asr8-live1-diarization4-summary16")
+        XCTAssertEqual(fresh.pipelineVersion, "1.0.0-audio2-asr9-live1-diarization4-summary16")
         XCTAssertNotEqual(fresh.id, pending.id)
         XCTAssertNotEqual(fresh.fingerprint, pending.fingerprint)
         XCTAssertEqual(fresh.modelIDs, pending.modelIDs)

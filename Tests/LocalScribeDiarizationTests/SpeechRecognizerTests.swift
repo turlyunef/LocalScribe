@@ -1,5 +1,6 @@
 import XCTest
 import AVFoundation
+import Synchronization
 import WhisperKit
 import LocalScribeCore
 @testable import LocalScribeWorker
@@ -32,13 +33,85 @@ final class SpeechRecognizerTests: XCTestCase {
         }, language: "ru", timings: timings)]
     }
 
+    func testCancelledWhisperDecodeDoesNotCallSDK() async throws {
+        let task = Task {
+            let engine = WhisperASREngine { _, _ in
+                XCTFail("Cancelled decode entered SDK"); return []
+            }
+            withUnsafeCurrentTask { $0?.cancel() }
+            return try await engine.decode([0.1], options: WhisperASREngine.decodingOptions, phase: .primary).count
+        }
+        do { _ = try await task.value; XCTFail("Expected cancellation") }
+        catch is CancellationError { }
+    }
+
+    func testAdjacentRequestsOwnCrossingWordOnceAndPreserveRealRepetition() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = try wave(root, milliseconds: 30000)
+        var calls = 0
+        let engine = WhisperASREngine { _, _ in
+            calls += 1
+            return calls == 1 ? self.result([("начало", 0.2, 27), ("да", 27.7, 28.3)])
+                : self.result([("да", 0.7, 1.3), (" да", 1.4, 1.6)])
+        }
+        let recognizer = SpeechRecognizer(engine: engine)
+        let left = try await recognizer.recognize(ASRRequest(audioURL: audio, availableEndMs: 30000,
+            coreRange: 0..<28000, mode: .offline))
+        let right = try await recognizer.recognize(ASRRequest(audioURL: audio, availableEndMs: 30000,
+            coreRange: 28000..<30000, mode: .offline))
+        let joined = left.segments + right.segments
+        XCTAssertEqual(calls, 2)
+        XCTAssertEqual(joined.map(\.text), ["начало", "да", " да"])
+        XCTAssertEqual(joined.map(\.startMs), [200, 27700, 28400])
+        XCTAssertEqual(joined.map(\.endMs), [27000, 28300, 28600])
+    }
+
+    func testUnrecoveredPrefixWarningUsesSourceTimeAndKeepsOriginalWordsInBothModes() async throws {
+        for origin in [0, 60000] {
+            let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            defer { try? FileManager.default.removeItem(at: root) }
+            let audio = try wave(root, milliseconds: 10000)
+            let warnings = Mutex<[String]>([])
+            var calls = 0
+            let engine = WhisperASREngine(warning: { message in warnings.withLock { $0.append(message) } }) { _, _ in
+                calls += 1
+                return calls == 1 ? self.result([("later", 3, 10)]) : []
+            }
+            let request = try ASRRequest(audioURL: audio, originMs: origin, availableEndMs: origin + 10000,
+                coreRange: origin..<(origin + 10000), mode: origin == 0 ? .offline : .closedFragments)
+            let result = try await SpeechRecognizer(engine: engine).recognize(request)
+            XCTAssertEqual(result.segments, [Segment(id: "tmp", startMs: origin + 3000, endMs: origin + 10000,
+                text: "later", language: "en", words: [Word(text: "later", startMs: origin + 3000, endMs: origin + 10000)])])
+            XCTAssertEqual(calls, 2)
+            let start = origin == 0 ? "00:00:00" : "00:01:00", end = origin == 0 ? "00:00:03" : "00:01:03"
+            XCTAssertEqual(warnings.withLock { $0 }, ["В интервале \(start)–\(end) есть звук, но начало речи не распознано. Прослушайте исходник; можно повторить обработку другой моделью."])
+        }
+    }
+
+    func testWhisperFilteringAndUncertaintyDoNotLoseWordTimes() {
+        let engine = WhisperASREngine { _, _ in [] }
+        let raw = result([("drop", 0.1, 0.4), ("сомнение", 0.5, 0.9), ("repeat", 1, 1.2), ("keep", 1.3, 1.5)])
+        raw[0].segments[0].noSpeechProb = 0.7; raw[0].segments[0].avgLogprob = -1.1
+        raw[0].segments[1].avgLogprob = -1.1
+        raw[0].segments[2].compressionRatio = 3.6
+        let mapped = engine.mappedSegments(raw, readStart: 60000, start: 60000, end: 62000, durationMs: 62000)
+        XCTAssertEqual(mapped, [
+            Segment(id: "tmp", startMs: 60500, endMs: 60900, text: "сомнение", language: "ru", uncertain: true,
+                words: [Word(text: "сомнение", startMs: 60500, endMs: 60900)]),
+            Segment(id: "tmp", startMs: 61000, endMs: 61200, text: "[неразборчиво]", language: "ru", uncertain: true),
+            Segment(id: "tmp", startMs: 61300, endMs: 61500, text: "keep", language: "en",
+                words: [Word(text: "keep", startMs: 61300, endMs: 61500)])
+        ])
+    }
+
     func testWindowMetricsIncludeContextAndSDKInferenceButNoTranscript() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 60000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
         var inputs: [Int] = []
-        let recognizer = SpeechRecognizer(metrics: metrics) { samples, options in
+        let recognizer = WhisperASREngine(metrics: metrics) { samples, options in
             inputs.append(samples.count / 16)
             XCTAssertEqual(options.windowClipTime, 0)
             XCTAssertTrue(options.detectLanguage); XCTAssertNil(options.language)
@@ -68,7 +141,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let audio = try wave(root, milliseconds: 10000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
         var calls = 0
-        let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in
+        let recognizer = WhisperASREngine(metrics: metrics) { _, _ in
             calls += 1
             return calls == 1 ? self.result([("later", 3, 10)]) : self.result([("начало", 0.4, 3), ("later", 3, 10)])
         }
@@ -84,7 +157,7 @@ final class SpeechRecognizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 28000, pauses: [4000..<5000])
         var inputs: [Int] = []
-        let recognizer = SpeechRecognizer { samples, _ in
+        let recognizer = WhisperASREngine { samples, _ in
             inputs.append(samples.count / 16)
             return inputs.count == 1 ? self.result([("первая", 0.2, 3.8)]) : self.result([("second", 1.8, 24)])
         }
@@ -101,7 +174,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let audio = try wave(root, milliseconds: 20000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
         var calls = 0
-        let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in
+        let recognizer = WhisperASREngine(metrics: metrics) { _, _ in
             calls += 1
             return self.result([("начало", 0.2, 5), ("конец", 15, 20)])
         }
@@ -120,7 +193,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let audio = try wave(root, milliseconds: 5000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
         var calls = 0
-        let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in
+        let recognizer = WhisperASREngine(metrics: metrics) { _, _ in
             calls += 1
             return self.result([("start", 0.2, 1)])
         }
@@ -133,7 +206,7 @@ final class SpeechRecognizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 10000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
-        let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in [] }
+        let recognizer = WhisperASREngine(metrics: metrics) { _, _ in [] }
         _ = try await recognizer.recognize(wave: audio, coreStart: 0, coreEnd: 10000, durationMs: 10000)
         XCTAssertEqual(metrics.value.unrecoveredPrefixes, 1)
         let silent = try wave(root, milliseconds: 10000, amplitude: 0)
@@ -146,7 +219,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 1125)
-        let recognizer = SpeechRecognizer { samples, _ in
+        let recognizer = WhisperASREngine { samples, _ in
             XCTAssertEqual(samples.count, 18000)
             return self.result([("context", 0.1, 0.5), ("tail", 1.01, 1.1)])
         }
@@ -160,7 +233,7 @@ final class SpeechRecognizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 1000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
-        let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in throw ScribeError.message("private SDK error") }
+        let recognizer = WhisperASREngine(metrics: metrics) { _, _ in throw ScribeError.message("private SDK error") }
         do {
             _ = try await recognizer.recognize(wave: audio, coreStart: 0, coreEnd: 1000, durationMs: 1000)
             XCTFail("Expected failure")
@@ -177,15 +250,15 @@ final class SpeechRecognizerTests: XCTestCase {
     }
 
     func testMatrixSwitchesRecoverOnlyMissingWordsAndKeepPrimaryTimeline() async throws {
-        for window in ASRWindowPolicy.allCases {
+        for window in WhisperWindowPolicy.allCases {
             for recover in [false, true] {
                 let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
                 defer { try? FileManager.default.removeItem(at: root) }
                 let audio = try wave(root, milliseconds: 20000)
-                let policy = ASRRecognitionPolicy(window: window, recoverInteriorGaps: recover)
+                let policy = WhisperRecognitionPolicy(window: window, recoverInteriorGaps: recover)
                 let metrics = ASRMetricsRecorder(run: root, liveCapture: false, windowPolicy: policy.metricsName)
                 var inputs: [Int] = []
-                let recognizer = SpeechRecognizer(metrics: metrics, policy: policy) { samples, options in
+                let recognizer = WhisperASREngine(metrics: metrics, policy: policy) { samples, options in
                     inputs.append(samples.count / 16)
                     XCTAssertEqual(options.language, nil); XCTAssertTrue(options.detectLanguage)
                     XCTAssertEqual(options.temperatureFallbackCount, 2); XCTAssertEqual(options.windowClipTime, 0)
@@ -209,14 +282,14 @@ final class SpeechRecognizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 28000, pauses: [4000..<5000, 16000..<17000, 25000..<26000])
         var inputs: [Int] = []
-        let recognizer = SpeechRecognizer(policy: .init(window: .latePause)) { samples, _ in
+        let recognizer = WhisperASREngine(policy: .init(window: .latePause)) { samples, _ in
             inputs.append(samples.count / 16)
             return self.result([("speech", 0.2, Float(samples.count) / 16000)])
         }
         _ = try await recognizer.recognize(wave: audio, coreStart: 0, coreEnd: 28000, durationMs: 28000)
         XCTAssertEqual(inputs, [26500, 3500])
-        XCTAssertEqual(ASRRecognitionPolicy.production.window, .firstPause)
-        XCTAssertFalse(ASRRecognitionPolicy.production.recoverInteriorGaps)
+        XCTAssertEqual(WhisperRecognitionPolicy.production.window, .firstPause)
+        XCTAssertFalse(WhisperRecognitionPolicy.production.recoverInteriorGaps)
     }
 
     func testExperimentalGapRetryIsBoundedAndFailurePropagates() async throws {
@@ -224,10 +297,10 @@ final class SpeechRecognizerTests: XCTestCase {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
             defer { try? FileManager.default.removeItem(at: root) }
             let audio = try wave(root, milliseconds: 5000)
-            let policy = ASRRecognitionPolicy(recoverInteriorGaps: true)
+            let policy = WhisperRecognitionPolicy(recoverInteriorGaps: true)
             let metrics = ASRMetricsRecorder(run: root, liveCapture: false, windowPolicy: policy.metricsName)
             var calls = 0
-            let recognizer = SpeechRecognizer(metrics: metrics, policy: policy) { _, _ in
+            let recognizer = WhisperASREngine(metrics: metrics, policy: policy) { _, _ in
                 calls += 1
                 if calls == 2 && fail { throw CancellationError() }
                 return calls == 1 ? self.result([("start", 0.2, 1)]) : []
@@ -249,7 +322,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let audio = try wave(root, milliseconds: 60000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
         var inputs: [Int] = [], batches: [ASRContextReviewBatch] = []
-        let recognizer = SpeechRecognizer(metrics: metrics, policy: .init(window: .latePause, reviewContext: true),
+        let recognizer = WhisperASREngine(metrics: metrics, policy: .init(window: .latePause, reviewContext: true),
             contextReview: { batches.append($0) }) { samples, options in
                 inputs.append(samples.count / 16)
                 XCTAssertNil(options.language); XCTAssertTrue(options.detectLanguage)
@@ -281,7 +354,7 @@ final class SpeechRecognizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 60000)
         var inputs: [Int] = [], batches: [ASRContextReviewBatch] = []
-        let recognizer = SpeechRecognizer(policy: .init(window: .latePause, reviewContext: true),
+        let recognizer = WhisperASREngine(policy: .init(window: .latePause, reviewContext: true),
             contextReview: { batches.append($0) }) { samples, _ in
                 inputs.append(samples.count / 16)
                 return inputs.count == 1 ? self.result([("start", 1.2, 3), ("end", 9, 11)])
@@ -303,7 +376,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let audio = try wave(root, milliseconds: 21200)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: true)
         var inputs: [Int] = []
-        let recognizer = SpeechRecognizer(metrics: metrics, policy: .init(window: .latePause, reviewContext: true),
+        let recognizer = WhisperASREngine(metrics: metrics, policy: .init(window: .latePause, reviewContext: true),
             contextReview: { _ in XCTFail("Cancelled batch must not be published") }) { samples, _ in
                 inputs.append(samples.count / 16)
                 if inputs.count == 2 { throw CancellationError() }
@@ -320,14 +393,14 @@ final class SpeechRecognizerTests: XCTestCase {
     }
 
     func testContextReviewRequiresExplicitArtifactSinkAndIsDisabledInProduction() async throws {
-        let recognizer = SpeechRecognizer(policy: .init(reviewContext: true)) { _, _ in
+        let recognizer = WhisperASREngine(policy: .init(reviewContext: true)) { _, _ in
             XCTFail("Missing sink must fail before inference"); return []
         }
         do {
             _ = try await recognizer.recognize(wave: URL(fileURLWithPath: "/missing.wav"), coreStart: 0, coreEnd: 10000, durationMs: 10000)
             XCTFail("Expected missing sink error")
         } catch { XCTAssertTrue(error is ScribeError) }
-        XCTAssertFalse(ASRRecognitionPolicy.production.reviewContext)
+        XCTAssertFalse(WhisperRecognitionPolicy.production.reviewContext)
     }
 
     func testContextReviewReusesOneDecodeForTargetsWithTheSameContext() async throws {
@@ -336,7 +409,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let audio = try wave(root, milliseconds: 30000)
         let metrics = ASRMetricsRecorder(run: root, liveCapture: false)
         var inputs: [Int] = [], batches: [ASRContextReviewBatch] = []
-        let recognizer = SpeechRecognizer(metrics: metrics, policy: .init(window: .latePause, reviewContext: true),
+        let recognizer = WhisperASREngine(metrics: metrics, policy: .init(window: .latePause, reviewContext: true),
             contextReview: { batches.append($0) }) { samples, _ in
                 inputs.append(samples.count / 16)
                 let original = self.result([("original", 0.2, 28)])
@@ -355,7 +428,7 @@ final class SpeechRecognizerTests: XCTestCase {
         let audio = try wave(root, milliseconds: 60000)
         let job = Task {
             var calls = 0
-            let recognizer = SpeechRecognizer(policy: .init(window: .latePause, reviewContext: true),
+            let recognizer = WhisperASREngine(policy: .init(window: .latePause, reviewContext: true),
                 contextReview: { _ in XCTFail("Cancelled result must not be published") }) { _, _ in
                     calls += 1
                     if calls == 2 { withUnsafeCurrentTask { $0?.cancel() } }
@@ -377,7 +450,7 @@ final class SpeechRecognizerTests: XCTestCase {
             let audio = try wave(root, milliseconds: 10000)
             let job = Task {
                 var calls = 0
-                let recognizer = SpeechRecognizer { _, _ in
+                let recognizer = WhisperASREngine { _, _ in
                     calls += 1
                     if calls == cancelledCall { withUnsafeCurrentTask { $0?.cancel() } }
                     return [TranscriptionResult(text: "later", segments: [
@@ -397,7 +470,7 @@ final class SpeechRecognizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 125)
         var calls = 0
-        let recognizer = SpeechRecognizer { samples, _ in
+        let recognizer = WhisperASREngine { samples, _ in
             calls += 1
             XCTAssertEqual(samples.count, 2000)
             return self.result([("tail", 0.01, 0.10)])
@@ -410,7 +483,7 @@ final class SpeechRecognizerTests: XCTestCase {
     }
 
     func testCrossingWordOwnershipAndGenuineRepetitionAtSeam() {
-        let mapper = SpeechRecognizer { _, _ in [] }
+        let mapper = WhisperASREngine { _, _ in [] }
         let raw = result([("да", 27.7, 28.3), (" да", 28.4, 28.6)])
         let left = mapper.mappedSegments(raw, readStart: 0, start: 0, end: 28000, durationMs: 30000)
         let right = mapper.mappedSegments(raw, readStart: 0, start: 28000, end: 30000, durationMs: 30000)
@@ -429,7 +502,7 @@ final class SpeechRecognizerTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let audio = try wave(root, milliseconds: 40000)
         var inputs: [Int] = []
-        let recognizer = SpeechRecognizer { samples, _ in
+        let recognizer = WhisperASREngine { samples, _ in
             inputs.append(samples.count / 16)
             return inputs.count == 1 ? self.result([("first", 0.2, 27.7)])
                 : self.result([("left-context", 0.1, 0.6), ("remainder", 1.1, 2.8), ("future", 3.2, 3.5)])
@@ -448,7 +521,7 @@ final class SpeechRecognizerTests: XCTestCase {
             let audio = try wave(root, milliseconds: 30000)
             let metrics = ASRMetricsRecorder(run: root, liveCapture: origin != 0)
             var calls = 0
-            let recognizer = SpeechRecognizer(metrics: metrics,
+            let recognizer = WhisperASREngine(metrics: metrics,
                 contextReview: { _ in XCTFail("Production must not publish technical hypotheses") }) { _, options in
                     calls += 1
                     XCTAssertNil(options.promptTokens)
@@ -482,7 +555,7 @@ final class SpeechRecognizerTests: XCTestCase {
             let audio = try wave(root, milliseconds: 11000)
             let metrics = ASRMetricsRecorder(run: root, liveCapture: origin != 0)
             var calls = 0
-            let recognizer = SpeechRecognizer(metrics: metrics) { _, _ in
+            let recognizer = WhisperASREngine(metrics: metrics) { _, _ in
                 calls += 1
                 if calls == 2 { throw ScribeError.message("private retry SDK error") }
                 return self.result([("later", 3, 10)])
