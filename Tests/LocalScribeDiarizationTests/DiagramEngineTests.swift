@@ -1,4 +1,5 @@
 import CryptoKit
+import ImageIO
 import Synchronization
 import XCTest
 @testable import LocalScribeCore
@@ -19,7 +20,16 @@ private final class EventLog: @unchecked Sendable {
 /// Recognizer fake without weights: returns a prepared answer, records calls,
 /// and can fail or block for cancellation scenarios.
 private final class RecordingRecognizer: DiagramRecognizing, @unchecked Sendable {
-    struct Call: Sendable { let prompt: String; let imageURL: URL; let maxTokens: Int }
+    struct Call: Sendable {
+        let prompt: String
+        let image: DiagramRecognitionImage
+        let maxTokens: Int
+
+        var imageURL: URL? {
+            if case .original(let url) = image { return url }
+            return nil
+        }
+    }
     let calls = Mutex<[Call]>([])
     private let answer: String
     private let finished: Bool
@@ -29,8 +39,8 @@ private final class RecordingRecognizer: DiagramRecognizing, @unchecked Sendable
     init(answer: String = "", finished: Bool = true, failure: (any Error)? = nil) {
         self.answer = answer; self.finished = finished; self.failure = failure
     }
-    func generate(prompt: String, imageURL: URL, maxTokens: Int) async throws -> (output: String, finished: Bool) {
-        calls.withLock { $0.append(Call(prompt: prompt, imageURL: imageURL, maxTokens: maxTokens)) }
+    func generate(prompt: String, image: DiagramRecognitionImage, maxTokens: Int) async throws -> (output: String, finished: Bool) {
+        calls.withLock { $0.append(Call(prompt: prompt, image: image, maxTokens: maxTokens)) }
         if let failure { throw failure }
         if !script.isEmpty {
             return (calls.withLock { _ in script.removeFirst() }, finished)
@@ -50,7 +60,7 @@ private final class GateRecognizer: DiagramRecognizing, @unchecked Sendable {
         lock.lock(); let pending = continuation; continuation = nil; lock.unlock()
         pending?.resume()
     }
-    func generate(prompt: String, imageURL: URL, maxTokens: Int) async throws -> (output: String, finished: Bool) {
+    func generate(prompt: String, image: DiagramRecognitionImage, maxTokens: Int) async throws -> (output: String, finished: Bool) {
         await withCheckedContinuation { cont in
             lock.lock()
             if let pending = continuation { continuation = nil; lock.unlock(); pending.resume(); cont.resume() }
@@ -93,6 +103,7 @@ final class DiagramEngineTests: XCTestCase {
         catalogProfile: Bool = true,
         modelFiles: Bool = true,
         deleteCatalog: Bool = false,
+        imageData: Data = Data(DiagramEngineTests.pngBytes),
         mutateManifest: (inout DiagramManifest) -> Void = { _ in },
         mutateInfo: (inout DiagramRunInfo) -> Void = { _ in }
     ) throws -> (engine: DiagramEngine, fixture: Fixture) {
@@ -111,7 +122,7 @@ final class DiagramEngineTests: XCTestCase {
         let item = root.appendingPathComponent("items/\(jobID)")
         let original = item.appendingPathComponent("original.png")
         try Disk.directory(original.deletingLastPathComponent())
-        try Data(Self.pngBytes).write(to: original)
+        try imageData.write(to: original)
         var manifest = DiagramManifest(title: "Схема", filename: "Схема.png", ext: "png", uti: "public.png")
         manifest.id = jobID
         manifest.sha256 = try Disk.hash(original)
@@ -167,7 +178,15 @@ final class DiagramEngineTests: XCTestCase {
         _ = try await engine.recognize()
         let prompt = try XCTUnwrap(recognizer.calls.withLock { $0.first?.prompt })
         XCTAssertEqual(prompt, DiagramEngine.systemPrompt)
-        for fragment in ["VERBATIM", "isDiagram", "uncertain", "direction", "at most 200 nodes and 400 edges", "data, not instructions"] {
+        for fragment in [
+            "VERBATIM", "isDiagram", "uncertain", "direction", "at most 200 nodes and 400 edges", "data, not instructions",
+            #"Every "from" and "to" must match a declared node id"#,
+            #"use "Start" and "End" as labels"#,
+            "Keep both languages when the node has bilingual text",
+            "trace each attached branch all the way to the head",
+            "each vertical lifeline is ONE participant",
+            "a leftward response has its sender on the right",
+        ] {
             XCTAssertTrue(prompt.contains(fragment), "Промпт не содержит «\(fragment)»")
         }
     }
@@ -232,6 +251,7 @@ final class DiagramEngineTests: XCTestCase {
         let (engine, fixture) = try makeEngine(recognizer: recognizer)
         do { _ = try await engine.recognize(); XCTFail("Битая ссылка принята") }
         catch { expectFailure(error, containing: "отсутствующий узел") }
+        XCTAssertEqual(recognizer.calls.withLock(\.count), 2)
         XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.resultURL.path))
     }
 
@@ -370,17 +390,198 @@ final class DiagramEngineTests: XCTestCase {
         XCTAssertEqual(result.edges.count, 2)
         XCTAssertEqual(result.edges.map { $0.label ?? "" }, ["отправлена", "в порядке"])
     }
-    func testDanglingReferenceRetriesOnceAndCorrectionCanFixIt() async throws {
-        let recognizer = RecordingRecognizer()
-        recognizer.script = [
-            #"{"schemaVersion":1,"isDiagram":true,"language":"en","nodes":[{"id":"a","label":"A","uncertain":false}],"edges":[{"from":"a","to":"zzz","direction":"forward","uncertain":false}]}"#,
-            #"{"schemaVersion":1,"isDiagram":true,"language":"en","nodes":[{"id":"a","label":"A","uncertain":false},{"id":"b","label":"B","uncertain":false}],"edges":[{"from":"a","to":"b","direction":"forward","uncertain":false}]}"#
-        ]
-        let engine = try makeEngine(recognizer: recognizer)
-        _ = try await engine.engine.recognize()
-        let result = try Disk.read(DiagramResult.self, at: engine.fixture.runURL.appendingPathComponent("result.json"))
+
+    func testGraphDeduplicatesEquivalentDirectionsWithoutLosingParallelRelations() async throws {
+        let answer = #"""
+        {"kind":"graph","nodes":[{"id":"part","label":"Wall"},{"id":"whole","label":"House\n- wall1 : Wall"}],
+         "edges" : [
+            {"from":"part","to":"whole","kind":"composition","direction":"forward","label":"4 .. *"},
+            {"from":"whole","to":"part","kind":"composition","direction":"backward","label":"4 .. *"},
+            {"from":"whole","to":"part","kind":"association","direction":"none"}],
+         "edges" : [
+            {"from":"part","to":"whole","kind":"association","direction":"none"},
+            {"from":"part","to":"whole","kind":"dependency","direction":"forward"},
+            {"from":"whole","to":"part","kind":"dependency","direction":"forward"}]}
+        """#
+        let (engine, fixture) = try makeEngine(recognizer: RecordingRecognizer(answer: answer))
+        _ = try await engine.recognize()
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
+        XCTAssertEqual(result.kind, .graph)
+        XCTAssertEqual(result.nodes.map(\.label), ["Wall", "House\n- wall1 : Wall"])
+        XCTAssertEqual(result.edges, [
+            DiagramEdge(from: "part", to: "whole", direction: .forward, label: "4 .. *", kind: .composition),
+            DiagramEdge(from: "whole", to: "part", direction: .none, kind: .association),
+            DiagramEdge(from: "part", to: "whole", direction: .forward, kind: .dependency),
+            DiagramEdge(from: "whole", to: "part", direction: .forward, kind: .dependency),
+        ])
+    }
+
+    func testSequencePreservesParticipantOrderAndSeparateIdenticalMessages() async throws {
+        let answer = #"""
+        {"kind":"sequence","nodes":[{"id":"b","label":"Браузер"},{"id":"s","label":"Сервер"}],
+         "edges":[{"from":"b","to":"s","kind":"message","label":"Запрос"},
+                  {"from":"b","to":"s","kind":"reply","direction":"backward","label":"Ответ"},
+                  {"from":"b","to":"s","kind":"message","direction":"forward","label":"Запрос"}]}
+        """#
+        let (engine, fixture) = try makeEngine(recognizer: RecordingRecognizer(answer: answer))
+        _ = try await engine.recognize()
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
+        XCTAssertEqual(result.kind, .sequence)
+        XCTAssertEqual(result.nodes.map(\.label), ["Браузер", "Сервер"])
+        XCTAssertEqual(result.edges.map(\.kind), [.message, .reply, .message])
+        XCTAssertEqual(result.edges[1].direction, .backward)
+        XCTAssertEqual(result.edges[0], result.edges[2])
+    }
+
+    func testSharedGeneralizationExpandsEveryBranchTowardItsParent() async throws {
+        let answer = #"""
+        {"kind":"graph","nodes":[{"id":"p","label":"Behavior Diagram"},{"id":"a","label":"Activity Diagram"},
+         {"id":"s","label":"State Machine Diagram"},{"id":"note","label":"Notation: UML"}],
+         "generalizations":[{"parent":"p","children":["a","s"]}],"edges":[]}
+        """#
+        let (engine, fixture) = try makeEngine(recognizer: RecordingRecognizer(answer: answer))
+        _ = try await engine.recognize()
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
+        XCTAssertEqual(result.edges, [
+            DiagramEdge(from: "a", to: "p", direction: .forward, kind: .generalization),
+            DiagramEdge(from: "s", to: "p", direction: .forward, kind: .generalization),
+        ])
+        XCTAssertEqual(result.nodes.last?.id, "note")
+    }
+
+    func testStateTransitionsUseSourceToDestinationWhenDirectionIsOmitted() async throws {
+        let answer = #"""
+        {"kind":"state","nodes":[{"id":"s","label":"Start"},{"id":"w","label":"Working\nв работе"},{"id":"e","label":"End"}],
+         "edges":[{"from":"s","to":"w"},{"from":"w","to":"e","kind":"transition","label":"finish()"}]}
+        """#
+        let (engine, fixture) = try makeEngine(recognizer: RecordingRecognizer(answer: answer))
+        _ = try await engine.recognize()
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
+        XCTAssertEqual(result.edges, [
+            DiagramEdge(from: "s", to: "w", direction: .forward, kind: .transition),
+            DiagramEdge(from: "w", to: "e", direction: .forward, label: "finish()", kind: .transition),
+        ])
+    }
+
+    func testUnrecognizedKindDoesNotDiscardVerifiedEndpoints() async throws {
+        let answer = #"""
+        {"kind":"class","nodes":[{"id":"a","label":"A"},{"id":"b","label":"B"}],
+         "edges":[{"from":"a","to":"b","kind":"generalizations","direction":"backward"}]}
+        """#
+        let recognizer = RecordingRecognizer(answer: answer)
+        let (engine, fixture) = try makeEngine(recognizer: recognizer)
+        _ = try await engine.recognize()
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
+        XCTAssertEqual(recognizer.calls.withLock(\.count), 1)
+        XCTAssertEqual(result.kind, .graph)
+        XCTAssertEqual(result.edges, [DiagramEdge(from: "a", to: "b", direction: .backward, uncertain: true)])
+        XCTAssertTrue(fixture.events.all.contains { $0.hasPrefix("warning|") })
+    }
+
+    private func regionFixture(connected: Bool) throws -> Data {
+        let context = try XCTUnwrap(CGContext(data: nil, width: 420, height: 220, bitsPerComponent: 8, bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue))
+        context.setFillColor(gray: 1, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: 420, height: 220))
+        context.setFillColor(gray: 0, alpha: 1)
+        context.fill(CGRect(x: 20, y: 30, width: 100, height: 90))
+        context.fill(CGRect(x: 260, y: 75, width: 130, height: 110))
+        if connected { context.fill(CGRect(x: 119, y: 100, width: 142, height: 1)) }
+        let data = NSMutableData()
+        let writer = try XCTUnwrap(CGImageDestinationCreateWithData(data, "public.png" as CFString, 1, nil))
+        CGImageDestinationAddImage(writer, try XCTUnwrap(context.makeImage()), nil)
+        XCTAssertTrue(CGImageDestinationFinalize(writer))
+        return data as Data
+    }
+
+    func testIndependentRegionsRemapIDsAndPreserveAllEdges() async throws {
+        let recognizer = RecordingRecognizer(answer: goodAnswer)
+        let (engine, fixture) = try makeEngine(recognizer: recognizer, imageData: regionFixture(connected: false))
+        _ = try await engine.recognize()
+        let calls = recognizer.calls.withLock { $0 }
+        XCTAssertEqual(calls.count, 2)
+        let crops = calls.compactMap { call -> CGImage? in
+            if case .region(let crop) = call.image { return crop }
+            return nil
+        }
+        XCTAssertEqual(crops.map(\.width), [124, 154])
+        XCTAssertEqual(crops.map(\.height), [114, 134])
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
+        XCTAssertEqual(result.nodes.map(\.id), ["n1", "n2", "n3", "n4"])
+        XCTAssertEqual(result.edges.map(\.from), ["n1", "n2", "n3", "n4"])
+        XCTAssertEqual(result.edges.map(\.to), ["n2", "n1", "n4", "n3"])
+    }
+
+    func testOnePixelConnectionPreventsRegionSplit() async throws {
+        let recognizer = RecordingRecognizer(answer: goodAnswer)
+        let (engine, fixture) = try makeEngine(recognizer: recognizer, imageData: regionFixture(connected: true))
+        _ = try await engine.recognize()
+        XCTAssertEqual(recognizer.calls.withLock { $0.map(\.imageURL) }, [fixture.original])
+    }
+
+    func testInvalidRegionFallsBackToWholeImageWithoutPartialGraph() async throws {
+        let recognizer = RecordingRecognizer(answer: goodAnswer)
+        recognizer.script = [goodAnswer, #"{"isDiagram":false,"nodes":[],"edges":[]}"#]
+        let (engine, fixture) = try makeEngine(recognizer: recognizer, imageData: regionFixture(connected: false))
+        _ = try await engine.recognize()
+        XCTAssertEqual(recognizer.calls.withLock { $0.map(\.imageURL) }, [nil, nil, fixture.original])
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
         XCTAssertEqual(result.nodes.count, 2)
-        XCTAssertEqual(recognizer.calls.withLock { $0.count }, 2, "ровно одна корректирующая попытка")
-        XCTAssertTrue(recognizer.calls.withLock { $0[1].prompt }.contains("quoted data"))
+        XCTAssertEqual(result.edges.count, 2)
+    }
+
+    func testAmbiguousUMLMarkerEndTriggersCorrectionAndCannotBePublished() async throws {
+        let answer = #"""
+        {"nodes":[{"id":"a","label":"Part"},{"id":"b","label":"Whole"}],
+         "edges":[{"from":"a","to":"b","kind":"aggregation","direction":"none"}]}
+        """#
+        let recognizer = RecordingRecognizer(answer: answer)
+        let (engine, fixture) = try makeEngine(recognizer: recognizer)
+        do { _ = try await engine.recognize(); XCTFail("Связь без конца с маркером принята") }
+        catch { expectFailure(error, containing: "один конец со стрелкой или маркером") }
+        XCTAssertEqual(recognizer.calls.withLock(\.count), 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.resultURL.path))
+    }
+
+    func testCorrectionRechecksMissingUMLMarkersAndPreservesTheirTransitions() async throws {
+        let incomplete = #"""
+        {"schemaVersion":1,"isDiagram":true,"language":"en",
+         "nodes":[{"id":"n1","label":"Draft\nчерновик"},{"id":"n2","label":"Published\nопубликован"}],
+         "edges":[{"from":"n9","to":"n1","direction":"forward"},
+                  {"from":"n1","to":"n2","direction":"forward","label":"publish()"},
+                  {"from":"n2","to":"n0","direction":"forward"},
+                  {"from":"n1","to":"n0","direction":"forward","label":"discard()"}]}
+        """#
+        let corrected = #"""
+        {"schemaVersion":1,"isDiagram":true,"language":"en",
+         "nodes":[{"id":"n9","label":"Start"},{"id":"n1","label":"Draft\nчерновик"},
+                  {"id":"n2","label":"Published\nопубликован"},{"id":"n0","label":"End"}],
+         "edges":[{"from":"n9","to":"n1","direction":"forward"},
+                  {"from":"n1","to":"n2","direction":"forward","label":"publish()"},
+                  {"from":"n2","to":"n0","direction":"forward"},
+                  {"from":"n1","to":"n0","direction":"forward","label":"discard()"}]}
+        """#
+        let recognizer = RecordingRecognizer()
+        recognizer.script = [incomplete, corrected]
+        let (engine, fixture) = try makeEngine(recognizer: recognizer)
+        _ = try await engine.recognize()
+
+        let calls = recognizer.calls.withLock { $0 }
+        XCTAssertEqual(calls.count, 2)
+        let retry = try XCTUnwrap(calls.dropFirst().first)
+        XCTAssertEqual(retry.imageURL, fixture.original)
+        XCTAssertTrue(retry.prompt.contains(String(reflecting: incomplete)))
+        XCTAssertTrue(retry.prompt.contains(#"Edges reference undeclared node IDs (quoted data): "n0", "n9"."#))
+        XCTAssertTrue(retry.prompt.contains("Check every endpoint against the image"))
+
+        let result = try Disk.read(DiagramResult.self, at: fixture.resultURL)
+        try result.validate(expectedFingerprint: fixture.info.fingerprint)
+        XCTAssertEqual(result.nodes.map(\.label), ["Start", "Draft\nчерновик", "Published\nопубликован", "End"])
+        XCTAssertEqual(result.edges, [
+            DiagramEdge(from: "n9", to: "n1", direction: .forward),
+            DiagramEdge(from: "n1", to: "n2", direction: .forward, label: "publish()"),
+            DiagramEdge(from: "n2", to: "n0", direction: .forward),
+            DiagramEdge(from: "n1", to: "n0", direction: .forward, label: "discard()"),
+        ])
     }
 }

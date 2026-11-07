@@ -122,23 +122,94 @@ final class DiagramExportTests: XCTestCase {
         XCTAssertTrue(text.contains("n0 <.> n1"))
     }
 
+    func testUMLConnectorsKeepMarkedEndpointsAndMultilineLabels() throws {
+        let nodes = [
+            DiagramNode(id: "house", label: "House\n- wall1 : Wall"),
+            DiagramNode(id: "wall", label: "Wall"),
+            DiagramNode(id: "bird", label: "«interface»\nBird\n+ fly()"),
+            DiagramNode(id: "raven", label: "Raven"),
+        ]
+        let edges = [
+            DiagramEdge(from: "house", to: "wall", direction: .backward, label: "4 .. *", kind: .composition),
+            DiagramEdge(from: "bird", to: "house", direction: .forward, kind: .aggregation),
+            DiagramEdge(from: "raven", to: "bird", direction: .forward, uncertain: true, kind: .realization),
+            DiagramEdge(from: "raven", to: "house", direction: .forward, kind: .generalization),
+            DiagramEdge(from: "wall", to: "raven", direction: .forward, kind: .dependency),
+            DiagramEdge(from: "wall", to: "house", direction: .forward, kind: .containment),
+            DiagramEdge(from: "house", to: "bird", direction: .none, kind: .association),
+        ]
+        let graph = result(nodes: nodes, edges: edges)
+        try graph.validate(expectedFingerprint: graph.fingerprint)
+        let output = DiagramExport.plantuml(graph, title: "UML")
+        XCTAssertTrue(output.warnings.isEmpty)
+        for line in [
+            #"rectangle "House\n- wall1 <U+003A> Wall" as n0"#,
+            #"rectangle "<U+00AB>interface<U+00BB>\nBird\n+ fly()" as n2"#,
+            "n1 --* n0 : 4 .. <U+002A>", "n2 --o n0", "n3 -[#orange,dashed]-|> n2",
+            "n3 --|> n0", "n1 ..> n3", "n1 --+ n0", "n0 -- n2",
+        ] {
+            XCTAssertTrue(output.text.split(separator: "\n").contains(Substring(line)), line)
+        }
+        let markdown = DiagramExport.markdown(graph, title: "UML")
+        XCTAssertTrue(markdown.contains("◆— Wall (4 .. \\*) · Композиция"))
+        XCTAssertTrue(markdown.contains("Реализация ⚠ не подтверждена"))
+    }
+
+    func testSequenceExportsOrderedRequestsAndReturns() throws {
+        let graph = Self.sequenceSample
+        try graph.validate(expectedFingerprint: graph.fingerprint)
+        let output = DiagramExport.plantuml(graph, title: "Обмен")
+        XCTAssertEqual(output.text.split(separator: "\n").dropFirst(2).map(String.init), [
+            "participant \"Браузер\" as n0", "participant \"Балансировщик\" as n1", "participant \"Сервер\" as n2",
+            "n0 -> n1 : Запрос", "n1 -> n2 : Запрос", "n2 -->> n1 : Ответ", "n1 --[#orange]>> n0 : Ответ", "@enduml",
+        ])
+        XCTAssertTrue(output.warnings.isEmpty)
+    }
+
+    static var sequenceSample: DiagramResult {
+        DiagramResult(fingerprint: "abc", kind: .sequence, nodes: [
+            DiagramNode(id: "browser", label: "Браузер"),
+            DiagramNode(id: "balancer", label: "Балансировщик"),
+            DiagramNode(id: "server", label: "Сервер"),
+        ], edges: [
+            DiagramEdge(from: "browser", to: "balancer", direction: .forward, label: "Запрос", kind: .message),
+            DiagramEdge(from: "balancer", to: "server", direction: .forward, label: "Запрос", kind: .message),
+            DiagramEdge(from: "balancer", to: "server", direction: .backward, label: "Ответ", kind: .reply),
+            DiagramEdge(from: "balancer", to: "browser", direction: .forward, label: "Ответ", uncertain: true, kind: .reply),
+        ])
+    }
+
+    func testLegacyResultWithoutKindsStillDecodesAndExports() throws {
+        let json = #"""
+        {"schemaVersion":1,"fingerprint":"legacy","nodes":[{"id":"a","label":"A","uncertain":false}],
+         "edges":[{"from":"a","to":"a","direction":"none","uncertain":false}]}
+        """#
+        let graph = try JSONDecoder().decode(DiagramResult.self, from: Data(json.utf8))
+        try graph.validate(expectedFingerprint: "legacy")
+        XCTAssertNil(graph.kind)
+        XCTAssertNil(graph.edges.first?.kind)
+        XCTAssertTrue(DiagramExport.plantuml(graph, title: "Legacy").text.contains("n0 -- n0"))
+    }
+
     func testPlantumlNeutralizesInjectionsAndReportsWarnings() {
         let injections = ["!include /tmp/secret", "%getenv(PWD)", "@enduml\nskinparam backgroundColor red",
-                          "<b>жирный</b>", "a&amp;b", "**важно**", "кавычка\"слэш\\", "таб\tперенос\nконец"]
+                          "<b>жирный</b>", "<U+0021>include", "a&amp;b", "**важно**", "кавычка\"слэш\\", "таб\tперенос\nконец"]
         var nodes = injections.enumerated().map { DiagramNode(id: "n\($0.offset)", label: $0.element) }
         nodes.append(DiagramNode(id: "ok", label: "Кириллица сохраняется"))
         let edges = [DiagramEdge(from: "n0", to: "ok", direction: .forward, label: "метка с ! директивой")]
         let (text, warnings) = DiagramExport.plantuml(result(nodes: nodes, edges: edges), title: "инъекция ' \\ \" @end")
         XCTAssertFalse(warnings.isEmpty)
         for payload in payloads(text) {
-            XCTAssertNil(payload.first(where: { bannedInLabels.contains($0) }), "не нейтрализовано: \(payload)")
+            let input = payload.replacingOccurrences(of: #"\\n|<U\+(?:002A|003A|0023|005B|005D|00AB|00BB)>"#,
+                                                     with: "", options: .regularExpression)
+            XCTAssertNil(input.first(where: { bannedInLabels.contains($0) }), "не нейтрализовано: \(payload)")
         }
         // The injected @enduml never terminates the diagram early: exactly one terminator at the end.
         XCTAssertEqual(text.components(separatedBy: "@enduml").count - 1, 1)
         XCTAssertTrue(text.hasSuffix("@enduml\n"))
-        // Cyrillic survives; newlines and tabs collapse to a single space.
+        // The exporter owns the newline escape; raw tabs are removed.
         XCTAssertTrue(text.contains("rectangle \"Кириллица сохраняется\""))
-        XCTAssertTrue(text.contains("перенос конец"))
+        XCTAssertTrue(text.contains(#"перенос\nконец"#))
         XCTAssertFalse(text.contains("\t"))
     }
 
@@ -177,6 +248,7 @@ final class DiagramPlantUMLSamplesTests: XCTestCase {
     func testWritePlantUMLSamplesForLocalValidation() throws {
         let output = ProcessInfo.processInfo.environment["LOCALSCRIBE_PUML_OUT"].map { URL(fileURLWithPath: $0) }
         let samples: [String: String] = [
+            "sequence": DiagramExport.plantuml(DiagramExportTests.sequenceSample, title: "Обмен").text,
             "cyrillic": DiagramExport.plantuml(DiagramResult(fingerprint: "f", language: "ru", nodes: [
                 DiagramNode(id: "n1", label: "Начало"),
                 DiagramNode(id: "n2", label: "Проверка данных"),

@@ -49,9 +49,9 @@ public struct DiagramManifest: Codable, Identifiable, Sendable {
 /// One recognition attempt. A retry always creates a new run; diagram runs
 /// never promise token-level continuation like audio checkpoints.
 public struct DiagramRunInfo: Codable, Sendable {
-    public static let currentPipelineVersion = "1.0.0-diagram1"
-    public static let currentPromptVersion = "diagram-prompt-v1"
-    public static let currentPreprocessingVersion = "diagram-preprocess-v1"
+    public static let currentPipelineVersion = "1.0.0-diagram3"
+    public static let currentPromptVersion = "diagram-prompt-v3"
+    public static let currentPreprocessingVersion = "diagram-preprocess-v2"
     public var schemaVersion = 1
     public var id: String
     public var sourceHash: String
@@ -71,6 +71,50 @@ public struct DiagramRunInfo: Codable, Sendable {
 
 public enum DiagramEdgeDirection: String, Codable, Sendable {
     case forward, backward, both, none
+
+    public var symbol: String {
+        switch self {
+        case .forward: return "→"
+        case .backward: return "←"
+        case .both: return "↔"
+        case .none: return "—"
+        }
+    }
+}
+
+public enum DiagramKind: String, Codable, Sendable {
+    case graph, sequence, state
+}
+
+public enum DiagramConnectionKind: String, Codable, Sendable {
+    case association, aggregation, composition, generalization, realization, dependency, containment
+    case message, reply, transition, dashed
+
+    public var title: String {
+        switch self {
+        case .association: return "Ассоциация"
+        case .aggregation: return "Агрегация"
+        case .composition: return "Композиция"
+        case .generalization: return "Обобщение"
+        case .realization: return "Реализация"
+        case .dependency: return "Зависимость"
+        case .containment: return "Вложенность"
+        case .message: return "Сообщение"
+        case .reply: return "Ответное сообщение"
+        case .transition: return "Переход"
+        case .dashed: return "Пунктирная связь"
+        }
+    }
+
+    var endpointSymbol: String? {
+        switch self {
+        case .aggregation: return "◇"
+        case .composition: return "◆"
+        case .generalization, .realization: return "△"
+        case .containment: return "⊕"
+        case .association, .dependency, .message, .reply, .transition, .dashed: return nil
+        }
+    }
 }
 
 public struct DiagramNode: Codable, Sendable, Equatable, Identifiable {
@@ -80,14 +124,26 @@ public struct DiagramNode: Codable, Sendable, Equatable, Identifiable {
     public init(id: String, label: String, uncertain: Bool = false) { self.id = id; self.label = label; self.uncertain = uncertain }
 }
 
-public struct DiagramEdge: Codable, Sendable, Equatable {
+public struct DiagramEdge: Codable, Sendable, Hashable {
     public var from: String
     public var to: String
+    /// Forward puts the arrowhead or UML endpoint decoration on `to`.
     public var direction: DiagramEdgeDirection
     public var label: String?
     public var uncertain: Bool
-    public init(from: String, to: String, direction: DiagramEdgeDirection, label: String? = nil, uncertain: Bool = false) {
-        self.from = from; self.to = to; self.direction = direction; self.label = label; self.uncertain = uncertain
+    public var kind: DiagramConnectionKind?
+    public init(from: String, to: String, direction: DiagramEdgeDirection, label: String? = nil,
+                uncertain: Bool = false, kind: DiagramConnectionKind? = nil) {
+        self.from = from; self.to = to; self.direction = direction; self.label = label; self.uncertain = uncertain; self.kind = kind
+    }
+
+    public var symbol: String {
+        guard let mark = kind?.endpointSymbol else { return direction.symbol }
+        switch direction {
+        case .forward: return "—" + mark
+        case .backward: return mark + "—"
+        case .none, .both: return direction.symbol
+        }
     }
 }
 
@@ -102,10 +158,11 @@ public struct DiagramResult: Codable, Sendable, Equatable {
     public var schemaVersion = 1
     public var fingerprint: String
     public var language: String?
+    public var kind: DiagramKind?
     public var nodes: [DiagramNode]
     public var edges: [DiagramEdge]
-    public init(fingerprint: String, language: String? = nil, nodes: [DiagramNode], edges: [DiagramEdge]) {
-        self.fingerprint = fingerprint; self.language = language; self.nodes = nodes; self.edges = edges
+    public init(fingerprint: String, language: String? = nil, kind: DiagramKind? = nil, nodes: [DiagramNode], edges: [DiagramEdge]) {
+        self.fingerprint = fingerprint; self.language = language; self.kind = kind; self.nodes = nodes; self.edges = edges
     }
     public func validate(expectedFingerprint: String) throws {
         guard schemaVersion == 1, fingerprint == expectedFingerprint else {
@@ -126,6 +183,13 @@ public struct DiagramResult: Codable, Sendable, Equatable {
             }
             if let label = edge.label, (label.isEmpty || label.count > Self.maxLabelLength) {
                 throw ScribeError.message("Некорректная подпись связи схемы")
+            }
+            if (kind == .sequence || edge.kind?.endpointSymbol != nil),
+               edge.direction == .none || edge.direction == .both {
+                throw ScribeError.message("Для этой связи нужно указать один конец со стрелкой или маркером")
+            }
+            if kind == .sequence, let connection = edge.kind, connection != .message && connection != .reply {
+                throw ScribeError.message("Некорректный тип сообщения на диаграмме последовательности")
             }
         }
     }

@@ -152,22 +152,14 @@ struct DiagramDetailColumn: View {
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    @ViewBuilder private func edgeRow(_ result: DiagramResult, _ edge: DiagramEdge) -> some View {
+    private func edgeRow(_ result: DiagramResult, _ edge: DiagramEdge) -> some View {
         func label(_ id: String) -> String {
-            result.nodes.first { $0.id == id }?.label ?? id
-        }
-        let arrow: String
-        switch edge.direction {
-        case .forward: arrow = "→"
-        case .backward: arrow = "←"
-        case .both: arrow = "↔"
-        case .none: arrow = "—"
+            result.nodes.first { $0.id == id }?.label.split(whereSeparator: \.isNewline).joined(separator: " ") ?? id
         }
         return HStack(spacing: 6) {
-            Image(systemName: edge.uncertain ? "arrow.triangle.2.circlepath.dashed" : "arrow.right")
-                .foregroundStyle(edge.uncertain ? .orange : .secondary)
-            Text("\(label(edge.from)) \(arrow) \(label(edge.to))")
+            Text("\(label(edge.from)) \(edge.symbol) \(label(edge.to))")
             if let text = edge.label { Text("(\(text))").foregroundStyle(.secondary) }
+            if let kind = edge.kind { Text(kind.title).font(.caption).foregroundStyle(.secondary) }
             if edge.uncertain { Text("не подтверждена").font(.caption2).foregroundStyle(.orange) }
         }.font(.callout)
     }

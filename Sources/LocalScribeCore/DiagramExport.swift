@@ -20,8 +20,9 @@ public enum DiagramExport {
         lines.append("")
         for edge in result.edges {
             guard let from = label(of: edge.from, in: result), let to = label(of: edge.to, in: result) else { continue }
-            var line = "- " + escapeMarkdown(from) + " " + markdownArrow(edge.direction) + " " + escapeMarkdown(to)
+            var line = "- " + escapeMarkdown(from) + " " + edge.symbol + " " + escapeMarkdown(to)
             if let edgeLabel = edge.label { line += " (" + escapeMarkdown(edgeLabel) + ")" }
+            if let kind = edge.kind { line += " · " + kind.title }
             if edge.uncertain { line += " ⚠ не подтверждена" }
             lines.append(line)
         }
@@ -32,15 +33,6 @@ public enum DiagramExport {
             for warning in warnings { lines.append("- " + escapeMarkdown(warning)) }
         }
         return lines.joined(separator: "\n") + "\n"
-    }
-
-    private static func markdownArrow(_ direction: DiagramEdgeDirection) -> String {
-        switch direction {
-        case .forward: return "→"
-        case .both: return "↔"
-        case .backward: return "←"
-        case .none: return "—"
-        }
     }
 
     /// Control characters and line breaks never create new markdown lines;
@@ -65,13 +57,24 @@ public enum DiagramExport {
         var lines: [String] = []
         lines.append("@startuml")
         lines.append("' " + plantumlSafe(title, warnings: &warnings))
+        let sequence = result.kind == .sequence
+        let declaration = sequence ? "participant" : "rectangle"
         let aliases = Dictionary(uniqueKeysWithValues: result.nodes.enumerated().map { ($1.id, "n\($0)") })
         for (index, node) in result.nodes.enumerated() {
-            lines.append("rectangle \"\(plantumlSafe(node.label, warnings: &warnings))\" as n\(index)")
+            let label = node.label.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+                .map { plantumlSafe(String($0), warnings: &warnings) }.joined(separator: "\\n")
+            lines.append("\(declaration) \"\(label)\" as n\(index)")
         }
         for edge in result.edges {
             guard let from = aliases[edge.from], let to = aliases[edge.to] else { continue }
-            var line = from + " " + connector(edge) + " " + to
+            var line: String
+            if sequence || edge.kind?.endpointSymbol != nil {
+                let (source, target) = edge.direction == .backward ? (to, from) : (from, to)
+                let arrow = sequence ? messageConnector(edge) : endpointConnector(edge)
+                line = source + " " + arrow + " " + target
+            } else {
+                line = from + " " + connector(edge) + " " + to
+            }
             if let edgeLabel = edge.label { line += " : " + plantumlSafe(edgeLabel, warnings: &warnings) }
             lines.append(line)
         }
@@ -79,7 +82,36 @@ public enum DiagramExport {
         return (lines.joined(separator: "\n") + "\n", warnings)
     }
 
+    private static func messageConnector(_ edge: DiagramEdge) -> String {
+        let color = edge.uncertain ? "[#orange]" : ""
+        return edge.kind == .reply ? "--" + color + ">>" : "-" + color + ">"
+    }
+
+    private static func endpointConnector(_ edge: DiagramEdge) -> String {
+        let solid = edge.uncertain ? "-[#orange]-" : "--"
+        switch edge.kind {
+        case .composition: return solid + "*"
+        case .aggregation: return solid + "o"
+        case .containment: return solid + "+"
+        case .generalization: return solid + "|>"
+        case .realization: return edge.uncertain ? "-[#orange,dashed]-|>" : "..|>"
+        default: return connector(edge)
+        }
+    }
+
     private static func connector(_ edge: DiagramEdge) -> String {
+        if let kind = edge.kind {
+            let dashed = kind == .dependency || kind == .reply || kind == .dashed
+            let stroke = dashed ? ".." : "--"
+            let style = dashed ? "[#orange,dashed]" : "[#orange]"
+            let line = edge.uncertain ? "-" + style + "-" : stroke
+            switch edge.direction {
+            case .forward: return line + ">"
+            case .backward: return "<" + line
+            case .both: return "<" + line + ">"
+            case .none: return line
+            }
+        }
         switch (edge.direction, edge.uncertain) {
         case (.forward, false): return "-->"
         case (.backward, false): return "<--"
@@ -109,6 +141,8 @@ public enum DiagramExport {
             }
             if isPlantumlAllowed(scalar) {
                 output.append(scalar)
+            } else if let entity = plantumlLiteralPunctuation[scalar] {
+                output.append(contentsOf: entity.unicodeScalars)
             } else {
                 output.append("?")
                 replacedUnsafe = true
@@ -126,6 +160,12 @@ public enum DiagramExport {
     private static let unsafeSymbolWarning = "Подписи схемы содержат символы, которые нельзя безопасно передать в PlantUML; они заменены на «?»"
 
     private static let plantumlAllowedPunctuation: Set<UnicodeScalar> = ["-", "+", ",", ".", "(", ")", "?", "_", "="]
+    // Emit renderer escapes for visible UML punctuation that could otherwise
+    // be interpreted as markup. The escapes themselves never come from input.
+    private static let plantumlLiteralPunctuation: [UnicodeScalar: String] = [
+        "*": "<U+002A>", ":": "<U+003A>", "#": "<U+0023>", "[": "<U+005B>", "]": "<U+005D>",
+        "«": "<U+00AB>", "»": "<U+00BB>",
+    ]
     private static func isPlantumlAllowed(_ scalar: UnicodeScalar) -> Bool {
         if scalar.properties.isAlphabetic { return true }
         if scalar.properties.numericType == .decimal { return true }

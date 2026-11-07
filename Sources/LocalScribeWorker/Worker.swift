@@ -119,7 +119,7 @@ import LocalScribeSpeakerKit
             let recognizer = MLXDiagramRecognizer(folder: URL(fileURLWithPath: CommandLine.arguments[2]))
             let started = Date()
             let answer = try await recognizer.generate(prompt: DiagramEngine.systemPrompt,
-                imageURL: URL(fileURLWithPath: CommandLine.arguments[3]), maxTokens: 2000)
+                image: .original(URL(fileURLWithPath: CommandLine.arguments[3])), maxTokens: DiagramEngine.maxOutputTokens)
             if CommandLine.arguments.count > 4 {
                 try answer.output.write(toFile: CommandLine.arguments[4], atomically: true, encoding: .utf8)
             }
