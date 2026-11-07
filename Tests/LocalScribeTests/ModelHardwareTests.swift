@@ -81,7 +81,7 @@ final class ModelHardwareTests: XCTestCase {
             changed.models[index].recommendedMemoryGB = 999
         }
         XCTAssertEqual(changed.fingerprint, catalog.fingerprint)
-        let legacy = ModelCatalog(models: ModelRole.allCases.compactMap { role in catalog.models.first { $0.id == role.rawValue } })
+        let legacy = ModelCatalog(models: ModelRole.audioRoles.compactMap { role in catalog.models.first { $0.id == role.rawValue } })
         XCTAssertEqual(legacy.fingerprint, Disk.fingerprint(legacy.models.map(\.revision).joined(separator: ":")))
         var info = RunInfo(sourceHash: "source", profileHash: legacy.fingerprint)
         info.modelIDs = Dictionary(uniqueKeysWithValues: legacy.models.map { ($0.purpose!.rawValue, $0.id) })

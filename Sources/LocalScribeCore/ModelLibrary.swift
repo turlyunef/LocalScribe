@@ -66,15 +66,22 @@ public struct ModelLibrary: Codable, Sendable {
         }
     }
     public func activeCatalog(from catalog: ModelCatalog) -> ModelCatalog? {
-        var profiles = ModelRole.allCases.compactMap { role in
+        var profiles = ModelRole.audioRoles.compactMap { role in
             catalog.models.first { $0.purpose == role && $0.id == selectedByRole[role.rawValue] && isInstalled($0) }
         }
-        guard profiles.count == ModelRole.allCases.count else { return nil }
+        guard profiles.count == ModelRole.audioRoles.count else { return nil }
         if let id = profiles.first(where: { $0.purpose == .asr })?.alignerID {
             guard let aligner = catalog.models.first(where: { $0.id == id && $0.purpose == nil }),
                   isInstalled(aligner) else { return nil }
             profiles.append(aligner)
         }
         return ModelCatalog(models: profiles)
+    }
+    /// Diagram readiness is independent: it never gates or completes the audio complect.
+    public func diagramProfile(from catalog: ModelCatalog) -> ModelProfile? {
+        guard let id = selectedByRole[ModelRole.diagram.rawValue],
+              let profile = catalog.models.first(where: { $0.id == id && $0.purpose == .diagram }),
+              isInstalled(profile) else { return nil }
+        return profile
     }
 }

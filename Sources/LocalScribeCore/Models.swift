@@ -2,13 +2,16 @@ import Darwin
 import Foundation
 
 public enum ModelRole: String, Codable, CaseIterable, Sendable {
-    case asr, diarization, summary, tokenizer
+    case asr, diarization, summary, tokenizer, diagram
+    /// The immutable audio complect order; diagram readiness never affects it.
+    public static let audioRoles: [ModelRole] = [.asr, .diarization, .summary, .tokenizer]
     public var title: String {
         switch self {
         case .asr: return "Распознавание речи"
         case .diarization: return "Определение участников"
         case .summary: return "Итоги"
         case .tokenizer: return "Токенизатор речи"
+        case .diagram: return "Распознавание схем"
         }
     }
 }
@@ -77,10 +80,10 @@ public struct ModelCatalog: Codable, Sendable {
     /// The role order and fingerprint algorithm also preserve legacy checkpoints.
     public func pinned(to info: RunInfo) throws -> ModelCatalog {
         guard schemaVersion == 1 else { throw ScribeError.message("Несовместимая версия каталога моделей") }
-        if let ids = info.modelIDs, Set(ids.keys) != Set(ModelRole.allCases.map(\.rawValue)) {
+        if let ids = info.modelIDs, Set(ids.keys) != Set(ModelRole.audioRoles.map(\.rawValue)) {
             throw ScribeError.message("Некорректный закреплённый комплект моделей")
         }
-        var profiles = try ModelRole.allCases.map { role in
+        var profiles = try ModelRole.audioRoles.map { role in
             let id = try info.modelID(for: role)
             let matches = models.filter { $0.id == id && $0.purpose == role }
             guard matches.count == 1 else { throw ScribeError.message("Закреплённая модель \(id) недоступна в каталоге") }

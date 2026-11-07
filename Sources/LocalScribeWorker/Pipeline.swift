@@ -8,15 +8,17 @@ actor Pipeline {
     let emit: @Sendable (String, String, String?) -> Void
     let recording: URL; let run: URL; let models: URL; let tools: URL
     let manifest: Manifest; let info: RunInfo
+    let stage: Stage
     let engineFactory: ASREngineFactory
     let hardware: ModelHardware
     var wave: URL { run.appendingPathComponent("work/audio.wav") }
     private func modelFolder(_ role: ModelRole) throws -> URL { models.appendingPathComponent(try info.modelID(for: role)) }
     init(command: WorkerCommand, hardware: ModelHardware = .current, engineFactory: ASREngineFactory = .init(), emit: @escaping @Sendable (String, String, String?) -> Void) throws {
-        guard UUID(uuidString: command.jobId) != nil, UUID(uuidString: command.runId) != nil else { throw ScribeError.message("Некорректный идентификатор задания") }
-        self.engineFactory = engineFactory; self.command = command; self.emit = emit; self.hardware = hardware
-        recording = URL(fileURLWithPath: command.recordingPath); run = recording.appendingPathComponent("runs/\(command.runId)")
-        models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: command.toolsPath)
+        guard UUID(uuidString: command.jobId) != nil, UUID(uuidString: command.runId) != nil,
+              let stage = command.stage, let recordingPath = command.recordingPath, let toolsPath = command.toolsPath else { throw ScribeError.message("Некорректный идентификатор задания") }
+        self.engineFactory = engineFactory; self.command = command; self.emit = emit; self.hardware = hardware; self.stage = stage
+        recording = URL(fileURLWithPath: recordingPath); run = recording.appendingPathComponent("runs/\(command.runId)")
+        models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: toolsPath)
         manifest = try Disk.read(Manifest.self, at: recording.appendingPathComponent("manifest.json"))
         info = try Disk.read(RunInfo.self, at: run.appendingPathComponent("run.json"))
         guard manifest.schemaVersion == 1, (0...10_800_000).contains(manifest.durationMs),
@@ -26,7 +28,7 @@ actor Pipeline {
         }
         if command.liveCapture == true {
             let capture = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
-            guard command.stage == .transcribing, info.liveCapture == true, info.sourceHash == "capture:" + info.id,
+            guard stage == .transcribing, info.liveCapture == true, info.sourceHash == "capture:" + info.id,
                   manifest.pendingRunId == info.id, capture.id == info.id, capture.fingerprint == info.fingerprint,
                   capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs, info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else { throw ScribeError.message("Некорректное задание фонового распознавания") }
         } else {
@@ -35,7 +37,7 @@ actor Pipeline {
         }
     }
     func perform() async throws -> String {
-        let metrics = command.stage == .transcribing ? ASRMetricsRecorder(run: run, liveCapture: command.liveCapture == true) : nil
+        let metrics = stage == .transcribing ? ASRMetricsRecorder(run: run, liveCapture: command.liveCapture == true) : nil
         do {
             let artifact = try await performStage(asrMetrics: metrics)
             metrics?.finish(status: "completed")
@@ -46,14 +48,14 @@ actor Pipeline {
         }
     }
     private func performStage(asrMetrics: ASRMetricsRecorder?) async throws -> String {
-        let role: ModelRole? = command.stage == .transcribing ? .asr : command.stage == .diarizing ? .diarization : command.stage == .summarizing ? .summary : nil
+        let role: ModelRole? = stage == .transcribing ? .asr : stage == .diarizing ? .diarization : stage == .summarizing ? .summary : nil
         if let role {
             let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
             let pinned = try catalog.pinned(to: info)
             guard let profile = pinned.models.first(where: { $0.purpose == role }) else { throw ScribeError.message("Модель этапа отсутствует") }
             try hardware.requireCompatibility(for: profile)
         }
-        if command.stage == .preparingAudio || command.stage == .transcribing {
+        if stage == .preparingAudio || stage == .transcribing {
             let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
             let pinned = try catalog.pinned(to: info)
             if pinned.models.first(where: { $0.purpose == .asr })?.resolvedASRBackend == "vibevoice-asr" {
@@ -64,7 +66,7 @@ actor Pipeline {
         if command.liveCapture == true {
             return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit, metrics: asrMetrics, engineFactory: engineFactory).perform()
         }
-        switch command.stage {
+        switch stage {
         case .preparingAudio:
             try Disk.requireSpace(Int64(manifest.durationMs) * 32 + 500_000_000, at: run)
             if let warning = try Media.prepare(recording.appendingPathComponent(manifest.originalRelativePath), to: wave, tools: tools) { emit("warning", warning, nil) }

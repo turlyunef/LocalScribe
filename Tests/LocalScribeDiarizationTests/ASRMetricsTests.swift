@@ -26,7 +26,7 @@ final class ASRMetricsTests: XCTestCase {
         try Disk.directory(original.deletingLastPathComponent())
         try Data("fixture".utf8).write(to: original)
         manifest.sha256 = try Disk.hash(original); manifest.sourceComplete = true; manifest.durationMs = 1000
-        let catalog = ModelCatalog(models: ModelRole.allCases.map {
+        let catalog = ModelCatalog(models: ModelRole.audioRoles.map {
             ModelProfile(id: $0.rawValue, repository: "fixture/model", revision: "fixture", license: "test", files: [], role: $0)
         })
         let info = try repository.beginRun(&manifest, catalog: catalog)

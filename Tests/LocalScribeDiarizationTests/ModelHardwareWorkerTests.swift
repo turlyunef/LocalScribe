@@ -33,7 +33,7 @@ final class ModelHardwareWorkerTests: XCTestCase {
         let original = repo.folder(manifest.id).appendingPathComponent(manifest.originalRelativePath)
         try Disk.directory(original.deletingLastPathComponent()); try Data("audio".utf8).write(to: original)
         manifest.sha256 = try Disk.hash(original); manifest.sourceComplete = true; manifest.durationMs = 1000
-        let profiles = ModelRole.allCases.map { role in
+        let profiles = ModelRole.audioRoles.map { role in
             ModelProfile(id: role.rawValue, repository: "fixture/model", revision: "fixed", license: "test", files: [], role: role,
                          recommendedMemoryGB: role == .summary ? 128 : 8, workingMemoryGB: role == .summary ? 88 : 2)
         }

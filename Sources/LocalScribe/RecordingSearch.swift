@@ -65,21 +65,37 @@ import LocalScribeCore
     init(executor: @escaping Executor = { request in try await RecordingSearch.execute(request) }) { self.executor = executor }
     deinit { running?.cancel() }
 
-    func update(_ manifests: [Manifest], groups: RecordingGroups) {
+    /// Corpus input decoupled from Manifest: any archive can feed the same engine.
+    public struct TitleSearchEntry: Equatable, Sendable {
+        public let id: String
+        public let title: String
+        public let date: Date
+
+        public init(id: String, title: String, date: Date) {
+            self.id = id; self.title = title; self.date = date
+        }
+    }
+
+    public func update(_ entries: [TitleSearchEntry], groups: RecordingGroups) {
         guard !stopped else { return }
-        let nextTitles = manifests.map { RecordingTitleSearch.Title(id: $0.id, title: $0.displayTitle) }
-        let nextRows = manifests.map { Row(id: $0.id, date: $0.createdAt, group: groups.groupID(for: $0.id)) }
+        let nextTitles = entries.map { RecordingTitleSearch.Title(id: $0.id, title: $0.title) }
+        let nextRows = entries.map { Row(id: $0.id, date: $0.date, group: groups.groupID(for: $0.id)) }
         let corpusChanged = titles != nextTitles, layoutChanged = rows != nextRows
         guard corpusChanged || layoutChanged else { return }
         titles = nextTitles; rows = nextRows
         if corpusChanged { corpusRevision &+= 1 }
         if layoutChanged { layoutRevision &+= 1 }
         // Removed IDs must disappear before even an uncooperative old job returns.
-        let existing = Set(manifests.map(\.id))
+        let existing = Set(entries.map(\.id))
         normal = normal.mapValues { $0.filter { existing.contains($0) } }
         filtered = filtered.mapValues { $0.filter { existing.contains($0) } }
         matchingIDs.formIntersection(existing)
         schedule()
+    }
+
+    /// Thin adapter over the recording archive.
+    func update(_ manifests: [Manifest], groups: RecordingGroups) {
+        update(manifests.map { TitleSearchEntry(id: $0.id, title: $0.displayTitle, date: $0.createdAt) }, groups: groups)
     }
     private func changeQuery() {
         guard !stopped else { return }

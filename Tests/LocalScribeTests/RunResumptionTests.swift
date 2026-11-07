@@ -4,7 +4,7 @@ import XCTest
 final class RunResumptionTests: XCTestCase {
     private func fixture(_ root: URL) throws -> (RecordingRepository, ModelCatalog, Manifest, RunInfo) {
         let repo = try RecordingRepository(root: root)
-        let profiles = try ModelRole.allCases.map { role in
+        let profiles = try ModelRole.audioRoles.map { role in
             let id = role == .asr ? "asr-a" : role.rawValue
             let data = Data(id.utf8), folder = repo.models.appendingPathComponent(id)
             try Disk.directory(folder)

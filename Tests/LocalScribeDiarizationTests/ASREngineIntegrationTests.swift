@@ -26,7 +26,7 @@ final class ASREngineIntegrationTests: XCTestCase {
 
     private func fixture(_ root: URL, live: Bool) throws -> Fixture {
         let repo = try RecordingRepository(root: root.appendingPathComponent("archive"))
-        let catalog = ModelCatalog(models: ModelRole.allCases.map {
+        let catalog = ModelCatalog(models: ModelRole.audioRoles.map {
             ModelProfile(id: $0.rawValue, repository: "fixture/model", revision: "fixed", license: "test", files: [], role: $0)
         })
         var manifest = Manifest(sourceType: live ? "microphone" : "import", title: "ASR contract", filename: "original.caf")

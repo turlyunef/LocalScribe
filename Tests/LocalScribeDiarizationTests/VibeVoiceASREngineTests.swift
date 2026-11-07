@@ -26,7 +26,7 @@ final class VibeVoiceASREngineTests: XCTestCase {
     }
 
     func testFactorySelectsPinnedVibeVoiceWithoutWhisperOrQwen() async throws {
-        var profiles = ModelRole.allCases.map { ModelProfile(id: $0.rawValue, repository: "fixture/local", revision: "r", license: "test", files: [], role: $0) }
+        var profiles = ModelRole.audioRoles.map { ModelProfile(id: $0.rawValue, repository: "fixture/local", revision: "r", license: "test", files: [], role: $0) }
         profiles[0].asrBackend = "vibevoice-asr"; profiles[0].asrPolicy = VibeVoiceASREngine.policyID
         profiles[0].tokenizerID = "tokenizer"
         let catalog = ModelCatalog(models: profiles)

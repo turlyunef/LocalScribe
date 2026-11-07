@@ -222,7 +222,7 @@ final class ModelTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let repo = try RecordingRepository(root: root.appendingPathComponent("data"))
-        var profiles = try ModelRole.allCases.map { try fixture($0.rawValue, role: $0, root: root).0 }
+        var profiles = try ModelRole.audioRoles.map { try fixture($0.rawValue, role: $0, root: root).0 }
         var small = try fixture("asr-small", role: .asr, root: root).0; small.tokenizerID = "tokenizer-small"
         let tokenizer = try fixture("tokenizer-small", role: .tokenizer, root: root).0
         profiles += [small, tokenizer]

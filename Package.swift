@@ -40,6 +40,7 @@ let package = Package(
         .executableTarget(name: "LocalScribeWorker", dependencies: ["LocalScribeCore", "CWorkerIsolation", "LocalScribeSpeakerKit", "LocalScribeQwen", "LocalScribeVibeVoice",
             .product(name: "WhisperKit", package: "argmax-oss-swift"),
             .product(name: "MLXLLM", package: "mlx-swift-lm"),
+            .product(name: "MLXVLM", package: "mlx-swift-lm"),
             .product(name: "MLXLMCommon", package: "mlx-swift-lm")], swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(name: "LocalScribeTests", dependencies: ["LocalScribeCore"]),
         .testTarget(name: "LocalScribeDiarizationTests", dependencies: ["LocalScribeSpeakerKit", "LocalScribeCore", "LocalScribeWorker", "CWorkerIsolation"]),

@@ -52,6 +52,9 @@ import LocalScribeSpeakerKit
         let outcome: Outcome
         if CommandLine.arguments.count == 4, CommandLine.arguments[1] == "--probe-diarization" {
             outcome = Outcome(code: await probeDiarization(output: protocolOutput))
+        } else if (4...5).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "--probe-diagram" {
+            // Developer probe: raw recognizer errors, no user content.
+            outcome = Outcome(code: await probeDiagram(output: protocolOutput))
         } else {
             outcome = await runCommand(output: protocolOutput, control: control)
         }
@@ -62,6 +65,10 @@ import LocalScribeSpeakerKit
 
     private static func runCommand(output: FileHandle, control: WorkerControl) async -> Outcome {
         guard let command = readCommand() else { return Outcome(code: 64) }
+        // The audio wire format stays kindless; only the diagram discriminator may appear.
+        guard command.kind == nil || command.isDiagram else { return Outcome(code: 64) }
+        if command.isDiagram { return await runDiagram(command: command, output: output, control: control) }
+        guard command.stage != nil, command.recordingPath != nil, command.toolsPath != nil, command.diagramPath == nil else { return Outcome(code: 64) }
         let emit: @Sendable (String, String, String?) -> Void = { type, message, artifact in
             write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
         }
@@ -73,11 +80,59 @@ import LocalScribeSpeakerKit
             let artifact = try await pipeline.perform()
             var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
             let metrics: [String: Double] = ["seconds": Date().timeIntervalSince(started), "maxResidentBytes": Double(usage.ru_maxrss)]
-            try Disk.write(metrics, to: pipeline.run.appendingPathComponent("metrics-\(command.stage.rawValue).json"))
+            try Disk.write(metrics, to: pipeline.run.appendingPathComponent("metrics-\(pipeline.stage.rawValue).json"))
             return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: artifact))
         } catch {
             let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
             return Outcome(code: 1, event: WorkerEvent(command: command, type: "failed", message: safe))
+        }
+    }
+
+    /// Diagram recognition runs on the same one-process lifecycle, control and
+    /// protocol channel as audio; only the engine differs.
+    private static func runDiagram(command: WorkerCommand, output: FileHandle, control: WorkerControl) async -> Outcome {
+        guard let diagramPath = command.diagramPath, command.stage == nil, command.recordingPath == nil else { return Outcome(code: 64) }
+        let emit: @Sendable (String, String, String?) -> Void = { type, message, artifact in
+            write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
+        }
+        await control.watchInput { emit("cancelled", "Обработка отменена", nil); terminateGroup(72) }
+        do {
+            emit("started", "", nil)
+            let started = Date()
+            let engine = try DiagramEngine(command: command, diagramPath: diagramPath, emit: emit)
+            let artifact = try await engine.recognize()
+            var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
+            let metrics: [String: Double] = ["seconds": Date().timeIntervalSince(started), "maxResidentBytes": Double(usage.ru_maxrss)]
+            try Disk.write(metrics, to: engine.run.appendingPathComponent("metrics-diagram.json"))
+            return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: artifact))
+        } catch {
+            let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
+            return Outcome(code: 1, event: WorkerEvent(command: command, type: "failed", message: safe))
+        }
+    }
+
+    /// Developer diagnostic for the diagram recognizer chain: prints the raw
+    /// load/generation error without the neutral production wrapper. Arguments:
+    /// model folder, image path. Never receives user archive content.
+    private static func probeDiagram(output: FileHandle) async -> Int32 {
+        do {
+            let recognizer = MLXDiagramRecognizer(folder: URL(fileURLWithPath: CommandLine.arguments[2]))
+            let started = Date()
+            let answer = try await recognizer.generate(prompt: DiagramEngine.systemPrompt,
+                imageURL: URL(fileURLWithPath: CommandLine.arguments[3]), maxTokens: 2000)
+            if CommandLine.arguments.count > 4 {
+                try answer.output.write(toFile: CommandLine.arguments[4], atomically: true, encoding: .utf8)
+            }
+            var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
+            let metrics: [String: String] = ["status": "ok", "seconds": String(Date().timeIntervalSince(started)),
+                "finished": String(answer.finished), "prefix": String(answer.output.prefix(200)),
+                "maxResidentBytes": String(usage.ru_maxrss)]
+            try output.write(contentsOf: JSONEncoder().encode(metrics) + Data([10]))
+            return 0
+        } catch {
+            let text = ["status": "failed", "error": "\(error)", "type": String(describing: type(of: error))]
+            try? output.write(contentsOf: (try! JSONEncoder().encode(text)) + Data([10]))
+            return 1
         }
     }
 

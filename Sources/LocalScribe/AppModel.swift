@@ -3,18 +3,45 @@ import AppKit
 import AVFoundation
 import LocalScribeCore
 
+/// Jobs of both archives share one FIFO and one worker slot; the kind keeps
+/// identical UUIDs in the recording and diagram archives from colliding.
+enum QueueJobKind: Hashable, Sendable { case recording, diagram }
+struct QueueJobID: Hashable, Sendable {
+    let kind: QueueJobKind
+    let id: String
+    static func recording(_ id: String) -> QueueJobID { QueueJobID(kind: .recording, id: id) }
+    static func diagram(_ id: String) -> QueueJobID { QueueJobID(kind: .diagram, id: id) }
+    var isRecording: Bool { kind == .recording }
+}
+
 @MainActor final class AppModel: ObservableObject {
     @Published private(set) var recordingGroups = RecordingGroups() { didSet { recordingSearch.update(recordings, groups: recordingGroups) } }
     let recordingSearch = RecordingSearch()
     private var recordingsByID: [String: Manifest] = [:]
+    // Diagram archive state: an independent snapshot pipeline fed by DiagramCoordinator.
+    let diagramSearch = RecordingSearch()
+    private var diagramsByID: [String: DiagramManifest] = [:]
+    @Published private(set) var diagrams: [DiagramManifest] = [] {
+        didSet {
+            diagramsByID = Dictionary(uniqueKeysWithValues: diagrams.map { ($0.id, $0) })
+            diagramSearch.update(diagrams.map { RecordingSearch.TitleSearchEntry(id: $0.id, title: $0.displayTitle, date: $0.createdAt) }, groups: diagramGroups)
+        }
+    }
+    @Published private(set) var diagramGroups = RecordingGroups() { didSet { diagramSearch.update(diagrams.map { RecordingSearch.TitleSearchEntry(id: $0.id, title: $0.displayTitle, date: $0.createdAt) }, groups: diagramGroups) } }
+    let diagramRepository: DiagramRepository?
+    let diagramArchive: DiagramCoordinator?
+    private var diagramArchiveRevision: UInt64 = 0
+    private var reportedDiagramGroupsError: String?
+    private var reportedUnreadableDiagramIDs: [String] = []
+    private var deletingDiagramJobs = false
     @Published private(set) var deletingGroupID: String?
     @Published var sidebarRevealID: String?
     @Published private(set) var sidebarSelection = SidebarSelection()
     @Published private(set) var deletingSidebarRecordings = false
     private var reportedGroupsError: String?
     private var reportedUnreadableRecordingIDs: [String] = []
-    private var deletingRecordingIDs: Set<String> = []
-    private var recordingAdmission: [String: UInt64] = [:]
+    private var deletingJobIDs: Set<QueueJobID> = []
+    private var jobAdmission: [QueueJobID: UInt64] = [:]
     private var finalizingRecordingID: String?
     private var startingGroupID: String?
     @Published var recordings: [Manifest] = [] {
@@ -95,17 +122,19 @@ import LocalScribeCore
     private let installer = ModelInstaller()
     private let downloader = ModelDownloadClient()
     private var recorder: MicrophoneRecorder?
-    @Published private var queued: [String] = []
-    private var enqueuing: [String: UUID] = [:]
+    @Published private var queued: [QueueJobID] = []
+    private var enqueuing: [QueueJobID: UUID] = [:]
     private var queueGeneration: UInt64 = 0
-    private var activeID: String?
-    // Unlike activeID, this survives cancellation/resource pause until every
+    private var activeJob: QueueJobID?
+    // Unlike activeJob, this survives cancellation/resource pause until every
     // worker reader and the queue's file cleanup have finished.
-    private var processingRecordingID: String?
+    private var processingJob: QueueJobID?
     private var stopping = false
     private var resourcesPaused = false
     private var memoryLimited = false
     private var captureLimited = false
+    @Published private(set) var resourcePauseTitle: String?
+    @Published private(set) var resourcePauseMessage: String?
     private var suspendingQueue = false
     // Sleep/shutdown pauses own admission barriers independently of row cancellation.
     private var queuePauses: [UUID: String] = [:]
@@ -145,8 +174,19 @@ import LocalScribeCore
         catalog = providedCatalog ?? (try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json")))
         do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; archive = RecordingCoordinator(repository: repo, importProbe: importProbe) }
         catch { repository = nil; archive = nil; errorHandler.report(message: "Не удалось открыть локальное хранилище: \(error.localizedDescription)") }
+        // The diagram archive is a sibling branch of the same Application Support
+        // root; its failure never blocks the recording workspace.
+        if let repository {
+            do {
+                let repo = try DiagramRepository(root: repository.root.appendingPathComponent("diagrams"))
+                diagramRepository = repo; diagramArchive = DiagramCoordinator(repository: repo)
+            } catch {
+                diagramRepository = nil; diagramArchive = nil
+                errorHandler.report(message: "Хранилище схем недоступно: \(error.localizedDescription). Записи продолжают работать.")
+            }
+        } else { diagramRepository = nil; diagramArchive = nil }
         recordingSearch.onVisibilityChange = { [weak self] in self?.retainSearchSelection() }
-        if !startServices { preparingStorage = false; Task { await reload() }; return }
+        if !startServices { preparingStorage = false; Task { await reload(); await reloadDiagrams() }; return }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical, .normal], queue: .main)
         memorySource?.setEventHandler { [weak self] in
             guard let self else { return }
@@ -170,6 +210,15 @@ import LocalScribeCore
                 catch {
                     errorHandler.report(message: "Не удалось восстановить локальное хранилище: \(error.localizedDescription)")
                     await reload()
+                }
+            }
+            if let diagramArchive {
+                // Leftover queued/recognizing runs become «Прервана»; the
+                // recording archive recovery above is independent.
+                do { applyDiagramSnapshot(try await diagramArchive.recover()) }
+                catch {
+                    errorHandler.report(message: "Не удалось восстановить хранилище схем: \(error.localizedDescription). Записи продолжают работать.")
+                    await reloadDiagrams()
                 }
             }
             preparingStorage = false
@@ -503,6 +552,7 @@ import LocalScribeCore
             finalizingRecordingID = nil
             stopping = false; finalizingRecording = false; supervisor.recordingActive = false
             captureLimited = false; resourcesPaused = memoryLimited
+            updateResourcePausePresentation()
             if status == "Сохраняем аудио…" { status = "" }
             Task { await processQueue() }
         }
@@ -513,8 +563,8 @@ import LocalScribeCore
                     m.state = .failed; m.lastError = warning ?? "Микрофон ещё не передал звук. Начните новую запись."
                 }
                 recordingID = nil
-                queued.removeAll { $0 == id }
-                if activeID == id { activeID = nil; await supervisor.cancel() }
+                queued.removeAll { $0 == .recording(id) }
+                if activeJob == .recording(id) { activeJob = nil; await supervisor.cancel() }
                 errorHandler.report(message: m.lastError); await reload(); return
             }
             if let warning {
@@ -524,8 +574,8 @@ import LocalScribeCore
             try await finalizeCapture(id, expectedFrames: frames); recordingID = nil; await enqueue(id)
         } catch {
             recordingID = nil; recorder = nil; errorHandler.report(error)
-            queued.removeAll { $0 == id }
-            if activeID == id { activeID = nil; await supervisor.cancel() }
+            queued.removeAll { $0 == .recording(id) }
+            if activeJob == .recording(id) { activeJob = nil; await supervisor.cancel() }
             let recoverable = await archive.perform { repository in
                 let parts = (try? FileManager.default.contentsOfDirectory(at: repository.folder(id).appendingPathComponent("capture"), includingPropertiesForKeys: nil)) ?? []
                 return parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }
@@ -547,7 +597,7 @@ import LocalScribeCore
             return (result.0, result.1, try Disk.hash(destination))
         }
         if let expectedFrames, frames != expectedFrames { throw ScribeError.message("Сохранены не все сэмплы микрофона. Фрагменты оставлены для восстановления.") }
-        let state: JobState = activeID == id ? .transcribing : .recorded
+        let state: JobState = activeJob == .recording(id) ? .transcribing : .recorded
         // Apply only capture fields to the latest manifest, preserving renames/warnings.
         let m = try await archive.update(id) { m in
             m.durationMs = Int(Double(frames)/rate*1000); m.sampleRate = rate; m.channels = 1; m.sha256 = hash; m.sourceComplete = true
@@ -575,8 +625,8 @@ import LocalScribeCore
         }
     }
     func resume(_ id: String) {
-        guard !preparingStorage, !shuttingDown, !finalizingRecording, queuePauses.isEmpty, !deletingRecordingIDs.contains(id), id != recordingID, id != activeID else { return }
-        let generation = queueGeneration, admission = recordingAdmission[id, default: 0]
+        guard !preparingStorage, !shuttingDown, !finalizingRecording, queuePauses.isEmpty, !deletingJobIDs.contains(.recording(id)), id != recordingID, activeJob != .recording(id) else { return }
+        let generation = queueGeneration, admission = jobAdmission[.recording(id), default: 0]
         finalizingRecordingID = id
         finalizingRecording = true
         Task {
@@ -593,7 +643,7 @@ import LocalScribeCore
                         let parts = (try? FileManager.default.contentsOfDirectory(at: repository.folder(id).appendingPathComponent("capture"), includingPropertiesForKeys: nil)) ?? []
                         return (!m.sourceComplete || needsSeal, parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") })
                     }
-                    guard generation == queueGeneration, admission == recordingAdmission[id, default: 0], !deletingRecordingIDs.contains(id), !shuttingDown else { return }
+                    guard generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0], !deletingJobIDs.contains(.recording(id)), !shuttingDown else { return }
                     if needsAssembly {
                         guard hasParts else {
                             let message = "В этой записи нет сохранённого звука. Начните новую запись."
@@ -603,7 +653,7 @@ import LocalScribeCore
                         try await finalizeCapture(id)
                     }
                 }
-                guard generation == queueGeneration, admission == recordingAdmission[id, default: 0], !deletingRecordingIDs.contains(id), !shuttingDown else { return }
+                guard generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0], !deletingJobIDs.contains(.recording(id)), !shuttingDown else { return }
                 await enqueue(id, allowCancelled: true)
             } catch { errorHandler.report(error) }
         }
@@ -617,30 +667,30 @@ import LocalScribeCore
         catch { errorHandler.report(error) }
     }
     func queuePosition(for id: String) -> Int? {
-        queued.firstIndex(of: id).map { $0 + 1 }
+        queued.firstIndex(of: .recording(id)).map { $0 + 1 }
     }
     func moveToFrontOfQueue(_ id: String) {
-        guard !preparingStorage, !shuttingDown, id != activeID,
-              let index = queued.firstIndex(of: id), index > 0 else { return }
+        guard !preparingStorage, !shuttingDown, activeJob != .recording(id),
+              let index = queued.firstIndex(of: .recording(id)), index > 0 else { return }
         var reordered = queued
         reordered.remove(at: index)
-        reordered.insert(id, at: 0)
+        reordered.insert(.recording(id), at: 0)
         queued = reordered
     }
     func enqueueCapture(_ id: String) async {
         guard let archive else { return }
-        let generation = queueGeneration, admission = recordingAdmission[id, default: 0], pauseReason = queuePauses.values.first
+        let generation = queueGeneration, admission = jobAdmission[.recording(id), default: 0], pauseReason = queuePauses.values.first
         let valid = await archive.perform { repository in
             guard let manifest = try? repository.load(id), manifest.state == .recording, manifest.captureProcessing != .cancelled,
                   let pending = manifest.pendingRunId,
                   let info = try? Disk.read(RunInfo.self, at: repository.run(id, pending).appendingPathComponent("run.json")) else { return false }
             return info.liveCapture == true
         }
-        guard valid, generation == queueGeneration, admission == recordingAdmission[id, default: 0], !deletingRecordingIDs.contains(id), activeID != id, !shuttingDown else { return }
+        guard valid, generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0], !deletingJobIDs.contains(.recording(id)), activeJob != .recording(id), !shuttingDown else { return }
         if let reason = queuePauses.values.first ?? pauseReason {
             await interruptEnqueue(id, reason: reason); return
         }
-        if !queued.contains(id) { queued.append(id) }
+        if !queued.contains(.recording(id)) { queued.append(.recording(id)) }
         Task { await processQueue() }
     }
     private func interruptEnqueue(_ id: String, reason: String) async {
@@ -651,12 +701,12 @@ import LocalScribeCore
         await reload()
     }
     func enqueue(_ id: String, allowCancelled: Bool = false) async {
-        guard let archive, !deletingRecordingIDs.contains(id), enqueuing[id] == nil else { return }
+        guard let archive, !deletingJobIDs.contains(.recording(id)), enqueuing[.recording(id)] == nil else { return }
         let request = UUID(), generation = queueGeneration
         let pauseReason = queuePauses.values.first
-        enqueuing[id] = request
+        enqueuing[.recording(id)] = request
         defer {
-            if enqueuing[id] == request { enqueuing.removeValue(forKey: id) }
+            if enqueuing[.recording(id)] == request { enqueuing.removeValue(forKey: .recording(id)) }
             if !busy { Task { await processQueue() } }
         }
         let m: Manifest
@@ -665,9 +715,9 @@ import LocalScribeCore
             errorHandler.report(message: "Не удалось прочитать запись для продолжения обработки. Файлы сохранены; проверьте архив и повторите попытку.")
             return
         }
-        guard m.sourceComplete, id != activeID,
+        guard m.sourceComplete, activeJob != .recording(id),
               allowCancelled || m.state != .cancelled,
-              generation == queueGeneration, !deletingRecordingIDs.contains(id), enqueuing[id] == request else { return }
+              generation == queueGeneration, !deletingJobIDs.contains(.recording(id)), enqueuing[.recording(id)] == request else { return }
         if shuttingDown {
             _ = try? await archive.update(id) { m in
                 m.state = .interrupted; m.lastError = "Приложение закрыто. Можно продолжить обработку."
@@ -679,7 +729,7 @@ import LocalScribeCore
         }
         let canQueue = m.pendingRunId != nil || modelsReady
         // Reserve FIFO position before suspending for persistence.
-        if canQueue, !queued.contains(id) { queued.append(id) }
+        if canQueue, !queued.contains(.recording(id)) { queued.append(.recording(id)) }
         _ = try? await archive.update(id) { m in
             m.state = canQueue ? .queued : .waitingForModels; m.lastError = nil
         }
@@ -691,25 +741,73 @@ import LocalScribeCore
         try hardware.requireCompatibility(for: profile)
     }
     func processQueue() async {
-        guard deletingGroupID == nil, !deletingSidebarRecordings, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
+        guard deletingGroupID == nil, !deletingSidebarRecordings, !deletingDiagramJobs, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
               let repository, let archive, let catalog else { return }
-        busy = true; defer { busy = false; activeID = nil; processingRecordingID = nil; status = "" }
-        while deletingGroupID == nil && !deletingSidebarRecordings && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
+        busy = true; defer { busy = false; activeJob = nil; processingJob = nil; status = "" }
+        while deletingGroupID == nil && !deletingSidebarRecordings && !deletingDiagramJobs && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
                 status = "Обработка ожидает охлаждения Mac"
                 try? await Task.sleep(for: .seconds(2)); continue
             }
-            let id = queued.removeFirst(); activeID = id; processingRecordingID = id
+            let job = queued.removeFirst(); activeJob = job; processingJob = job
             do {
-                var m = try await archive.load(id)
-                if m.pendingRunId == nil {
-                    guard modelsReady, let selectedCatalog = activeCatalog else {
-                        try await archive.update(id) { $0.state = .waitingForModels }; continue
-                    }
-                    m = try await archive.beginRun(m.id, catalog: selectedCatalog)
+                if job.isRecording {
+                    try await processRecordingJob(job.id)
+                } else {
+                    try await processDiagramJob(job.id)
                 }
-                var info = try await archive.perform { try $0.resumeRun(id, catalog: catalog) }
-                guard activeID == id else { throw CancellationError() }
+            } catch {
+                let message = (error as? ScribeError)?.localizedDescription
+                    ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."
+                if activeJob == job, !(error is CancellationError) { errorHandler.report(message: message) }
+                if !(resourcesPaused && queued.contains(job)) {
+                    let ownsJob = activeJob == job
+                    if job.isRecording {
+                        let isMicrophone = recordingID == job.id
+                        _ = try? await archive.update(job.id) { m in
+                            // A queued job can be cancelled while its previous worker
+                            // is still unwinding a resource pause.
+                            guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
+                            if isMicrophone || !m.sourceComplete && m.state == .recording {
+                                // Processing failure never changes microphone ownership/state.
+                                m.captureProcessing = ownsJob ? .failed : .interrupted
+                            } else if m.state.processing || m.state == .queued || m.state == .recorded {
+                                m.state = ownsJob ? .failed : .interrupted
+                            }
+                            m.lastError = message
+                        }
+                    } else if let diagramArchive {
+                        _ = try? await diagramArchive.update(job.id) { m in
+                            guard m.state != .cancelled else { return }
+                            if m.state.processing || m.state == .queued { m.state = ownsJob ? .failed : .interrupted }
+                            m.lastError = message
+                        }
+                    }
+                }
+            }
+            // Only the owning queue task clears the active job, after all readers exit.
+            if job.isRecording {
+                await archive.perform { try? $0.cleanupTemporaryFiles(job.id) }
+            }
+            activeJob = nil; processingJob = nil
+            if job.isRecording { await reload() } else { await reloadDiagrams() }
+        }
+    }
+    /// One audio job: live ASR of an open capture plus the offline stage loop.
+    /// All invariants (frozen run, per-stage pinned hardware checks, checkpoint
+    /// validation before publication) are unchanged from the single-kind queue.
+    private func processRecordingJob(_ id: String) async throws {
+        let job = QueueJobID.recording(id)
+        guard let repository, let archive, let catalog else { throw CancellationError() }
+        var m = try await archive.load(id)
+        if m.pendingRunId == nil {
+            guard modelsReady, let selectedCatalog = activeCatalog else {
+                try await archive.update(id) { $0.state = .waitingForModels }; return
+            }
+            m = try await archive.beginRun(m.id, catalog: selectedCatalog)
+        }
+        var info = try await archive.perform { try $0.resumeRun(id, catalog: catalog) }
+        guard activeJob == job else { throw CancellationError() }
                 m = try await archive.load(id)
                 let livePending = info.liveCapture == true && info.sourceHash == "capture:" + info.id
                 let run = repository.run(id,info.id)
@@ -723,20 +821,21 @@ import LocalScribeCore
                         } else {
                             m.state = .transcribing; m.captureProcessing = nil
                         }
+                        m.lastError = nil
                     }
                     await reload()
-                    guard activeID == id else { throw CancellationError() }
+                    guard activeJob == job else { throw CancellationError() }
                     var command = WorkerCommand(jobId: id, runId: info.id, stage: .transcribing, recordingPath: repository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
                     command.liveCapture = true
                     try await runWorker(command)
-                    guard activeID == id else { throw CancellationError() }
+                    guard activeJob == job else { throw CancellationError() }
                     let captureInfo = info
                     info = try await archive.perform { try $0.bindLiveTranscript(id, info: captureInfo) }
                     m = try await archive.update(id) { $0.captureProcessing = nil }
                 }
                 let stages: [Stage] = [.preparingAudio,.transcribing,.diarizing,.summarizing]
                 for stage in stages {
-                    if activeID != id { throw CancellationError() }
+                    if activeJob != job { throw CancellationError() }
                     // Explicit recreation records a requested language, even before
                     // the first successful run; older summary-only runs pin a source.
                     // Read the preference at the stage boundary, including after live ASR.
@@ -746,17 +845,20 @@ import LocalScribeCore
                     guard m.sourceComplete else { throw ScribeError.message("Исходник ещё записывается") }
                     let role: ModelRole? = stage == .transcribing ? .asr : stage == .diarizing ? .diarization : stage == .summarizing ? .summary : nil
                     if let role { try requireHardware(for: role, info: info, catalog: catalog) }
-                    guard activeID == id else { throw CancellationError() }
-                    m = try await archive.update(id) { $0.state = JobState(rawValue: stage.rawValue)! }
+                    guard activeJob == job else { throw CancellationError() }
+                    m = try await archive.update(id) {
+                        $0.state = JobState(rawValue: stage.rawValue)!
+                        $0.lastError = nil
+                    }
                     await reload()
-                    guard activeID == id else { throw CancellationError() }
+                    guard activeJob == job else { throw CancellationError() }
                     let command = WorkerCommand(jobId: id, runId: info.id, stage: stage, recordingPath: repository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
                     try await runWorker(command)
-                    guard activeID == id else { throw CancellationError() }
+                    guard activeJob == job else { throw CancellationError() }
                     guard try await archive.perform({ [m, info] _ in try Self.stageComplete(stage, run: run, manifest: m, info: info) }) else { throw ScribeError.message("Worker не создал проверяемый результат этапа") }
                     await reload()
                 }
-                guard activeID == id else { throw CancellationError() }
+                guard activeJob == job else { throw CancellationError() }
                 let completedRunID = info.id
                 // A transcript-only result is valid, but any existing final JSON
                 // must still pass validation before replacing the previous result.
@@ -764,39 +866,55 @@ import LocalScribeCore
                     var completed = m; completed.activeRunId = completedRunID
                     _ = try repository.results(completed)
                 }
-                guard activeID == id else { throw CancellationError() }
+                guard activeJob == job else { throw CancellationError() }
                 try await archive.update(id) { m in
                     m.activeRunId = completedRunID; m.pendingRunId = nil; m.captureProcessing = nil
                     m.state = m.warnings.isEmpty ? .completed : .completedWithWarnings; m.lastError = nil
                 }
-            } catch {
-                let message = (error as? ScribeError)?.localizedDescription
-                    ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."
-                if activeID == id, !(error is CancellationError) { errorHandler.report(message: message) }
-                if !(resourcesPaused && queued.contains(id)) {
-                    let isRecording = recordingID == id, ownsJob = activeID == id
-                    _ = try? await archive.update(id) { m in
-                        // A queued job can be cancelled while its previous worker
-                        // is still unwinding a resource pause.
-                        guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
-                        if isRecording || !m.sourceComplete && m.state == .recording {
-                            // Processing failure never changes microphone ownership/state.
-                            m.captureProcessing = ownsJob ? .failed : .interrupted
-                        } else if m.state.processing || m.state == .queued || m.state == .recorded {
-                            m.state = ownsJob ? .failed : .interrupted
-                        }
-                        m.lastError = message
-                    }
-                }
-            }
-            // Only the owning queue task clears activeID, after all readers exit.
-            await archive.perform { try? $0.cleanupTemporaryFiles(id) }
-            activeID = nil; processingRecordingID = nil; await reload()
+    }
+
+    /// One diagram job: the run is frozen at enqueue time; recognition itself
+    /// runs in the same single worker slot, and the coordinator switches the
+    /// active run only after the artifact passes full validation.
+    private func processDiagramJob(_ id: String) async throws {
+        let job = QueueJobID.diagram(id)
+        guard let repository, let diagramArchive, let diagramRepository else { throw ScribeError.message("Хранилище схем недоступно") }
+        var m = try await diagramArchive.load(id)
+        guard m.pendingRunId != nil else {
+            // Diagram jobs always enter the FIFO with a frozen run; without one
+            // the job returns to «Ожидает модель» and leaves the queue running.
+            try await diagramArchive.update(id) { $0.state = .waitingForModels }
+            return
         }
+        let info = try await diagramArchive.resumeRun(id)
+        guard activeJob == job else { throw CancellationError() }
+        m = try await diagramArchive.update(id) {
+            $0.state = .recognizing; $0.lastError = nil
+        }
+        await reloadDiagrams()
+        guard activeJob == job else { throw CancellationError() }
+        let command = WorkerCommand(diagramJobId: id, runId: info.id, diagramPath: diagramRepository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
+        try await runWorker(command)
+        guard activeJob == job else { throw CancellationError() }
+        m = try await diagramArchive.load(id)
+        guard m.state != .cancelled else { throw CancellationError() }
+        _ = try await diagramArchive.completeRun(id, runId: info.id, warnings: m.warnings)
+        await reloadDiagrams()
     }
     private func runWorker(_ command: WorkerCommand) async throws {
         try await supervisor.run(command, executable: worker) { event in
             if event.type == "progress" { self.status = event.message }
+            if command.isDiagram {
+                // Diagram recognition has no checkpoints or result drafts; only
+                // warnings touch the diagram manifest.
+                if event.type == "warning", let diagramArchive = self.diagramArchive {
+                    _ = try? await diagramArchive.update(command.jobId) { current in
+                        if !current.warnings.contains(event.message) { current.warnings.append(event.message) }
+                    }
+                    await self.reloadDiagrams()
+                }
+                return
+            }
             if event.type == "checkpoint" {
                 self.resultSignature = ""; self.loadResult()
             }
@@ -810,20 +928,28 @@ import LocalScribeCore
     }
     func resumeAfterMemoryPressure() {
         memoryLimited = false; resourcesPaused = captureLimited
+        updateResourcePausePresentation()
         Task { await resourcePauseTask?.value; await processQueue() }
     }
     func pauseForCaptureResources(memoryPressure: Bool = false) {
         if memoryPressure { memoryLimited = true } else { captureLimited = true }
         resourcesPaused = true
+        updateResourcePausePresentation()
         guard resourcePauseTask == nil else { return }
+        let pauseMessage = resourcePauseMessage
         resourcePauseTask = Task {
-            if let id = activeID {
-                activeID = nil
-                if !queued.contains(id) { queued.insert(id, at: 0) }
-                if let archive {
-                    _ = try? await archive.update(id) { m in
+            if let job = activeJob {
+                activeJob = nil
+                if !queued.contains(job) { queued.insert(job, at: 0) }
+                if job.isRecording, let archive {
+                    _ = try? await archive.update(job.id) { m in
                         if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .queued }
-                        m.lastError = "Распознавание приостановлено, чтобы сохранить звук при нехватке ресурсов."
+                        m.lastError = pauseMessage
+                    }
+                } else if !job.isRecording, let diagramArchive {
+                    _ = try? await diagramArchive.update(job.id) {
+                        if $0.state == .recognizing || $0.state == .queued { $0.state = .queued }
+                        $0.lastError = pauseMessage
                     }
                 }
                 await supervisor.cancel()
@@ -832,6 +958,18 @@ import LocalScribeCore
             resourcePauseTask = nil
             await reload()
             if !resourcesPaused { await processQueue() }
+        }
+    }
+    private func updateResourcePausePresentation() {
+        if memoryLimited {
+            resourcePauseTitle = "Очередь приостановлена: не хватает памяти"
+            resourcePauseMessage = "Обработка приостановлена из-за нехватки памяти. Она продолжится автоматически, когда macOS сообщит, что память освободилась. Аудио и контрольные точки сохранены."
+        } else if captureLimited {
+            resourcePauseTitle = "Очередь приостановлена: сохраняем звук"
+            resourcePauseMessage = "Фоновая обработка приостановлена, чтобы микрофон продолжил сохранять звук без потерь. Она продолжится автоматически после остановки записи."
+        } else {
+            resourcePauseTitle = nil
+            resourcePauseMessage = nil
         }
     }
     nonisolated static func stageComplete(_ stage: Stage, run: URL, manifest: Manifest, info: RunInfo) throws -> Bool {
@@ -862,13 +1000,19 @@ import LocalScribeCore
         let pauseID = UUID()
         queuePauses[pauseID] = reason
         defer { queuePauses.removeValue(forKey: pauseID) }
-        let ids = queued + (activeID.map { [$0] } ?? [])
-        queued.removeAll(); activeID = nil
-        if let archive {
-            for id in Set(ids) {
-                _ = try? await archive.update(id) { m in
+        let jobs = queued + (activeJob.map { [$0] } ?? [])
+        queued.removeAll(); activeJob = nil
+        for job in Set(jobs) {
+            if job.isRecording, let archive {
+                _ = try? await archive.update(job.id) { m in
                     guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
                     if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
+                    m.lastError = reason
+                }
+            } else if !job.isRecording, let diagramArchive {
+                _ = try? await diagramArchive.update(job.id) { m in
+                    guard m.state != .cancelled else { return }
+                    if m.state.processing || m.state == .queued { m.state = .interrupted }
                     m.lastError = reason
                 }
             }
@@ -876,6 +1020,7 @@ import LocalScribeCore
         await supervisor.cancel()
         while busy { try? await Task.sleep(for: .milliseconds(50)) }
         await reload()
+        await reloadDiagrams()
     }
     func cancelSelected() async {
         guard let id = selection else { return }
@@ -883,11 +1028,11 @@ import LocalScribeCore
     }
     func cancel(_ id: String) async {
         guard let archive else { return }
-        recordingAdmission[id, default: 0] &+= 1
-        enqueuing.removeValue(forKey: id)
-        queued.removeAll { $0 == id }
-        if activeID == id || processingRecordingID == id {
-            suspendingQueue = true; activeID = nil
+        jobAdmission[.recording(id), default: 0] &+= 1
+        enqueuing.removeValue(forKey: .recording(id))
+        queued.removeAll { $0 == .recording(id) }
+        if activeJob == .recording(id) || processingJob == .recording(id) {
+            suspendingQueue = true; activeJob = nil
             await supervisor.cancel()
             while busy { try? await Task.sleep(for: .milliseconds(50)) }
             suspendingQueue = false
@@ -939,16 +1084,16 @@ import LocalScribeCore
     func deleteSidebarRecordings(_ ids: Set<String>) async {
         guard let archive, canDeleteSidebarRecordings(ids) else { return }
         deletingSidebarRecordings = true
-        deletingRecordingIDs.formUnion(ids)
+        deletingJobIDs.formUnion(ids.map { QueueJobID.recording($0) })
         // Bar every selected job before cancellation can yield to an enqueue response.
         for id in ids {
-            recordingAdmission[id, default: 0] &+= 1
-            enqueuing.removeValue(forKey: id)
+            jobAdmission[.recording(id), default: 0] &+= 1
+            enqueuing.removeValue(forKey: .recording(id))
         }
-        queued.removeAll { ids.contains($0) }
+        queued.removeAll { $0.isRecording && ids.contains($0.id) }
         defer {
             deletingSidebarRecordings = false
-            deletingRecordingIDs.subtract(recordings.map(\.id))
+            deletingJobIDs.subtract(recordings.map { QueueJobID.recording($0.id) })
             Task { await processQueue() }
         }
         for id in ids.sorted() { await cancel(id) }
@@ -1032,7 +1177,7 @@ import LocalScribeCore
         defer {
             deletingGroupID = nil
             // Deleted IDs stay barred; surviving members can be explicitly resumed.
-            deletingRecordingIDs.subtract(recordings.map(\.id))
+            deletingJobIDs.subtract(recordings.map { QueueJobID.recording($0.id) })
             Task { await processQueue() }
         }
         do {
@@ -1042,13 +1187,13 @@ import LocalScribeCore
                 guard canDeleteRecordings(in: id), protected.isDisjoint(with: members) else {
                     throw ScribeError.message("Сначала остановите запись")
                 }
-                deletingRecordingIDs.formUnion(members)
+                deletingJobIDs.formUnion(members.map { QueueJobID.recording($0) })
                 // Invalidate all admissions before the first cancellation suspends.
                 for member in members {
-                    recordingAdmission[member, default: 0] &+= 1
-                    enqueuing.removeValue(forKey: member)
+                    jobAdmission[.recording(member), default: 0] &+= 1
+                    enqueuing.removeValue(forKey: .recording(member))
                 }
-                queued.removeAll { members.contains($0) }
+                queued.removeAll { $0.isRecording && members.contains($0.id) }
                 for member in members { await cancel(member) }
             }
             try await archive.finishGroupDeletion(id, deleteRecordings: deleteRecordings)
@@ -1059,6 +1204,184 @@ import LocalScribeCore
         await reload()
         if let selection, !recordings.contains(where: { $0.id == selection }) { self.selection = nil }
     }
+    // MARK: - Diagrams
+
+    /// Selected, installed and hardware-compatible diagram model; readiness is
+    /// fully independent of the four-role audio complect.
+    var diagramProfile: ModelProfile? {
+        guard let catalog, let profile = modelLibrary.diagramProfile(from: catalog),
+              hardware.compatibility(for: profile).isCompatible else { return nil }
+        return profile
+    }
+    var diagramModelsReady: Bool { diagramProfile != nil }
+    func reloadDiagrams() async {
+        guard let diagramArchive else { return }
+        applyDiagramSnapshot(await diagramArchive.snapshot())
+        await diagramSearch.waitForLayout()
+    }
+    private func applyDiagramSnapshot(_ snapshot: DiagramCoordinator.Snapshot?) {
+        guard let snapshot, snapshot.revision >= diagramArchiveRevision, snapshot.revision != diagramArchiveRevision else { return }
+        diagramArchiveRevision = snapshot.revision
+        diagrams = snapshot.manifests
+        diagramGroups = snapshot.groups
+        if snapshot.unreadableDiagramIDs != reportedUnreadableDiagramIDs {
+            reportedUnreadableDiagramIDs = snapshot.unreadableDiagramIDs
+            if !snapshot.unreadableDiagramIDs.isEmpty {
+                errorHandler.report(message: "Не удалось прочитать схемы архива: " + snapshot.unreadableDiagramIDs.joined(separator: ", ") + ". Файлы сохранены для восстановления. Проверьте manifest.json в каталогах этих схем.")
+            }
+        }
+        if let error = snapshot.groupsError, error != reportedDiagramGroupsError {
+            reportedDiagramGroupsError = error; errorHandler.report(message: error)
+        }
+    }
+    /// Import publishes the manifest first; auto-queueing happens only when the
+    /// diagram model is ready, otherwise the item waits with an explicit start.
+    func importDiagramImage(at url: URL, groupID: String) async -> DiagramManifest? {
+        guard !shuttingDown, let diagramArchive else { errorHandler.report(message: "Хранилище схем недоступно"); return nil }
+        do {
+            let manifest = try await diagramArchive.importImage(url, groupID: groupID)
+            await reloadDiagrams()
+            if let profile = diagramProfile {
+                _ = try await diagramArchive.beginRun(manifest.id, profile: profile)
+                await reloadDiagrams()
+                await enqueueDiagram(manifest.id)
+            }
+            return manifest
+        } catch {
+            errorHandler.report(error)
+            await reloadDiagrams()
+            return nil
+        }
+    }
+    /// Explicit start or retry: a new run is always created; diagram runs never
+    /// promise token-level continuation.
+    func recognizeDiagram(_ id: String) async {
+        guard !shuttingDown, let diagramArchive else { return }
+        guard let profile = diagramProfile else {
+            errorHandler.report(message: "Сначала загрузите модель схем в настройках")
+            return
+        }
+        do {
+            _ = try await diagramArchive.beginRun(id, profile: profile)
+            await reloadDiagrams()
+            await enqueueDiagram(id, allowCancelled: true)
+        } catch { errorHandler.report(error) }
+    }
+    func enqueueDiagram(_ id: String, allowCancelled: Bool = false) async {
+        guard let diagramArchive, !deletingJobIDs.contains(.diagram(id)), enqueuing[.diagram(id)] == nil else { return }
+        let request = UUID(), generation = queueGeneration
+        let pauseReason = queuePauses.values.first
+        enqueuing[.diagram(id)] = request
+        defer {
+            if enqueuing[.diagram(id)] == request { enqueuing.removeValue(forKey: .diagram(id)) }
+            if !busy { Task { await processQueue() } }
+        }
+        let m: DiagramManifest
+        do { m = try await diagramArchive.load(id) }
+        catch {
+            errorHandler.report(message: "Не удалось прочитать схему для распознавания. Файлы сохранены; проверьте архив и повторите попытку.")
+            return
+        }
+        guard allowCancelled || m.state != .cancelled, activeJob != .diagram(id),
+              generation == queueGeneration, !deletingJobIDs.contains(.diagram(id)), enqueuing[.diagram(id)] == request else { return }
+        if shuttingDown {
+            _ = try? await diagramArchive.update(id) {
+                $0.state = .interrupted; $0.lastError = "Приложение закрыто. Можно повторить распознавание."
+            }
+            await reloadDiagrams(); return
+        }
+        if let reason = queuePauses.values.first ?? pauseReason {
+            _ = try? await diagramArchive.update(id) {
+                if $0.state != .cancelled { $0.state = .interrupted }
+                $0.lastError = reason
+            }
+            await reloadDiagrams(); return
+        }
+        guard m.pendingRunId != nil || diagramProfile != nil else {
+            // Without a frozen run and a ready model the item stays outside the FIFO.
+            _ = try? await diagramArchive.update(id) { $0.state = .waitingForModels }
+            await reloadDiagrams(); return
+        }
+        if m.pendingRunId == nil, let profile = diagramProfile {
+            do { _ = try await diagramArchive.beginRun(id, profile: profile) }
+            catch { errorHandler.report(error); return }
+        }
+        if !queued.contains(.diagram(id)) { queued.append(.diagram(id)) }
+        _ = try? await diagramArchive.update(id) { $0.state = .queued; $0.lastError = nil }
+        await reloadDiagrams()
+    }
+    func cancelDiagram(_ id: String) async {
+        guard let diagramArchive else { return }
+        jobAdmission[.diagram(id), default: 0] &+= 1
+        enqueuing.removeValue(forKey: .diagram(id))
+        queued.removeAll { $0 == .diagram(id) }
+        if activeJob == .diagram(id) || processingJob == .diagram(id) {
+            suspendingQueue = true; activeJob = nil
+            await supervisor.cancel()
+            while busy { try? await Task.sleep(for: .milliseconds(50)) }
+            suspendingQueue = false
+            Task { await processQueue() }
+        }
+        _ = try? await diagramArchive.cancel(id)
+        await reloadDiagrams()
+    }
+    /// Deleting first bars re-admission, then waits for exactly its own worker
+    /// and readers before removing artifacts — same lifecycle as recordings.
+    func deleteDiagrams(_ ids: Set<String>) async {
+        guard let diagramArchive, !deletingDiagramJobs, !ids.isEmpty else { return }
+        deletingDiagramJobs = true
+        deletingJobIDs.formUnion(ids.map { QueueJobID.diagram($0) })
+        for id in ids {
+            jobAdmission[.diagram(id), default: 0] &+= 1
+            enqueuing.removeValue(forKey: .diagram(id))
+        }
+        queued.removeAll { $0.kind == .diagram && ids.contains($0.id) }
+        defer {
+            deletingDiagramJobs = false
+            deletingJobIDs.subtract(diagrams.map { QueueJobID.diagram($0.id) })
+            Task { await processQueue() }
+        }
+        for id in ids.sorted() { await cancelDiagram(id) }
+        do { try await diagramArchive.delete(ids) }
+        catch { errorHandler.report(error) }
+        await reloadDiagrams()
+    }
+    func renameDiagram(_ id: String, title: String) async {
+        guard let diagramArchive else { return }
+        do {
+            _ = try await diagramArchive.rename(id, title: title)
+            await reloadDiagrams()
+        } catch { errorHandler.report(error) }
+    }
+    func moveDiagrams(_ ids: Set<String>, to groupID: String) async {
+        guard let diagramArchive else { return }
+        do {
+            try await diagramArchive.moveDiagrams(ids, to: groupID)
+            await reloadDiagrams()
+        } catch { errorHandler.report(error) }
+    }
+    func changeDiagramGroups(_ operation: @Sendable (inout RecordingGroups) throws -> Void) async {
+        guard let diagramArchive else { return }
+        do {
+            try await diagramArchive.editGroups(operation)
+            await reloadDiagrams()
+        } catch { errorHandler.report(error) }
+    }
+    /// Removing a user group moves its diagrams to «Без темы»; diagrams and
+    /// their artifacts are only removed by the separate delete command.
+    func deleteDiagramGroup(_ id: String) async {
+        guard id != RecordingGroup.ungroupedID else { return }
+        await changeDiagramGroups { try $0.remove(id) }
+    }
+    func diagramQueuePosition(for id: String) -> Int? {
+        queued.firstIndex(of: .diagram(id)).map { $0 + 1 }
+    }
+    func diagrams(in groupID: String) -> [DiagramManifest] {
+        diagrams.filter { diagramGroups.groupID(for: $0.id) == groupID }
+            .sorted { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt }
+    }
+    func diagram(_ id: String) -> DiagramManifest? { diagramsByID[id] }
+
     func showAudio() { guard let selected, let repository else { return }; NSWorkspace.shared.activateFileViewerSelecting([repository.folder(selected.id).appendingPathComponent(selected.originalRelativePath)]) }
     func rendered(_ part: ExportPart, markdown: Bool = false) async throws -> String {
         try await renderedResult(part, markdown: markdown).text
@@ -1103,6 +1426,7 @@ import LocalScribeCore
         copyTask?.cancel()
         for task in Array(exportTasks.values) { await task.value }
         recordingSearch.shutdown()
+        diagramSearch.shutdown()
         importQueue.cancel()
         memorySource?.cancel(); memorySource = nil
         if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }; sleepObserver = nil

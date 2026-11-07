@@ -102,3 +102,21 @@ extension RecordingRepository {
         try Disk.write(groups, to: root.appendingPathComponent("groups.json"))
     }
 }
+
+extension RecordingGroups {
+    /// Neutral catalog access for sibling archives (for example, diagrams) that
+    /// reuse the group model without a RecordingRepository. Only ENOENT yields a
+    /// fresh catalog: permission/decoding errors must not reset stored metadata.
+    public static func loadCatalog(at url: URL) throws -> RecordingGroups {
+        do {
+            let groups = try Disk.read(RecordingGroups.self, at: url)
+            try groups.validate()
+            return groups
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return RecordingGroups() }
+    }
+    /// Validate and atomically persist the catalog at an arbitrary archive root.
+    public static func writeCatalog(_ groups: RecordingGroups, at url: URL) throws {
+        try groups.validate()
+        try Disk.write(groups, to: url)
+    }
+}

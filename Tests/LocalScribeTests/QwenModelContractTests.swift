@@ -3,7 +3,7 @@ import XCTest
 
 final class QwenModelContractTests: XCTestCase {
     private func catalog() -> ModelCatalog {
-        var models = ModelRole.allCases.map {
+        var models = ModelRole.audioRoles.map {
             ModelProfile(id: $0.rawValue, repository: "fixture/local", revision: "fixed", license: "test",
                 files: [.init(path: "config", localPath: "config", size: 3, sha256: Disk.fingerprint("abc"))], role: $0)
         }
@@ -21,7 +21,10 @@ final class QwenModelContractTests: XCTestCase {
     }
     func testCompleteDependencyPinnedWithoutAddingLegacyRole() throws {
         let catalog = catalog(), info = info(catalog)
-        XCTAssertEqual(ModelRole.allCases.count, 4)
+        // The audio complect stays exactly four roles; diagram is a separate,
+        // optional readiness that pinned audio runs must reject.
+        XCTAssertEqual(ModelRole.audioRoles.count, 4)
+        XCTAssertEqual(ModelRole.allCases.count, 5)
         XCTAssertEqual(try catalog.pinned(to: info).models.count, 5)
         for change in 0..<7 {
             var changed = catalog
@@ -40,6 +43,39 @@ final class QwenModelContractTests: XCTestCase {
         XCTAssertThrowsError(try catalog.pinned(to: missing))
         missing = info; missing.auxiliaryModelIDs?["extra"] = "unexpected"
         XCTAssertThrowsError(try catalog.pinned(to: missing))
+    }
+    func testDiagramRoleIsOptionalAndNeverCompletesAudio() throws {
+        let catalog = catalog()
+        var info = info(catalog)
+        // A diagram key must not leak into a pinned audio complect.
+        info.modelIDs?["diagram"] = "diagram-qwen3-vl-4b"
+        XCTAssertThrowsError(try catalog.pinned(to: info))
+        // Installing and selecting the diagram model leaves audio readiness untouched.
+        let diagram = ModelProfile(id: "diagram-qwen3-vl-4b", repository: "fixture/vlm", revision: "fixed", license: "test",
+            files: [.init(path: "config", localPath: "config", size: 3, sha256: Disk.fingerprint("vlm"))], role: .diagram)
+        var withDiagram = catalog
+        withDiagram.models.append(diagram)
+        var library = ModelLibrary()
+        for profile in catalog.models.dropLast() { library.installed(profile, catalog: withDiagram) }
+        XCTAssertNil(library.activeCatalog(from: withDiagram))
+        XCTAssertNil(library.diagramProfile(from: withDiagram).map(\.id), "до установки модели схем готовность схем отсутствует")
+        library.installed(diagram, catalog: withDiagram)
+        XCTAssertEqual(library.selectedByRole[ModelRole.diagram.rawValue], diagram.id)
+        XCTAssertNil(library.activeCatalog(from: withDiagram), "диаграммная модель не завершает аудиокомплект")
+        let aligner = catalog.models[4]
+        library.installed(aligner, catalog: withDiagram)
+        let audio = try XCTUnwrap(library.activeCatalog(from: withDiagram))
+        XCTAssertEqual(audio.models.count, 5)
+        XCTAssertFalse(audio.models.contains { $0.purpose == .diagram }, "аудиокомплект не включает модель схем")
+        // Audio checkpoints keep their fingerprint when the diagram profile appears.
+        XCTAssertEqual(audio.fingerprint, catalog.fingerprint)
+        let selected = try XCTUnwrap(library.diagramProfile(from: withDiagram))
+        XCTAssertEqual(selected.id, diagram.id)
+        // Without the diagram model the separate readiness is nil while audio keeps working.
+        var audioOnly = ModelLibrary()
+        for profile in withDiagram.models where profile.purpose != .diagram { audioOnly.installed(profile, catalog: withDiagram) }
+        XCTAssertNil(audioOnly.diagramProfile(from: withDiagram))
+        XCTAssertEqual(audioOnly.activeCatalog(from: withDiagram)?.models.count, 5)
     }
     func testDependencyInstallationSelectionAndRemoval() async throws {
         let catalog = catalog(), root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -27,7 +27,7 @@ final class ASRContractTests: XCTestCase {
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let catalog = try Disk.read(ModelCatalog.self, at: root.appendingPathComponent("Resources/models.lock.json"))
         for asr in catalog.models where asr.purpose == .asr && asr.resolvedASRBackend == "whisper" {
-            let selected = try ModelRole.allCases.map { role in
+            let selected = try ModelRole.audioRoles.map { role in
                 try XCTUnwrap(role == .asr ? asr : catalog.models.first { $0.id == (role == .tokenizer ? asr.tokenizerID ?? "tokenizer" : role.rawValue) })
             }
             let legacy = selected.allSatisfy { $0.id == $0.purpose?.rawValue }

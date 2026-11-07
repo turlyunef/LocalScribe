@@ -3,13 +3,36 @@ import AppKit
 import UniformTypeIdentifiers
 import LocalScribeCore
 
+enum WorkspaceMode: String, CaseIterable, Identifiable {
+    case recordings = "Записи", diagrams = "Схемы"
+    var id: String { rawValue }
+}
+
 struct ContentView: View {
     @ObservedObject var model: AppModel
-    @State private var recordingSheet = false
+    @StateObject private var diagramWorkspace: DiagramWorkspaceModel
+    @State private var mode: WorkspaceMode = .recordings
+    init(model: AppModel, initialMode: WorkspaceMode = .recordings) {
+        _model = ObservedObject(wrappedValue: model)
+        _diagramWorkspace = StateObject(wrappedValue: DiagramWorkspaceModel(model: model))
+        _mode = State(wrappedValue: initialMode)
+    }
     var body: some View {
         NavigationSplitView {
-            RecordingGroupsSidebar(model: model)
-                .navigationTitle("LocalScribe")
+            VStack(spacing: 0) {
+                // Independent selection, search and group state per mode;
+                // switching never touches queues, import or the microphone.
+                Picker("Режим", selection: $mode) {
+                    ForEach(WorkspaceMode.allCases) { value in Text(value.rawValue).tag(value) }
+                }.pickerStyle(.segmented)
+                    .padding(.horizontal, 12).padding(.top, 10)
+                    .accessibilityIdentifier("workspace.mode")
+                if mode == .recordings {
+                    RecordingGroupsSidebar(model: model)
+                } else {
+                    DiagramGroupsSidebar(model: model, workspace: diagramWorkspace)
+                }
+            }.navigationTitle("LocalScribe")
                 .navigationSplitViewColumnWidth(min: 240, ideal: 290)
             VStack(spacing: 6) {
                 Label("Всё обрабатывается на Mac", systemImage: "lock.shield").font(.caption)
@@ -18,136 +41,11 @@ struct ContentView: View {
                     .accessibilityIdentifier("sidebar.models")
             }.foregroundStyle(.secondary).padding()
         } detail: {
-            VStack(spacing: 0) {
-                if model.recordingID != nil {
-                    HStack(spacing: 14) {
-                        Image(systemName: "record.circle.fill").foregroundStyle(.red)
-                        CaptureMeterView(indicators: model.indicators, finalizing: model.finalizingRecording)
-                        Spacer()
-                        Button("Остановить") { Task { await model.stopRecording() } }.buttonStyle(.borderedProminent).disabled(model.finalizingRecording).help("Остановить запись и сохранить аудио")
-                    }.padding().background(.red.opacity(0.05))
-                    Divider()
-                }
-                if let selected = model.selected {
-                    HStack {
-                        RecordingTitleView(title: selected.displayTitle) { title in
-                            Task { await model.renameRecording(selected.id, title: title) }
-                        }
-                        .id(selected.id)
-                        Spacer()
-                        Group {
-                            if selected.state.processing {
-                                ProgressView()
-                                Button("Отменить") { Task { await model.cancel(selected.id) } }
-                                    .help("Отменить обработку выбранной записи")
-                                    .accessibilityIdentifier("recording.cancel")
-                            } else if model.queuePosition(for: selected.id) != nil {
-                                Button("Поднять на верх очереди") { model.moveToFrontOfQueue(selected.id) }
-                                    .help("Обработать выбранную запись следующей после текущего задания")
-                                    .accessibilityIdentifier("recording.moveToFront")
-                                Button("Отменить") { Task { await model.cancel(selected.id) } }
-                                    .help("Убрать запись из очереди, сохранив аудио и результаты")
-                                    .accessibilityIdentifier("recording.cancel")
-                            } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
-                                Button("Продолжить") { model.resume(selected.id) }
-                                    .disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady)
-                                    .help("Продолжить обработку выбранной записи с контрольной точки")
-                                    .accessibilityIdentifier("recording.resume")
-                            }
-                        }.controlSize(.small)
-                        RecordingActionsView(
-                            canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
-                            canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
-                            canDelete: model.deletingGroupID == nil && !model.finalizingRecording && model.recordingID != selected.id,
-                            showAudio: model.showAudio,
-                            repeatAnalysis: { Task { await model.repeatAnalysis(summaryOnly: false) } },
-                            recreateSummary: { language in Task { await model.repeatAnalysis(summaryOnly: true, language: language) } },
-                            deleteRecording: { Task { await model.deleteSelected() } }
-                        )
-                    }.padding(20)
-                    if let message = selected.lastError {
-                        Button("Показать сообщение об обработке", systemImage: "exclamationmark.bubble") {
-                            model.errorHandler.report(message: message)
-                        }
-                        .help("Открыть подробности последней ошибки или прерывания в отдельном окне")
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.bottom, 10)
-                    }
-                    if selected.activeRunId != nil && selected.pendingRunId != nil { Text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.").font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
-                    HStack {
-                        Picker(selection: Binding(get: { model.tab }, set: { part in
-                            // Updating the prepared text also publishes changes; wait
-                            // until SwiftUI finishes the picker's own view update.
-                            Task { @MainActor in model.tab = part }
-                        })) {
-                            ForEach(model.resultTabs, id: \.self) { part in
-                                Text(part.rawValue).tag(part)
-                            }
-                        } label: {
-                            Text("Результат")
-                                .lineLimit(1)
-                                .fixedSize(horizontal: true, vertical: false)
-                        }
-                        .pickerStyle(.segmented)
-                        .frame(width: model.resultTabs.contains(.warnings) ? 410 : 270)
-                        .accessibilityIdentifier("result.section")
-                        Spacer()
-                        Button("Редактировать", systemImage: "pencil", action: model.beginResultEditing)
-                            .disabled(!model.canEditResult)
-                            .help("Изменить текст расшифровки и итогов")
-                            .accessibilityIdentifier("result.edit")
-                        Menu {
-                            ForEach(model.exportParts, id: \.self) { part in Button(part.rawValue) { model.copy(part) }.help("Копировать: \(part.rawValue)") }
-                        } label: { Label("Копировать", systemImage: "doc.on.doc") } primaryAction: { model.copy(model.tab) }
-                        .help("Копировать открытый результат; меню позволяет выбрать раздел")
-                        Menu {
-                            ForEach(model.exportParts, id: \.self) { part in
-                                Menu(part.rawValue) { Button("Markdown (.md)") { model.export(markdown: true, part: part) }.help("Сохранить раздел «\(part.rawValue)» в Markdown"); Button("Текст (.txt)") { model.export(markdown: false, part: part) }.help("Сохранить раздел «\(part.rawValue)» в текстовый файл") }
-                            }
-                        } label: { Label("Экспорт", systemImage: "square.and.arrow.up") }
-                        .help("Сохранить выбранный раздел результата или всё вместе в файл")
-                    }.padding(.horizontal,20).padding(.bottom,12)
-                    Divider()
-                    if model.tab == .summary, model.summary == nil, !model.automaticSummaries {
-                        Text("Автоматическое создание итогов отключено")
-                            .foregroundStyle(.secondary)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity)
-                            .accessibilityIdentifier("result.automaticSummariesDisabled")
-                    } else {
-                        PresentedResultView(presentation: model.resultPresentation, jumpRequest: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = ResultJumpRequest(segmentID: id); model.tab = .transcript })
-                    }
-                } else {
-                    ContentUnavailableView {
-                        Label("Разговор останется на вашем Mac", systemImage: "waveform")
-                    } description: { Text("Запишите встроенный микрофон или импортируйте аудио.\nРаспознавание можно начать вместе с записью.\nУчастники и итоги — после сохранения звука.") } actions: {
-                        Button("Новая запись") { recordingSheet = true }.buttonStyle(.borderedProminent).disabled(model.startingRecording || model.finalizingRecording || model.installing).help("Настроить и начать запись встроенного микрофона")
-                        Button("Импортировать аудио", action: model.chooseImport).help("Выбрать аудиофайлы для расшифровки")
-                    }
-                }
-                ActivityStatusView(indicators: model.indicators)
-            }.background(Color(nsColor: .textBackgroundColor))
-                .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-                    model.importProviders(providers); return true
-                }
-        }
-        .toolbar {
-            ToolbarItemGroup {
-                Button { recordingSheet = true } label: { Label("Новая запись", systemImage: "mic") }.disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording || model.installing).help("Настроить и начать запись встроенного микрофона")
-                Button(action: model.chooseImport) { Label("Импорт", systemImage: "square.and.arrow.down") }.help("Выбрать аудиофайлы для расшифровки")
+            if mode == .recordings {
+                RecordingDetailColumn(model: model)
+            } else {
+                DiagramDetailColumn(model: model, workspace: diagramWorkspace)
             }
-        }
-        .sheet(isPresented: $recordingSheet) {
-            VStack(alignment: .leading, spacing: 18) {
-                Label("Новая запись", systemImage: "mic.fill").font(.title2)
-                Text("Встроенный микрофон MacBook")
-                Text("Группа: \(model.defaultGroup.name) ✓").accessibilityIdentifier("recording.destination")
-                Text("Убедитесь, что участники знают о записи.").foregroundStyle(.secondary)
-                Text("Голоса в наушниках не записываются. Запись можно сохранить и без установленных моделей.").font(.callout).foregroundStyle(.secondary)
-                HStack { Spacer(); Button("Отмена") { recordingSheet = false }.help("Закрыть окно без начала записи"); Button("Начать") { let destination = model.defaultGroup.id; recordingSheet = false; Task { await model.startRecording(groupID: destination) } }.buttonStyle(.borderedProminent).help("Начать запись встроенного микрофона") }
-            }.padding(28).frame(width: 440)
-        }
-        .sheet(item: $model.resultEdit) { draft in
-            ResultEditorView(initial: draft, initialPart: model.tab, save: model.saveResultEdits,
-                             cancel: { model.resultEdit = nil }, reportError: model.errorHandler.report)
         }
         .disabled(model.preparingStorage || model.shuttingDown)
     }
@@ -161,91 +59,6 @@ struct RecordingStatusText: View {
 
     var body: some View {
         Text(finalizing ? "Сохраняем аудио…" : "\(prefix) · \(timecode(Int(indicators.elapsed * 1000)))").monospacedDigit()
-    }
-}
-
-private struct CaptureMeterView: View {
-    @ObservedObject var indicators: ActivityIndicators
-    var finalizing: Bool
-
-    var body: some View {
-        VStack(alignment: .leading) {
-            RecordingStatusText(indicators: indicators, finalizing: finalizing, prefix: "Встроенный микрофон")
-            if let notice = indicators.soundNotice { Text(notice).font(.caption).foregroundStyle(.orange) }
-        }
-        ProgressView(value: indicators.level).frame(width: 100).accessibilityLabel("Уровень микрофона")
-    }
-}
-
-private struct ActivityStatusView: View {
-    @ObservedObject var indicators: ActivityIndicators
-
-    var body: some View {
-        if !indicators.status.isEmpty {
-            Divider()
-            Text(indicators.status).font(.caption).foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading).padding(10)
-        }
-    }
-}
-
-private struct PresentedResultView: View {
-    @ObservedObject var presentation: ResultPresentation
-    var jumpRequest: ResultJumpRequest?
-    var onJump: (String) -> Void
-
-    var body: some View {
-        ZStack {
-            ResultTextView(result: presentation.result, jumpRequest: jumpRequest, onJump: onJump)
-            if presentation.isRendering { ProgressView("Подготавливаем результат…") }
-        }
-    }
-}
-
-struct RecordingTitleView: View {
-    var title: String
-    var save: (String) -> Void
-    @State private var draft = ""
-    @State private var editing = false
-    @FocusState private var focused: Bool
-
-    var body: some View {
-        Group {
-            if editing {
-                TextField("Название записи", text: $draft)
-                    .textFieldStyle(.roundedBorder)
-                    .focused($focused)
-                    .onSubmit(commit)
-                    .onExitCommand {
-                        editing = false
-                        focused = false
-                    }
-                    .onChange(of: focused) { _, value in
-                        if !value { commit() }
-                    }
-                    .onAppear { focused = true }
-                    .accessibilityLabel("Название записи")
-            } else {
-                Button {
-                    draft = title
-                    editing = true
-                } label: {
-                    Text(title).multilineTextAlignment(.leading).lineLimit(2)
-                }
-                .buttonStyle(.plain)
-                .help("Нажмите, чтобы изменить название")
-                .accessibilityLabel("Изменить название записи: \(title)")
-            }
-        }
-        .font(.title2).fontWeight(.semibold)
-    }
-
-    private func commit() {
-        guard editing else { return }
-        // End editing before clearing focus to avoid saving twice.
-        editing = false
-        focused = false
-        if draft != title { save(draft) }
     }
 }
 
@@ -313,7 +126,7 @@ struct ModelSettings: View {
                     if model.verifyingModels { ProgressView().controlSize(.small) }
                 }
             }
-            Section("Загрузить модели") {
+            Section("Загрузить модели записей") {
                 modelPicker("Распознавание", role: .asr, selection: $asrID)
                 modelPicker("Итоги", role: .summary, selection: $summaryID)
                 ForEach(profiles.filter { $0.id == asrID || $0.id == summaryID }) { profile in
@@ -347,12 +160,23 @@ struct ModelSettings: View {
                 }.frame(maxWidth: .infinity, alignment: .leading)
                     .accessibilityIdentifier("settings.models.import")
             }.disabled(!model.canManageModels)
+            Section("Модель схем (режим «Схемы»)") {
+                Text(model.diagramModelsReady ? "Модель схем готова · распознавание без интернета" : "Загрузите модель схем; полный комплект моделей записей для этого не нужен")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("settings.diagramModels.status")
+                ForEach(profiles.filter { $0.purpose == .diagram }) { profile in
+                    diagramProfileRow(profile)
+                }
+                if profiles.filter({ $0.purpose == .diagram }).isEmpty {
+                    Text("Профиль модели схем отсутствует в каталоге").foregroundStyle(.secondary)
+                }
+            }
             Section("Загруженные модели") {
                 ForEach(profiles.filter { $0.purpose == nil && model.modelLibrary.isInstalled($0) }) { profile in
                     installedRow(profile)
                 }
                 if model.modelLibrary.installedAt.isEmpty { Text("Пока нет загруженных моделей").foregroundStyle(.secondary) }
-                ForEach(ModelRole.allCases, id: \.self) { role in
+                ForEach(ModelRole.audioRoles, id: \.self) { role in
                     let installed = profiles.filter { $0.purpose == role && model.modelLibrary.isInstalled($0) }
                     if !installed.isEmpty {
                         Text(role.title).font(.caption).foregroundStyle(.secondary)
@@ -415,6 +239,48 @@ struct ModelSettings: View {
         }
     }
     private func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
+    /// The optional diagram model: installation never affects audio readiness
+    /// and never queues recordings or diagrams.
+    @ViewBuilder private func diagramProfileRow(_ profile: ModelProfile) -> some View {
+        HStack(alignment: .top) {
+            if model.modelLibrary.isInstalled(profile) {
+                Toggle(isOn: Binding(get: { model.modelLibrary.isSelected(profile) }, set: { checked in if checked { model.selectModel(profile) } })) {
+                    Text(profile.displayName)
+                }
+                .toggleStyle(.checkbox)
+                .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible)
+                .help(model.hardware.warning(for: profile) ?? "Использовать \(profile.displayName) для распознавания схем")
+                .accessibilityIdentifier("settings.diagramModels.installed.\(profile.id)")
+                Spacer()
+                Text(size(profile.bytes)).font(.caption).foregroundStyle(.secondary)
+                Button(role: .destructive) { model.removeModel(profile) } label: { Image(systemName: "trash").foregroundStyle(.red) }
+                    .buttonStyle(.borderless).help("Удалить \(profile.displayName)").accessibilityLabel("Удалить \(profile.displayName)")
+                    .disabled(!model.canManageModels)
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text(profile.displayName)
+                        Spacer()
+                        Button("Загрузить") { model.installModels([profile]) }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible)
+                            .help("Скачать и проверить все файлы модели")
+                            .accessibilityIdentifier("settings.diagramModels.install.\(profile.id)")
+                        Text(size(profile.bytes)).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let ram = profile.recommendedMemoryGB, let working = profile.workingMemoryGB {
+                        Text("RAM: от \(ram) ГБ · рабочий объём: \(working) ГБ").font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let description = profile.profileDescription {
+                        Text(description).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let warning = model.hardware.warning(for: profile) {
+                        Label(warning, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
+                    }
+                }
+            }
+        }
+    }
     @ViewBuilder private func installedRow(_ profile: ModelProfile) -> some View {
         HStack(alignment: .top) {
             if profile.purpose == .asr || profile.purpose == .summary {

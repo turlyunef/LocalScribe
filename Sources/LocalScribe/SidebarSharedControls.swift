@@ -1,0 +1,76 @@
+import SwiftUI
+
+/// Icon-only "expand all / collapse all" button with stacked chevrons.
+/// Titles and accessibility identifiers are caller-defined.
+struct SidebarExpansionButton: View {
+    let expanded: Bool
+    let title: String
+    let identifier: String
+    let disabled: Bool
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 3) {
+                Image(systemName: expanded ? "chevron.up" : "chevron.down")
+                Image(systemName: expanded ? "chevron.down" : "chevron.up")
+            }
+            .font(.system(size: 10, weight: .medium))
+            .foregroundStyle(.secondary)
+            .frame(width: 20, height: 24)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(title).accessibilityLabel(title)
+        .accessibilityIdentifier(identifier)
+        .disabled(disabled)
+    }
+}
+
+/// Counter of an active search with a no-match hint. Texts and accessibility
+/// identifiers are caller-defined.
+struct SidebarSearchStatus: View {
+    let countTitle: String
+    let countIdentifier: String
+    let emptyTitle: String
+    let emptyHint: String
+    let emptyIdentifier: String
+    let empty: Bool
+
+    var body: some View {
+        Text(countTitle)
+            .font(.caption).foregroundStyle(.secondary)
+            .accessibilityIdentifier(countIdentifier)
+            .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 6)
+        if empty {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(emptyTitle)
+                Text(emptyHint).font(.caption).foregroundStyle(.secondary)
+            }.accessibilityIdentifier(emptyIdentifier)
+                .frame(maxWidth: .infinity, alignment: .leading).padding(12)
+        }
+    }
+}
+
+/// Lazy scroll column skeleton. When the focus target changes the row is
+/// revealed at the top edge; the reveal target scrolls to the center.
+struct SidebarLazyScrollColumn<FocusID: Hashable, RevealID: Hashable, Content: View>: View {
+    let focusTarget: FocusID?
+    let revealTarget: RevealID?
+    @ViewBuilder var content: () -> Content
+
+    var body: some View {
+        ScrollViewReader { proxy in
+            ScrollView {
+                LazyVStack(alignment: .leading, spacing: 0) { content() }
+                    .padding(.horizontal, 6)
+            }
+            .onChange(of: focusTarget) { _, id in
+                if let id { proxy.scrollTo(id, anchor: .top) }
+            }
+            .onChange(of: revealTarget) { _, id in
+                if let id { proxy.scrollTo(id, anchor: .center) }
+            }
+        }
+    }
+}

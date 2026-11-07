@@ -3,31 +3,6 @@ import AppKit
 import UniformTypeIdentifiers
 import LocalScribeCore
 
-enum SidebarTransfer {
-    static let recording = UTType(exportedAs: "app.localscribe.recording", conformingTo: .data)
-    static let group = UTType(exportedAs: "app.localscribe.group", conformingTo: .data)
-
-    static func provider(_ id: String, type: UTType) -> NSItemProvider {
-        let provider = NSItemProvider()
-        let data = Data(id.utf8)
-        provider.registerDataRepresentation(forTypeIdentifier: type.identifier, visibility: .ownProcess) { completion in
-            completion(data, nil)
-            return nil
-        }
-        return provider
-    }
-    static func identifier(_ data: Data?) -> String? {
-        guard let data, let id = String(data: data, encoding: .utf8), UUID(uuidString: id) != nil else { return nil }
-        return id
-    }
-    @MainActor static func load(_ provider: NSItemProvider, type: UTType, perform: @escaping @MainActor (String) -> Void) {
-        _ = provider.loadDataRepresentation(forTypeIdentifier: type.identifier) { data, _ in
-            guard let id = identifier(data) else { return }
-            Task { @MainActor in perform(id) }
-        }
-    }
-}
-
 struct RecordingGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var search: RecordingSearch
@@ -58,92 +33,78 @@ struct RecordingGroupsSidebar: View {
             RecordingSearchField(search: search)
                 .padding(.horizontal, 12).padding(.bottom, 8)
             if search.active && search.completed {
-                Text("Найдено: \(search.matchingIDs.count)")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("recordings.search.count")
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 12).padding(.bottom, 6)
-                if search.matchingIDs.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Записи не найдены")
-                        Text("Попробуйте другое название или очистите поиск").font(.caption).foregroundStyle(.secondary)
-                    }.accessibilityIdentifier("recordings.search.empty")
-                        .frame(maxWidth: .infinity, alignment: .leading).padding(12)
-                }
+                SidebarSearchStatus(
+                    countTitle: "Найдено: \(search.matchingIDs.count)",
+                    countIdentifier: "recordings.search.count",
+                    emptyTitle: "Записи не найдены",
+                    emptyHint: "Попробуйте другое название или очистите поиск",
+                    emptyIdentifier: "recordings.search.empty",
+                    empty: search.matchingIDs.isEmpty)
             }
-            ScrollViewReader { proxy in
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        if let draft = editor, draft.groupID == nil { nameEditor(draft).id(draft.id) }
-                        ForEach(model.sidebarGroups(editing: editor?.groupID)) { group in
-                            if !search.active {
-                                GroupInsertionLine(model: model, before: group.id, draggedGroup: $draggedGroup)
+            SidebarLazyScrollColumn(focusTarget: editor?.id, revealTarget: model.sidebarRevealID) {
+                if let draft = editor, draft.groupID == nil { nameEditor(draft).id(draft.id) }
+                ForEach(model.sidebarGroups(editing: editor?.groupID)) { group in
+                    if !search.active {
+                        GroupInsertionLine(model: model, before: group.id, draggedGroup: $draggedGroup)
+                    }
+                    RecordingGroupDropArea(model: model, groupID: group.id, draggedRecording: draggedRecording) { targeted in
+                        if let draft = editor, draft.groupID == group.id {
+                            nameEditor(draft).id(draft.id)
+                        } else {
+                            RecordingGroupHeader(model: model, search: search, group: group,
+                                draggedRecording: $draggedRecording, draggedGroup: $draggedGroup, dropTargeted: targeted,
+                                rename: { editor = GroupNameDraft(groupID: group.id, name: group.name) },
+                                delete: { deleting = group })
+                        }
+                        if search.expanded(group) {
+                            let members = model.visibleRecordings(in: group.id)
+                            if members.isEmpty && !search.active {
+                                Text("Перетащите записи сюда или начните новую запись")
+                                    .accessibilityIdentifier("groups.empty.\(group.id)")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                    .padding(.leading, 28).padding(.trailing, 12).padding(.vertical, 10)
                             }
-                            RecordingGroupDropArea(model: model, groupID: group.id, draggedRecording: draggedRecording) { targeted in
-                                if let draft = editor, draft.groupID == group.id {
-                                    nameEditor(draft).id(draft.id)
-                                } else {
-                                    RecordingGroupHeader(model: model, search: search, group: group,
-                                        draggedRecording: $draggedRecording, draggedGroup: $draggedGroup, dropTargeted: targeted,
-                                        rename: { editor = GroupNameDraft(groupID: group.id, name: group.name) },
-                                        delete: { deleting = group })
-                                }
-                                if search.expanded(group) {
-                                    let members = model.visibleRecordings(in: group.id)
-                                    if members.isEmpty && !search.active {
-                                        Text("Перетащите записи сюда или начните новую запись")
-                                            .accessibilityIdentifier("groups.empty.\(group.id)")
-                                            .font(.caption).foregroundStyle(.secondary)
-                                            .padding(.leading, 28).padding(.trailing, 12).padding(.vertical, 10)
+                            ForEach(members) { recording in
+                                SidebarRecordingRow(model: model, recording: recording)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.leading, 28).padding(.trailing, 10)
+                                .contentShape(Rectangle())
+                                .onTapGesture {} // Mouse-down selection also applies when the gesture becomes a drag.
+                                .focusable()
+                                .focusEffectDisabled()
+                                .onKeyPress(.return) { model.selectSidebarRecording(recording.id); return .handled }
+                                .onKeyPress(.space) { model.selectSidebarRecording(recording.id); return .handled }
+                                .accessibilityElement(children: .contain)
+                                .accessibilityAction { model.selectSidebarRecording(recording.id) }
+                                .accessibilityAddTraits(model.sidebarSelection.ids.contains(recording.id) ? .isSelected : [])
+                                .background(model.sidebarSelection.ids.contains(recording.id) ? Color.accentColor.opacity(0.16) : Color.clear)
+                                .background(SidebarMouseSelection { event in
+                                    if event.type == .rightMouseDown || event.modifierFlags.contains(.control) {
+                                        model.selectSidebarContext(recording.id)
+                                    } else {
+                                        model.selectSidebarRecording(recording.id,
+                                            command: event.modifierFlags.contains(.command),
+                                            shift: event.modifierFlags.contains(.shift))
                                     }
-                                    ForEach(members) { recording in
-                                        SidebarRecordingRow(model: model, recording: recording)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.leading, 28).padding(.trailing, 10)
-                                        .contentShape(Rectangle())
-                                        .onTapGesture {} // Mouse-down selection also applies when the gesture becomes a drag.
-                                        .focusable()
-                                        .focusEffectDisabled()
-                                        .onKeyPress(.return) { model.selectSidebarRecording(recording.id); return .handled }
-                                        .onKeyPress(.space) { model.selectSidebarRecording(recording.id); return .handled }
-                                        .accessibilityElement(children: .contain)
-                                        .accessibilityAction { model.selectSidebarRecording(recording.id) }
-                                        .accessibilityAddTraits(model.sidebarSelection.ids.contains(recording.id) ? .isSelected : [])
-                                        .background(model.sidebarSelection.ids.contains(recording.id) ? Color.accentColor.opacity(0.16) : Color.clear)
-                                        .background(RecordingMouseSelection { event in
-                                            if event.type == .rightMouseDown || event.modifierFlags.contains(.control) {
-                                                model.selectSidebarContext(recording.id)
-                                            } else {
-                                                model.selectSidebarRecording(recording.id,
-                                                    command: event.modifierFlags.contains(.command),
-                                                    shift: event.modifierFlags.contains(.shift))
-                                            }
-                                        })
-                                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                                        .accessibilityIdentifier("sidebar.recording.\(recording.id)")
-                                        .onDrag {
-                                            model.selectSidebarContext(recording.id)
-                                            draggedGroup = nil; draggedRecording = recording.id
-                                            return SidebarTransfer.provider(recording.id, type: SidebarTransfer.recording)
-                                        }
-                                        // The destination proposes .move; SwiftUI sources allow only .copy by default.
-                                        .dragConfiguration(DragConfiguration(allowMove: true))
-                                        .contextMenu {
-                                            RecordingContextMenuItems(model: model, recordingID: recording.id) { ids in
-                                                deletingRecordings = SidebarDeletion(ids: ids)
-                                            }
-                                        }
-                                        .id(recording.id)
+                                })
+                                .clipShape(RoundedRectangle(cornerRadius: 6))
+                                .accessibilityIdentifier("sidebar.recording.\(recording.id)")
+                                .onDrag {
+                                    model.selectSidebarContext(recording.id)
+                                    draggedGroup = nil; draggedRecording = recording.id
+                                    return SidebarTransfer.provider(recording.id, type: SidebarTransfer.recording)
+                                }
+                                // The destination proposes .move; SwiftUI sources allow only .copy by default.
+                                .dragConfiguration(DragConfiguration(allowMove: true))
+                                .contextMenu {
+                                    RecordingContextMenuItems(model: model, recordingID: recording.id) { ids in
+                                        deletingRecordings = SidebarDeletion(ids: ids)
                                     }
                                 }
+                                .id(recording.id)
                             }
                         }
-                    }.padding(.horizontal, 6)
-                }
-                .onChange(of: editor?.id) { _, id in
-                    if let id { proxy.scrollTo(id, anchor: .top) }
-                }
-                .onChange(of: model.sidebarRevealID) { _, id in
-                    if let id { proxy.scrollTo(id, anchor: .center) }
+                    }
                 }
             }
         }
@@ -162,56 +123,12 @@ struct RecordingGroupsSidebar: View {
     }
 
     private func expansionButton(expanded: Bool) -> some View {
-        let title = expanded ? "Развернуть все группы" : "Свернуть все группы"
-        return Button {
+        SidebarExpansionButton(
+            expanded: expanded,
+            title: expanded ? "Развернуть все группы" : "Свернуть все группы",
+            identifier: expanded ? "groups.expandAll" : "groups.collapseAll",
+            disabled: model.deletingGroupID != nil) {
             Task { await model.setAllSidebarExpanded(expanded) }
-        } label: {
-            VStack(spacing: 3) {
-                Image(systemName: expanded ? "chevron.up" : "chevron.down")
-                Image(systemName: expanded ? "chevron.down" : "chevron.up")
-            }
-            .font(.system(size: 10, weight: .medium))
-            .foregroundStyle(.secondary)
-            .frame(width: 20, height: 24)
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.borderless)
-        .help(title).accessibilityLabel(title)
-        .accessibilityIdentifier(expanded ? "groups.expandAll" : "groups.collapseAll")
-        .disabled(model.deletingGroupID != nil)
-    }
-}
-
-/// Read modifiers before menu/drag tracking starts; pass the original event through.
-private struct RecordingMouseSelection: NSViewRepresentable {
-    var select: (NSEvent) -> Void
-
-    func makeNSView(context: Context) -> SelectionView { SelectionView() }
-    func updateNSView(_ view: SelectionView, context: Context) { view.select = select }
-    static func dismantleNSView(_ view: SelectionView, coordinator: ()) { view.stopMonitoring() }
-
-    final class SelectionView: NSView {
-        var select: ((NSEvent) -> Void)?
-        private var monitor: Any?
-
-        override func hitTest(_ point: NSPoint) -> NSView? { nil }
-
-        override func viewDidMoveToWindow() {
-            super.viewDidMoveToWindow()
-            stopMonitoring()
-            guard window != nil else { return }
-            monitor = NSEvent.addLocalMonitorForEvents(matching: [.rightMouseDown, .leftMouseDown]) { [weak self] event in
-                guard let self, let window = self.window, event.window === window,
-                      !self.isHiddenOrHasHiddenAncestor,
-                      self.visibleRect.contains(self.convert(event.locationInWindow, from: nil)) else { return event }
-                self.select?(event)
-                return event
-            }
-        }
-
-        func stopMonitoring() {
-            if let monitor { NSEvent.removeMonitor(monitor) }
-            monitor = nil
         }
     }
 }
@@ -250,59 +167,12 @@ struct RecordingMoveMenuItems: View {
     }
 }
 
-struct GroupNameDraft: Identifiable {
-    let id = UUID()
-    let groupID: String?
-    let name: String
-}
-
-struct GroupNameEditor: View {
-    let draft: GroupNameDraft
-    let save: (String) async throws -> Void
-    let cancel: () -> Void
-    @State private var name: String
-    @State private var error: String?
-    @State private var saving = false
-    @State private var finished = false
-    @FocusState private var focused: Bool
-    init(draft: GroupNameDraft, save: @escaping (String) async throws -> Void, cancel: @escaping () -> Void) {
-        self.draft = draft; self.save = save; self.cancel = cancel
-        _name = State(initialValue: draft.name)
-    }
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            TextField("Название группы", text: $name)
-                .textFieldStyle(.roundedBorder).focused($focused)
-                .accessibilityIdentifier("groups.name")
-                .onSubmit { commit(blur: false) }
-                .onExitCommand { guard !saving else { return }; finished = true; cancel() }
-                .onChange(of: focused) { _, value in if !value { commit(blur: true) } }
-                .disabled(saving)
-            if let error { Text(error).font(.caption).foregroundStyle(.red).accessibilityIdentifier("groups.name.error") }
-        }.padding(8)
-            .task { await Task.yield(); focused = true }
-    }
-    private func commit(blur: Bool) {
-        guard !finished, !saving else { return }
-        if blur && name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            finished = true; cancel(); return
-        }
-        saving = true
-        Task {
-            do { try await save(name); finished = true }
-            catch { self.error = error.localizedDescription; saving = false; focused = true }
-            saving = false
-        }
-    }
-}
-
 /// A group accepts drops over its header, empty-state hint and member rows.
 private struct RecordingGroupDropArea<Content: View>: View {
     @ObservedObject var model: AppModel
     let groupID: String
     let draggedRecording: String?
     let content: (Bool) -> Content
-    @State private var targeted = false
 
     init(model: AppModel, groupID: String, draggedRecording: String?,
          @ViewBuilder content: @escaping (Bool) -> Content) {
@@ -311,14 +181,11 @@ private struct RecordingGroupDropArea<Content: View>: View {
     }
 
     var body: some View {
-        LazyVStack(alignment: .leading, spacing: 0) { content(targeted) }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .contentShape(Rectangle())
-            .background(targeted ? Color.accentColor.opacity(0.16) : Color.clear)
-            .clipShape(RoundedRectangle(cornerRadius: 6))
-            .animation(.easeInOut(duration: 0.15), value: targeted)
-            .onDrop(of: [SidebarTransfer.recording, .fileURL], delegate: GroupContentDrop(
-                model: model, groupID: groupID, draggedRecording: draggedRecording, targeted: $targeted))
+        SidebarDropArea(of: [SidebarTransfer.recording, .fileURL]) { targeted in
+            GroupContentDrop(model: model, groupID: groupID, draggedRecording: draggedRecording, targeted: targeted)
+        } content: { targeted in
+            content(targeted)
+        }
     }
 }
 
@@ -535,7 +402,8 @@ private struct SidebarRecordingRow: View {
                 if recording.state == .queued, let position = model.queuePosition(for: recording.id) {
                     Text("\(position)").foregroundStyle(.red).accessibilityLabel("Место в очереди: \(position)").accessibilityIdentifier("recording.queuePosition.\(recording.id)")
                 }
-                Label(recording.state.title, systemImage: recording.state == .recording ? "record.circle.fill" : recording.state == .completed ? "checkmark.circle" : "waveform")
+                Label(recording.state == .queued && model.queuePosition(for: recording.id) != nil ? model.resourcePauseTitle ?? recording.state.title : recording.state.title,
+                      systemImage: recording.state == .recording ? "record.circle.fill" : recording.state == .completed ? "checkmark.circle" : "waveform")
                     .foregroundStyle(recording.state == .recording ? .red : .secondary)
                     .accessibilityIdentifier("recording.status.\(recording.id)")
             }.font(.caption)
@@ -544,7 +412,7 @@ private struct SidebarRecordingRow: View {
                     if processing == .queued, let position = model.queuePosition(for: recording.id) {
                         Text("\(position)").foregroundStyle(.red).accessibilityLabel("Место в очереди: \(position)").accessibilityIdentifier("recording.queuePosition.\(recording.id)")
                     }
-                    Label(processing == .transcribing ? "Речь распознаётся в фоне" : processing == .queued ? "Распознавание в очереди" : "Распознавание приостановлено; запись идёт", systemImage: "waveform")
+                    Label(model.resourcePauseTitle ?? (processing == .transcribing ? "Речь распознаётся в фоне" : processing == .queued ? "Распознавание в очереди" : "Распознавание приостановлено; запись идёт"), systemImage: "waveform")
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("recording.captureStatus.\(recording.id)")
                 }.font(.caption2)

@@ -69,7 +69,7 @@ final class QwenASREngineTests: XCTestCase {
     }
 
     func testFactoryUsesFrozenBackendAndRejectsMissingAlignerBeforeLoading() async throws {
-        var profiles = ModelRole.allCases.map { ModelProfile(id: $0.rawValue, repository: "fixture/local", revision: "r", license: "test", files: [], role: $0) }
+        var profiles = ModelRole.audioRoles.map { ModelProfile(id: $0.rawValue, repository: "fixture/local", revision: "r", license: "test", files: [], role: $0) }
         profiles[0].asrBackend = "qwen3"; profiles[0].alignerID = "aligner"; profiles[0].asrPolicy = QwenASREngine.policyID
         profiles.append(ModelProfile(id: "aligner", repository: "fixture/aligner", revision: "r", license: "test", files: []))
         let catalog = ModelCatalog(models: profiles)

@@ -224,10 +224,19 @@ public struct Summary: Codable, Sendable, Equatable {
     }
 }
 public struct WorkerCommand: Codable, Sendable {
-    public var version = 1; public var jobId: String; public var runId: String; public var stage: Stage
-    public var recordingPath: String; public var modelsPath: String; public var toolsPath: String
+    public var version = 1
+    /// Nil preserves the historical audio wire format; only "diagram" is accepted today.
+    public var kind: String?
+    public var jobId: String; public var runId: String
+    public var stage: Stage?
+    public var recordingPath: String?
+    public var diagramPath: String?
+    public var modelsPath: String
+    public var toolsPath: String?
     public var liveCapture: Bool?
     public init(jobId: String, runId: String, stage: Stage, recordingPath: String, modelsPath: String, toolsPath: String) { self.jobId = jobId; self.runId = runId; self.stage = stage; self.recordingPath = recordingPath; self.modelsPath = modelsPath; self.toolsPath = toolsPath }
+    public init(diagramJobId: String, runId: String, diagramPath: String, modelsPath: String, toolsPath: String? = nil) { kind = "diagram"; jobId = diagramJobId; self.runId = runId; self.diagramPath = diagramPath; self.modelsPath = modelsPath; self.toolsPath = toolsPath }
+    public var isDiagram: Bool { kind == "diagram" }
 }
 public struct WorkerEvent: Codable, Sendable {
     public var version = 1; public var jobId: String; public var runId: String

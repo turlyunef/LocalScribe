@@ -3,15 +3,20 @@ import AppKit
 
 struct RecordingSearchField: View {
     @ObservedObject var search: RecordingSearch
+    var identifierPrefix = "recordings"
+    var placeholder = "Поиск по названиям"
+    var label = "Поиск по названиям записей"
+    /// Command-F belongs to the search field of the visible mode only.
+    var shortcutActive = true
     @FocusState private var focused: Bool
 
     var body: some View {
         HStack(spacing: 6) {
-            TextField("Поиск по названиям", text: $search.query)
+            TextField(placeholder, text: $search.query)
                 .textFieldStyle(.plain).font(.system(size: 13))
                 .focused($focused)
-                .accessibilityLabel("Поиск по названиям записей")
-                .accessibilityIdentifier("recordings.search")
+                .accessibilityLabel(label)
+                .accessibilityIdentifier("\(identifierPrefix).search")
                 .onExitCommand {
                     if search.query.isEmpty { focused = false }
                     else { search.query = ""; focused = true }
@@ -26,7 +31,7 @@ struct RecordingSearchField: View {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                     }.buttonStyle(.plain)
                         .accessibilityLabel("Очистить поиск")
-                        .accessibilityIdentifier("recordings.search.clear")
+                        .accessibilityIdentifier("\(identifierPrefix).search.clear")
                 }
             }.frame(width: 16, height: 20)
         }
@@ -35,13 +40,13 @@ struct RecordingSearchField: View {
         .overlay(RoundedRectangle(cornerRadius: 8, style: .continuous)
             .strokeBorder(focused ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: 1))
         .contentShape(RoundedRectangle(cornerRadius: 8)).onTapGesture { focused = true }
-        .background(SearchFindShortcut(isFocused: focused) { window in
+        .background(shortcutActive ? AnyView(SearchFindShortcut(isFocused: focused) { window in
             focused = true
             Task { @MainActor in
                 await Task.yield()
                 (window.firstResponder as? NSTextView)?.selectAll(nil)
             }
-        })
+        }) : AnyView(EmptyView()))
     }
 }
 

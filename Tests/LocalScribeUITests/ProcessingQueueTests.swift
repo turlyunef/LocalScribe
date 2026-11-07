@@ -943,6 +943,33 @@ final class ProcessingQueueTests: XCTestCase {
         model.recordingID = nil
     }
 
+    func testMemoryPauseExplainsStoppedQueueAndClearsMessageWhenWorkRestarts() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, release) = try fixture(root)
+        let manifest = try completed(repo, title: "Paused")
+        await model.enqueue(manifest.id)
+        try await waitUntil { model.status == "fixture-ready-" + manifest.id }
+
+        model.pauseForCaptureResources(memoryPressure: true)
+        try await waitUntil { !model.busy && !model.supervisor.running }
+        let paused = try repo.load(manifest.id)
+        XCTAssertEqual(paused.state, .queued)
+        XCTAssertEqual(model.queuePosition(for: manifest.id), 1)
+        XCTAssertEqual(model.resourcePauseTitle, "Очередь приостановлена: не хватает памяти")
+        XCTAssertEqual(paused.lastError, model.resourcePauseMessage)
+
+        model.resumeAfterMemoryPressure()
+        try await waitUntil { model.status == "fixture-ready-" + manifest.id }
+        XCTAssertNil(model.resourcePauseTitle)
+        XCTAssertNil(model.resourcePauseMessage)
+        XCTAssertNil(try repo.load(manifest.id).lastError)
+
+        try Data().write(to: release)
+        try await waitUntil { !model.busy && (try? repo.load(manifest.id).state) == .completed }
+        await model.shutdown()
+    }
+
     func testSidebarBatchDeletionStopsSelectedJobsAcrossGroupsAndKeepsOtherQueueOrder() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

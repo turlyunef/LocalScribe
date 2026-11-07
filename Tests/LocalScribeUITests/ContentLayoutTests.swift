@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 import XCTest
 import LocalScribeCore
 @testable import LocalScribe
@@ -97,6 +98,16 @@ final class ContentLayoutTests: XCTestCase {
         let (hosting, window) = host(ContentView(model: model), width: 1400)
         defer { window.close() }
         try await settle(hosting)
+
+        model.pauseForCaptureResources(memoryPressure: true)
+        try await settle(hosting)
+        XCTAssertEqual(model.resourcePauseTitle, "Очередь приостановлена: не хватает памяти")
+        XCTAssertTrue(text(try element("queue.resourcePause", in: hosting))?.contains("продолжится автоматически") == true)
+        XCTAssertEqual(text(try element("recording.status.\(manifests[0].id)", in: hosting)),
+                       "Очередь приостановлена: не хватает памяти")
+        model.resumeAfterMemoryPressure()
+        try await settle(hosting)
+        XCTAssertNil(findElement("queue.resourcePause", in: hosting))
 
         for (index, m) in manifests.enumerated() {
             let number = try element("recording.queuePosition.\(m.id)", in: hosting)
@@ -493,5 +504,107 @@ final class ContentLayoutTests: XCTestCase {
                 }
             }
         }
+    }
+}
+
+/// The mode switcher swaps the sidebar and detail area while both archives keep
+/// their independent selection and search state.
+@MainActor
+final class DiagramModeSwitchLayoutTests: XCTestCase {
+    private func descendants(_ element: AnyObject) -> [AnyObject] {
+        let children = (element.accessibilityChildren?() ?? []).map { $0 as AnyObject }
+        return children + children.flatMap { descendants($0) }
+    }
+    private func subviews(_ view: NSView) -> [NSView] { view.subviews + view.subviews.flatMap { subviews($0) } }
+    private func findElement(_ id: String, in view: NSView) -> AnyObject? {
+        if let element = descendants(view).first(where: { $0.accessibilityIdentifier?() == id }) { return element }
+        for subview in subviews(view) {
+            if let element = descendants(subview).first(where: { $0.accessibilityIdentifier?() == id }) { return element }
+        }
+        return nil
+    }
+    private func host<V: View>(_ view: V, width: CGFloat) -> (NSHostingView<V>, NSWindow) {
+        _ = NSApplication.shared
+        NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
+        let hosting = NSHostingView(rootView: view)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 700),
+                              styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.contentView = hosting
+        window.orderFront(nil)
+        hosting.layoutSubtreeIfNeeded()
+        return (hosting, window)
+    }
+    private func settle(_ view: NSView) async throws {
+        try await Task.sleep(for: .milliseconds(120))
+        view.layoutSubtreeIfNeeded()
+    }
+
+    @MainActor
+    func testEachModeShowsItsOwnSidebarAndDetailWithIndependentState() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repo = try RecordingRepository(root: root)
+        var recording = Manifest(sourceType: "import", title: "Запись режима", filename: "meeting.wav")
+        recording.sourceComplete = true
+        try repo.save(recording)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        await model.reload()
+        model.selection = recording.id
+
+        // A diagram item exists in the sibling archive.
+        let diagramRepository = try XCTUnwrap(model.diagramRepository)
+        let diagramArchive = try XCTUnwrap(model.diagramArchive)
+        var diagram = DiagramManifest(title: "Архитектура", filename: "arch.png", ext: "png", uti: "public.png")
+        let folder = diagramRepository.folder(diagram.id)
+        try Disk.directory(folder)
+        let png = NSMutableData()
+        let context = CGContext(data: nil, width: 4, height: 4, bitsPerComponent: 8, bytesPerRow: 16,
+                                space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+        let destination = CGImageDestinationCreateWithData(png, UTType.png.identifier as CFString, 1, nil)!
+        CGImageDestinationAddImage(destination, context.makeImage()!, nil)
+        CGImageDestinationFinalize(destination)
+        try (png as Data).write(to: folder.appendingPathComponent("original.png"))
+        diagram.pixelWidth = 4; diagram.pixelHeight = 4
+        diagram.byteSize = Int64(png.length)
+        diagram.sha256 = try Disk.hash(folder.appendingPathComponent("original.png"))
+        try await diagramArchive.save(diagram)
+        await model.reloadDiagrams()
+
+        // Recordings open by default with the previous working area.
+        let (recordingsHost, recordingsWindow) = host(ContentView(model: model), width: 1400)
+        defer { recordingsWindow.close() }
+        try await settle(recordingsHost)
+        XCTAssertNotNil(findElement("workspace.mode", in: recordingsHost))
+        XCTAssertNotNil(findElement("groups.add", in: recordingsHost))
+        XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: recordingsHost))
+        XCTAssertNil(findElement("diagrams.groups.add", in: recordingsHost))
+
+        // The diagrams mode swaps both columns; the recording archive and its
+        // selection are untouched by mounting the other mode.
+        let (diagramsHost, diagramsWindow) = host(ContentView(model: model, initialMode: .diagrams), width: 1400)
+        defer { diagramsWindow.close() }
+        try await settle(diagramsHost)
+        XCTAssertNotNil(findElement("diagrams.groups.add", in: diagramsHost))
+        XCTAssertNotNil(findElement("diagrams.search", in: diagramsHost))
+        XCTAssertNotNil(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: diagramsHost))
+        XCTAssertNil(findElement("groups.add", in: diagramsHost), "sidebar записей скрыт в режиме схем")
+        XCTAssertEqual(model.selection, recording.id, "режим схем не меняет выбор записи")
+        XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: recordingsHost),
+                        "режим схем не влияет на смонтированный режим записей")
+        await model.shutdown()
+    }
+    private func labelText(_ object: NSObject) -> String? {
+        for name in ["accessibilityLabel", "accessibilityTitle", "accessibilityValue"] {
+            let selector = NSSelectorFromString(name)
+            guard object.responds(to: selector) else { continue }
+            let value = object.perform(selector)?.takeUnretainedValue()
+            if let string = value as? String { return string }
+            if let attributed = value as? NSAttributedString { return attributed.string }
+        }
+        return nil
     }
 }

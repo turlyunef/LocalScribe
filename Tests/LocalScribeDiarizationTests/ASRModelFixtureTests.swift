@@ -49,7 +49,7 @@ final class ASRModelFixtureTests: XCTestCase {
         let metrics = ASRMetricsRecorder(run: run, liveCapture: false)
         let repository = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let catalog = try Disk.read(ModelCatalog.self, at: repository.appendingPathComponent("Resources/models.lock.json"))
-        let legacy = ModelCatalog(models: try ModelRole.allCases.map { role in
+        let legacy = ModelCatalog(models: try ModelRole.audioRoles.map { role in
             try XCTUnwrap(catalog.models.first { $0.id == role.rawValue })
         })
         let info = RunInfo(sourceHash: "technical-fixture", profileHash: legacy.fingerprint)
