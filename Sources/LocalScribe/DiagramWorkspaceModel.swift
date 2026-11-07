@@ -17,7 +17,12 @@ enum DiagramExportFormat: String, CaseIterable {
     private var diagramsCancellable: AnyCancellable?
     init(model: AppModel) {
         self.model = model
-        diagramsCancellable = model.$diagrams.sink { [weak self] _ in self?.loadResult() }
+        diagramsCancellable = model.$diagrams.sink { [weak self] diagrams in
+            guard let self else { return }
+            // @Published emits before model.diagrams changes. Use the incoming
+            // snapshot so completion loads the newly published active run.
+            self.loadResult(for: diagrams.first { $0.id == self.selection })
+        }
     }
 
     @Published var selection: String? {
@@ -65,6 +70,10 @@ enum DiagramExportFormat: String, CaseIterable {
     }
 
     func loadResult() {
+        loadResult(for: selected)
+    }
+
+    private func loadResult(for selected: DiagramManifest?) {
         guard let selected else { result = nil; resultError = nil; resultSignature = ""; return }
         let signature = selected.id + (selected.activeRunId ?? "") + (selected.pendingRunId ?? "") + selected.state.rawValue
         guard resultSignature != signature else { return }

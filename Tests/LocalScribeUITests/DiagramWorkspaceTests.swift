@@ -31,8 +31,9 @@ final class DiagramWorkspaceTests: XCTestCase {
                 time.sleep(0.02)
             info = json.loads((run / 'run.json').read_text())
             fingerprint = hashlib.sha256((info['sourceHash'] + info['profileHash'] + info['pipelineVersion'] + info['promptVersion'] + info['preprocessingVersion']).encode()).hexdigest()
+            label = (root / 'diagram-label').read_text() if (root / 'diagram-label').exists() else 'Проверка'
             result = dict(schemaVersion=1, fingerprint=fingerprint, language='ru',
-                nodes=[dict(id='n1', label='Начало', uncertain=False), dict(id='n2', label='Проверка', uncertain=False)],
+                nodes=[dict(id='n1', label='Начало', uncertain=False), dict(id='n2', label=label, uncertain=False)],
                 edges=[{'from': 'n1', 'to': 'n2', 'direction': 'forward', 'label': 'да', 'uncertain': False}])
             (run / 'result.json').write_text(json.dumps(result))
             emit('completed')
@@ -129,6 +130,9 @@ final class DiagramWorkspaceTests: XCTestCase {
         let diagram = try await importPNG(model)
         try await waitUntil { model.diagram(diagram.id)?.state == .queued }
         XCTAssertEqual(model.diagramQueuePosition(for: diagram.id), 1)
+        // Keep the diagram open while recognition completes, as in the UI.
+        workspace.selection = diagram.id
+        XCTAssertNil(workspace.result)
         try Data().write(to: release)
         try await waitUntil { model.diagram(diagram.id)?.state == .completed }
         let finished = try XCTUnwrap(model.diagram(diagram.id))
@@ -141,8 +145,7 @@ final class DiagramWorkspaceTests: XCTestCase {
         XCTAssertNil(commands[0].recordingPath)
         XCTAssertEqual(commands[0].diagramPath, model.diagramRepository?.folder(diagram.id).path)
         XCTAssertEqual(commands[0].modelsPath, repo.models.path)
-        // The workspace loads the validated result for the active run.
-        workspace.selection = diagram.id
+        // Completion must load the result without reselecting the diagram.
         try await waitUntil { workspace.result != nil }
         XCTAssertEqual(workspace.result?.nodes.map(\.label), ["Начало", "Проверка"])
         XCTAssertEqual(workspace.result?.edges.first?.label, "да")
@@ -266,11 +269,14 @@ final class DiagramWorkspaceTests: XCTestCase {
         XCTAssertEqual(workspace.result?.nodes.count, 2, "предыдущий результат остаётся прочитанным")
         // A successful retry publishes a new run.
         try FileManager.default.removeItem(at: root.appendingPathComponent("diagram-fail"))
+        try "Новая версия".write(to: root.appendingPathComponent("diagram-label"), atomically: true, encoding: .utf8)
         await model.recognizeDiagram(diagram.id)
         try await waitUntil { model.diagram(diagram.id)?.state == .completed }
         let done = try XCTUnwrap(model.diagram(diagram.id))
         XCTAssertNotEqual(done.activeRunId, firstRun)
         XCTAssertNil(done.pendingRunId)
+        try await waitUntil { workspace.result?.nodes.last?.label == "Новая версия" }
+        XCTAssertNil(workspace.resultError)
         await model.shutdown()
     }
 
@@ -378,8 +384,8 @@ final class DiagramWorkspaceTests: XCTestCase {
         // A retry with a fresh run restores a readable result.
         await model.recognizeDiagram(diagram.id)
         try await waitUntil { model.diagram(diagram.id)?.state == .completed }
-        workspace.loadResult()
         try await waitUntil { workspace.result != nil }
+        XCTAssertNil(workspace.resultError)
         await model.shutdown()
     }
 }
