@@ -20,6 +20,7 @@ public actor DiagramCoordinator {
     private var groupsInitialized = false
     private var groups = RecordingGroups()
     private var groupsError: String?
+    private var groupDeletion: (id: String, members: Set<String>)?
     private var unreadableDiagramIDs: [String] = []
     private var revision: UInt64 = 0
 
@@ -87,6 +88,9 @@ public actor DiagramCoordinator {
     /// then the manifest publication.
     @discardableResult public func importImage(_ source: URL, groupID: String = RecordingGroup.ungroupedID) throws -> DiagramManifest {
         try Task.checkCancellation()
+        guard groupDeletion?.id != groupID else {
+            throw ScribeError.message("Группа схем удаляется. Повторите импорт после удаления.")
+        }
         initialize()
         let manifest = try repository.importImage(at: source) { manifest in
             try reserveDestination(manifest.id, groupID: groupID)
@@ -163,9 +167,10 @@ public actor DiagramCoordinator {
     }
 
     /// Cancellation keeps pendingRunId as is: a retry always creates a new run.
-    @discardableResult public func cancel(_ id: String) throws -> DiagramManifest {
+    @discardableResult public func cancel(_ id: String, onlyPending: Bool = false) throws -> DiagramManifest {
         initialize()
         var manifest = try repository.load(id)
+        guard !onlyPending || manifest.state.processing || manifest.state == .queued else { return manifest }
         manifest.state = .cancelled
         try repository.save(manifest)
         publish(manifest)
@@ -176,6 +181,7 @@ public actor DiagramCoordinator {
 
     public func editGroups(_ change: @Sendable (inout RecordingGroups) throws -> Void) throws {
         try requireGroups()
+        guard groupDeletion == nil else { throw ScribeError.message("Дождитесь удаления группы схем") }
         var next = groups
         try change(&next)
         // An unchanged catalog (including a no-op setAllExpanded) is not written.
@@ -185,12 +191,57 @@ public actor DiagramCoordinator {
     /// Validate the entire batch before one atomic catalog publication.
     public func moveDiagrams(_ ids: Set<String>, to groupID: String) throws {
         try requireGroups()
+        if let deletion = groupDeletion, deletion.id == groupID || !deletion.members.isDisjoint(with: ids) {
+            throw ScribeError.message("Дождитесь удаления группы схем")
+        }
         var next = groups
         for id in ids.sorted() {
             _ = try repository.load(id)
             try next.assign(id, to: groupID)
         }
         if next != groups { try commitGroups(next) }
+    }
+
+    /// Freeze membership before the UI cancels the group's jobs.
+    public func prepareGroupDeletion(_ id: String) throws -> Set<String> {
+        try requireGroups()
+        guard groupDeletion == nil, groups.groups.contains(where: { $0.id == id && !$0.isSystem }) else {
+            throw ScribeError.message("Нельзя удалить эту группу схем сейчас")
+        }
+        let members = Set(groups.membership.compactMap { $0.value == id ? $0.key : nil })
+        groupDeletion = (id, members)
+        return members
+    }
+
+    public func finishGroupDeletion(_ id: String) throws {
+        guard let deletion = groupDeletion, deletion.id == id else {
+            throw ScribeError.message("Удаление группы схем не подготовлено")
+        }
+        defer { groupDeletion = nil }
+        var next = groups
+        try next.remove(id)
+        // Skip stale assignments to missing items. Preserve damaged or
+        // inaccessible items and their group.
+        var files: Set<String> = []
+        let keys: Set<URLResourceKey> = [.isDirectoryKey, .isSymbolicLinkKey]
+        let damaged = ScribeError.message("В группе есть повреждённая или недоступная схема. Группа сохранена.")
+        do {
+            for member in deletion.members {
+                let values: URLResourceValues
+                do { values = try repository.folder(member).resourceValues(forKeys: keys) }
+                catch let error as CocoaError where error.code == .fileReadNoSuchFile { continue }
+                guard values.isDirectory == true, values.isSymbolicLink != true else {
+                    throw damaged
+                }
+                try DiagramRepository.validate(repository.load(member))
+                files.insert(member)
+            }
+        } catch {
+            replace(readListing())
+            throw damaged
+        }
+        try delete(files)
+        try commitGroups(next)
     }
 
     /// File-only work shares the same serial executor as manifest transactions.

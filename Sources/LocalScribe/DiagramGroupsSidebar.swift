@@ -7,8 +7,10 @@ struct DiagramGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @ObservedObject var workspace: DiagramWorkspaceModel
     @ObservedObject private var search: RecordingSearch
-    init(model: AppModel, workspace: DiagramWorkspaceModel) {
+    @Binding private var mode: WorkspaceMode
+    init(model: AppModel, workspace: DiagramWorkspaceModel, mode: Binding<WorkspaceMode>) {
         self.model = model; self.workspace = workspace; self.search = model.diagramSearch
+        _mode = mode
     }
     @State private var editor: GroupNameDraft?
     @State private var deletingGroup: RecordingGroup?
@@ -19,22 +21,16 @@ struct DiagramGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Схемы").font(.headline)
-                Spacer()
+            SidebarWorkspaceHeader(mode: $mode, importImage: workspace.presentImportPanel) {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
                 Button { if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") } } label: {
-                    Image(systemName: "folder.badge.plus")
+                    Image(systemName: "folder.badge.plus").frame(width: 20, height: 24)
                 }.buttonStyle(.borderless)
                     .help("Добавить группу схем").accessibilityLabel("Добавить группу схем")
                     .accessibilityIdentifier("diagrams.groups.add")
-                    .disabled(model.deletingGroupID != nil)
-                Button(action: workspace.presentImportPanel) { Image(systemName: "photo.badge.plus") }
-                    .buttonStyle(.borderless)
-                    .help("Загрузить изображение").accessibilityLabel("Загрузить изображение")
-                    .accessibilityIdentifier("diagrams.import")
-            }.padding(.horizontal, 12).padding(.vertical, 10)
+                    .disabled(model.deletingDiagramJobs)
+            }
             RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: "Поиск по названиям",
                                  label: "Поиск по названиям схем", shortcutActive: true)
                 .padding(.horizontal, 12).padding(.bottom, 8)
@@ -116,7 +112,7 @@ struct DiagramGroupsSidebar: View {
             }
         }
         .sheet(item: $deletingGroup) { group in
-            DeleteDiagramGroupView(workspace: workspace, group: group) { deletingGroup = nil }
+            DeleteDiagramGroupView(workspace: workspace, model: model, group: group) { deletingGroup = nil }
         }
         .sheet(item: $deletingDiagrams) { deletion in
             DeleteDiagramsView(workspace: workspace, ids: deletion.ids) { deletingDiagrams = nil }
@@ -138,7 +134,7 @@ struct DiagramGroupsSidebar: View {
             expanded: expanded,
             title: expanded ? "Развернуть все группы схем" : "Свернуть все группы схем",
             identifier: expanded ? "diagrams.groups.expandAll" : "diagrams.groups.collapseAll",
-            disabled: false) {
+            disabled: model.deletingDiagramJobs) {
             Task { await workspace.setAllSidebarExpanded(expanded) }
         }
     }
@@ -236,6 +232,7 @@ private struct DiagramGroupHeader: View {
                     .opacity(hovered ? 1 : 0)
                     .help("Удалить группу схем").accessibilityLabel("Удалить группу \(group.name)")
                     .accessibilityIdentifier("diagrams.groups.delete.\(group.id)")
+                    .disabled(workspace.model.deletingDiagramJobs)
             }
             Image(systemName: dropTargeted ? "arrow.down.to.line" : "checkmark").frame(width: 16)
                 .foregroundStyle(dropTargeted ? Color.accentColor : Color.primary)
@@ -251,6 +248,7 @@ private struct DiagramGroupHeader: View {
             if !group.isSystem {
                 Button("Переименовать", action: rename)
                 Button("Удалить группу", role: .destructive, action: delete)
+                    .disabled(workspace.model.deletingDiagramJobs)
             }
         }
     }
@@ -346,23 +344,30 @@ struct DeleteDiagramsView: View {
 }
 
 struct DeleteDiagramGroupView: View {
-    @ObservedObject var workspace: DiagramWorkspaceModel
+    let workspace: DiagramWorkspaceModel
+    @ObservedObject var model: AppModel
     let group: RecordingGroup
     let dismiss: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("Удалить группу «\(group.name)»?").font(.title2)
-            Text("Схемы из группы (\(workspace.model.diagrams(in: group.id).count)) переместятся в «Без темы». Сами схемы и результаты не удаляются.")
+            Text("Количество схем в группе — \(model.diagrams(in: group.id).count). Если удалить только группу, схемы перейдут в «Без темы». При удалении вместе со схемами LocalScribe удалит архивные копии изображений и результаты без возможности восстановления. Внешние оригиналы и экспорты сохранятся.")
             HStack {
                 Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Удалить группу", role: .destructive) {
+                Button("Удалить только группу") {
                     dismiss()
-                    Task { await workspace.model.deleteDiagramGroup(group.id) }
+                    Task { await workspace.deleteGroup(group.id, deleteDiagrams: false) }
                 }
                 .accessibilityIdentifier("diagrams.groups.confirmDelete")
             }
-        }.padding(24).frame(width: 500).onExitCommand(perform: dismiss)
+            Button("Удалить группу и схемы", role: .destructive) {
+                dismiss()
+                Task { await workspace.deleteGroup(group.id, deleteDiagrams: true) }
+            }
+            .foregroundStyle(.red)
+            .accessibilityIdentifier("diagrams.groups.confirmDeleteDiagrams")
+        }.padding(24).frame(width: 540).onExitCommand(perform: dismiss)
     }
 }
 

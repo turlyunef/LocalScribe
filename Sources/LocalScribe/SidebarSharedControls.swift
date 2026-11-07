@@ -1,5 +1,45 @@
 import SwiftUI
 
+struct SidebarWorkspaceHeader<GroupActions: View>: View {
+    @Binding var mode: WorkspaceMode
+    var importImage: (() -> Void)?
+    @ViewBuilder var groupActions: () -> GroupActions
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Picker("Раздел архива", selection: $mode) {
+                ForEach(WorkspaceMode.allCases) { value in
+                    Text(value.rawValue).tag(value)
+                }
+            }
+            .labelsHidden()
+            .pickerStyle(.segmented)
+            .controlSize(.small)
+            .tint(.blue)
+            .frame(width: 116)
+            .accessibilityIdentifier("workspace.mode")
+
+            Spacer(minLength: 0)
+            groupActions()
+            Group {
+                if let importImage {
+                    Button(action: importImage) {
+                        Image(systemName: "photo.badge.plus").frame(width: 20, height: 24)
+                    }
+                    .buttonStyle(.borderless)
+                    .help("Загрузить изображение").accessibilityLabel("Загрузить изображение")
+                    .accessibilityIdentifier("diagrams.import")
+                } else {
+                    Color.clear.accessibilityHidden(true)
+                }
+            }
+            .frame(width: 20, height: 24)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+    }
+}
+
 /// Icon-only "expand all / collapse all" button with stacked chevrons.
 /// Titles and accessibility identifiers are caller-defined.
 struct SidebarExpansionButton: View {

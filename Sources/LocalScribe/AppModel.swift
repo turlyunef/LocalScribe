@@ -33,7 +33,7 @@ struct QueueJobID: Hashable, Sendable {
     private var diagramArchiveRevision: UInt64 = 0
     private var reportedDiagramGroupsError: String?
     private var reportedUnreadableDiagramIDs: [String] = []
-    private var deletingDiagramJobs = false
+    @Published private(set) var deletingDiagramJobs = false
     @Published private(set) var deletingGroupID: String?
     @Published var sidebarRevealID: String?
     @Published private(set) var sidebarSelection = SidebarSelection()
@@ -897,7 +897,7 @@ struct QueueJobID: Hashable, Sendable {
         try await runWorker(command)
         guard activeJob == job else { throw CancellationError() }
         m = try await diagramArchive.load(id)
-        guard m.state != .cancelled else { throw CancellationError() }
+        guard activeJob == job, m.state != .cancelled else { throw CancellationError() }
         _ = try await diagramArchive.completeRun(id, runId: info.id, warnings: m.warnings)
         await reloadDiagrams()
     }
@@ -1241,10 +1241,11 @@ struct QueueJobID: Hashable, Sendable {
         do {
             let manifest = try await diagramArchive.importImage(url, groupID: groupID)
             await reloadDiagrams()
-            if let profile = diagramProfile {
+            let job = QueueJobID.diagram(manifest.id)
+            if let profile = diagramProfile, jobAdmission[job] == nil {
                 _ = try await diagramArchive.beginRun(manifest.id, profile: profile)
                 await reloadDiagrams()
-                await enqueueDiagram(manifest.id)
+                if jobAdmission[job] == nil { await enqueueDiagram(manifest.id) }
             }
             return manifest
         } catch {
@@ -1256,34 +1257,41 @@ struct QueueJobID: Hashable, Sendable {
     /// Explicit start or retry: a new run is always created; diagram runs never
     /// promise token-level continuation.
     func recognizeDiagram(_ id: String) async {
-        guard !shuttingDown, let diagramArchive else { return }
+        let job = QueueJobID.diagram(id)
+        guard !shuttingDown, let diagramArchive, !deletingJobIDs.contains(job) else { return }
         guard let profile = diagramProfile else {
             errorHandler.report(message: "Сначала загрузите модель схем в настройках")
             return
         }
+        let admission = jobAdmission[job, default: 0]
         do {
             _ = try await diagramArchive.beginRun(id, profile: profile)
             await reloadDiagrams()
+            guard admission == jobAdmission[job, default: 0] else { return }
             await enqueueDiagram(id, allowCancelled: true)
-        } catch { errorHandler.report(error) }
+        } catch {
+            if admission == jobAdmission[job, default: 0] { errorHandler.report(error) }
+        }
     }
     func enqueueDiagram(_ id: String, allowCancelled: Bool = false) async {
-        guard let diagramArchive, !deletingJobIDs.contains(.diagram(id)), enqueuing[.diagram(id)] == nil else { return }
+        let job = QueueJobID.diagram(id)
+        guard let diagramArchive, !deletingJobIDs.contains(job), enqueuing[job] == nil else { return }
         let request = UUID(), generation = queueGeneration
         let pauseReason = queuePauses.values.first
-        enqueuing[.diagram(id)] = request
+        enqueuing[job] = request
         defer {
-            if enqueuing[.diagram(id)] == request { enqueuing.removeValue(forKey: .diagram(id)) }
+            if enqueuing[job] == request { enqueuing.removeValue(forKey: job) }
             if !busy { Task { await processQueue() } }
         }
         let m: DiagramManifest
         do { m = try await diagramArchive.load(id) }
         catch {
+            guard enqueuing[job] == request else { return }
             errorHandler.report(message: "Не удалось прочитать схему для распознавания. Файлы сохранены; проверьте архив и повторите попытку.")
             return
         }
-        guard allowCancelled || m.state != .cancelled, activeJob != .diagram(id),
-              generation == queueGeneration, !deletingJobIDs.contains(.diagram(id)), enqueuing[.diagram(id)] == request else { return }
+        guard allowCancelled || m.state != .cancelled, activeJob != job,
+              generation == queueGeneration, enqueuing[job] == request else { return }
         if shuttingDown {
             _ = try? await diagramArchive.update(id) {
                 $0.state = .interrupted; $0.lastError = "Приложение закрыто. Можно повторить распознавание."
@@ -1304,13 +1312,17 @@ struct QueueJobID: Hashable, Sendable {
         }
         if m.pendingRunId == nil, let profile = diagramProfile {
             do { _ = try await diagramArchive.beginRun(id, profile: profile) }
-            catch { errorHandler.report(error); return }
+            catch {
+                if enqueuing[job] == request { errorHandler.report(error) }
+                return
+            }
         }
-        if !queued.contains(.diagram(id)) { queued.append(.diagram(id)) }
+        guard generation == queueGeneration, enqueuing[job] == request else { return }
+        if !queued.contains(job) { queued.append(job) }
         _ = try? await diagramArchive.update(id) { $0.state = .queued; $0.lastError = nil }
         await reloadDiagrams()
     }
-    func cancelDiagram(_ id: String) async {
+    func cancelDiagram(_ id: String, onlyPending: Bool = false) async {
         guard let diagramArchive else { return }
         jobAdmission[.diagram(id), default: 0] &+= 1
         enqueuing.removeValue(forKey: .diagram(id))
@@ -1322,29 +1334,39 @@ struct QueueJobID: Hashable, Sendable {
             suspendingQueue = false
             Task { await processQueue() }
         }
-        _ = try? await diagramArchive.cancel(id)
+        _ = try? await diagramArchive.cancel(id, onlyPending: onlyPending)
         await reloadDiagrams()
     }
     /// Deleting first bars re-admission, then waits for exactly its own worker
     /// and readers before removing artifacts — same lifecycle as recordings.
     func deleteDiagrams(_ ids: Set<String>) async {
-        guard let diagramArchive, !deletingDiagramJobs, !ids.isEmpty else { return }
-        deletingDiagramJobs = true
-        deletingJobIDs.formUnion(ids.map { QueueJobID.diagram($0) })
-        for id in ids {
-            jobAdmission[.diagram(id), default: 0] &+= 1
-            enqueuing.removeValue(forKey: .diagram(id))
+        guard let diagramArchive, !ids.isEmpty else { return }
+        await withDiagramDeletion {
+            await cancelDiagramJobsForDeletion(ids)
+            try await diagramArchive.delete(ids)
         }
-        queued.removeAll { $0.kind == .diagram && ids.contains($0.id) }
+    }
+    private func withDiagramDeletion(_ operation: () async throws -> Void) async {
+        guard !deletingDiagramJobs else { return }
+        deletingDiagramJobs = true
         defer {
             deletingDiagramJobs = false
             deletingJobIDs.subtract(diagrams.map { QueueJobID.diagram($0.id) })
             Task { await processQueue() }
         }
-        for id in ids.sorted() { await cancelDiagram(id) }
-        do { try await diagramArchive.delete(ids) }
+        do { try await operation() }
         catch { errorHandler.report(error) }
         await reloadDiagrams()
+    }
+    private func cancelDiagramJobsForDeletion(_ ids: Set<String>) async {
+        let jobs = Set(ids.map(QueueJobID.diagram))
+        deletingJobIDs.formUnion(jobs)
+        for job in jobs {
+            jobAdmission[job, default: 0] &+= 1
+            enqueuing.removeValue(forKey: job)
+        }
+        queued.removeAll { jobs.contains($0) }
+        for id in ids.sorted() { await cancelDiagram(id, onlyPending: true) }
     }
     func renameDiagram(_ id: String, title: String) async {
         guard let diagramArchive else { return }
@@ -1367,11 +1389,17 @@ struct QueueJobID: Hashable, Sendable {
             await reloadDiagrams()
         } catch { errorHandler.report(error) }
     }
-    /// Removing a user group moves its diagrams to «Без темы»; diagrams and
-    /// their artifacts are only removed by the separate delete command.
-    func deleteDiagramGroup(_ id: String) async {
-        guard id != RecordingGroup.ungroupedID else { return }
-        await changeDiagramGroups { try $0.remove(id) }
+    func deleteDiagramGroup(_ id: String, deleteDiagrams: Bool) async {
+        guard let diagramArchive, !deletingDiagramJobs, id != RecordingGroup.ungroupedID else { return }
+        if deleteDiagrams {
+            await withDiagramDeletion {
+                let members = try await diagramArchive.prepareGroupDeletion(id)
+                await cancelDiagramJobsForDeletion(members)
+                try await diagramArchive.finishGroupDeletion(id)
+            }
+        } else {
+            await changeDiagramGroups { try $0.remove(id) }
+        }
     }
     func diagramQueuePosition(for id: String) -> Int? {
         queued.firstIndex(of: .diagram(id)).map { $0 + 1 }

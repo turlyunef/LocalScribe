@@ -105,11 +105,11 @@ final class DiagramWorkspaceTests: XCTestCase {
         guard CGImageDestinationFinalize(destination) else { throw ScribeError.message("Не удалось записать тестовое изображение") }
         return output as Data
     }
-    private func importPNG(_ model: AppModel, title: String = "Схема") async throws -> DiagramManifest {
+    private func importPNG(_ model: AppModel, groupID: String = RecordingGroup.ungroupedID) async throws -> DiagramManifest {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("diagram-\(UUID().uuidString).png")
         try pngData().write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        let imported = await model.importDiagramImage(at: url, groupID: RecordingGroup.ungroupedID)
+        let imported = await model.importDiagramImage(at: url, groupID: groupID)
         return try XCTUnwrap(imported)
     }
     private func events(_ root: URL) throws -> [WorkerCommand] {
@@ -342,6 +342,50 @@ final class DiagramWorkspaceTests: XCTestCase {
         // The unrelated queued recording still runs after the deletion barrier.
         try Data().write(to: release)
         try await waitUntil { (try? repo.load(recording.id).state) == .completed }
+        await model.shutdown()
+    }
+
+    func testDiagramGroupDeletionCanKeepDiagramsOrCancelAndRemoveTheirJobs() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, release) = try fixture(root)
+        let workspace = DiagramWorkspaceModel(model: model)
+        let diagramRepo = try XCTUnwrap(model.diagramRepository)
+        await model.changeDiagramGroups { try $0.create(name: "Проект") }
+        let transferGroup = model.diagramGroups.defaultID
+        let active = try await importPNG(model, groupID: transferGroup)
+        try await waitUntil { model.status == "diagram-ready-" + active.id }
+        workspace.selectSidebarDiagram(active.id)
+
+        await workspace.deleteGroup(transferGroup, deleteDiagrams: false)
+        XCTAssertEqual(model.diagramGroups.groupID(for: active.id), RecordingGroup.ungroupedID)
+        XCTAssertFalse(model.diagramGroups.groups.contains { $0.id == transferGroup })
+        XCTAssertEqual(model.status, "diagram-ready-" + active.id)
+        XCTAssertEqual(workspace.selection, active.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: diagramRepo.originalURL(active).path))
+
+        await model.changeDiagramGroups { try $0.create(name: "Удалить") }
+        let deletingGroup = model.diagramGroups.defaultID
+        await model.moveDiagrams([active.id], to: deletingGroup)
+        let recording = try completedRecording(repo, title: "Unrelated")
+        await model.enqueue(recording.id)
+        let queuedMember = try await importPNG(model, groupID: deletingGroup)
+        let outside = try await importPNG(model)
+        XCTAssertEqual(model.diagramQueuePosition(for: queuedMember.id), 2)
+        await workspace.deleteGroup(deletingGroup, deleteDiagrams: true)
+        XCTAssertFalse(model.diagramGroups.groups.contains { $0.id == deletingGroup })
+        XCTAssertNil(workspace.selection)
+        for member in [active, queuedMember] {
+            await model.enqueueDiagram(member.id)
+            XCTAssertNil(model.diagramQueuePosition(for: member.id))
+            XCTAssertFalse(FileManager.default.fileExists(atPath: diagramRepo.folder(member.id).path))
+        }
+        try Data().write(to: release)
+        try await waitUntil { model.diagram(outside.id)?.state == .completed }
+        XCTAssertEqual(try repo.load(recording.id).state, .completed)
+        let commands = try events(root)
+        XCTAssertEqual(commands.filter(\.isDiagram).map(\.jobId), [active.id, outside.id])
+        XCTAssertEqual(commands.dropFirst().first?.jobId, recording.id)
         await model.shutdown()
     }
 

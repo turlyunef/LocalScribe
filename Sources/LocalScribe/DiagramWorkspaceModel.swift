@@ -198,13 +198,25 @@ enum DiagramExportFormat: String, CaseIterable {
     }
     func revealDiagram(_ id: String) async {
         await model.reloadDiagrams()
+        guard model.diagram(id) != nil else { return }
         let groupID = model.diagramGroups.groupID(for: id)
         await model.changeDiagramGroups { try $0.setExpanded(groupID, true) }
+        guard model.diagram(id) != nil else { return }
         selection = id; sidebarRevealID = id
     }
     func deleteSelected(_ ids: Set<String>) async {
         await model.deleteDiagrams(ids)
+        reconcileSelectionAfterDeletion()
+    }
+    func deleteGroup(_ id: String, deleteDiagrams: Bool) async {
+        await model.deleteDiagramGroup(id, deleteDiagrams: deleteDiagrams)
+        if deleteDiagrams { reconcileSelectionAfterDeletion() }
+    }
+    private func reconcileSelectionAfterDeletion() {
         if let selection, model.diagram(selection) == nil { self.selection = nil }
+        var retained = sidebarSelection
+        retained.retain(Set(model.diagrams.map(\.id)))
+        if retained != sidebarSelection { sidebarSelection = retained }
     }
 }
 

@@ -574,27 +574,50 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         try await diagramArchive.save(diagram)
         await model.reloadDiagrams()
 
-        // Recordings open by default with the previous working area.
-        let (recordingsHost, recordingsWindow) = host(ContentView(model: model), width: 1400)
-        defer { recordingsWindow.close() }
-        try await settle(recordingsHost)
-        XCTAssertNotNil(findElement("workspace.mode", in: recordingsHost))
-        XCTAssertNotNil(findElement("groups.add", in: recordingsHost))
-        XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: recordingsHost))
-        XCTAssertNil(findElement("diagrams.groups.add", in: recordingsHost))
+        let (hosting, window) = host(ContentView(model: model), width: 850)
+        defer { window.close() }
+        try await settle(hosting)
 
-        // The diagrams mode swaps both columns; the recording archive and its
-        // selection are untouched by mounting the other mode.
-        let (diagramsHost, diagramsWindow) = host(ContentView(model: model, initialMode: .diagrams), width: 1400)
-        defer { diagramsWindow.close() }
-        try await settle(diagramsHost)
-        XCTAssertNotNil(findElement("diagrams.groups.add", in: diagramsHost))
-        XCTAssertNotNil(findElement("diagrams.search", in: diagramsHost))
-        XCTAssertNotNil(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: diagramsHost))
-        XCTAssertNil(findElement("groups.add", in: diagramsHost), "sidebar записей скрыт в режиме схем")
-        XCTAssertEqual(model.selection, recording.id, "режим схем не меняет выбор записи")
-        XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: recordingsHost),
-                        "режим схем не влияет на смонтированный режим записей")
+        func frame(_ id: String) throws -> NSRect {
+            try XCTUnwrap(findElement(id, in: hosting)?.accessibilityFrame?(), id)
+        }
+        func segment(_ title: String) throws -> AnyObject {
+            let picker = try XCTUnwrap(findElement("workspace.mode", in: hosting))
+            return try XCTUnwrap(descendants(picker).first { element in
+                (element as? NSObject).flatMap(labelText) == title
+            }, title)
+        }
+
+        let switchFrame = try frame("workspace.mode")
+        let titles = ["Записи", "Схемы"]
+        let segmentFrames = try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?()) }
+        let groupButtons = ["expandAll", "collapseAll", "add"]
+        let groupFrames = try groupButtons.map { try frame("groups.\($0)") }
+        XCTAssertLessThanOrEqual(switchFrame.maxX, groupFrames[0].minX)
+        for buttonFrame in groupFrames {
+            XCTAssertEqual(switchFrame.midY, buttonFrame.midY, accuracy: 1)
+        }
+        XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
+        XCTAssertNil(findElement("diagrams.import", in: hosting))
+
+        _ = try segment("Схемы").accessibilityPerformPress?()
+        try await settle(hosting)
+        XCTAssertNotNil(findElement("diagrams.search", in: hosting))
+        XCTAssertNotNil(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: hosting))
+        XCTAssertNil(findElement("groups.add", in: hosting))
+        XCTAssertEqual(try frame("workspace.mode"), switchFrame)
+        XCTAssertEqual(try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?()) }, segmentFrames)
+        XCTAssertEqual(try groupButtons.map { try frame("diagrams.groups.\($0)") }, groupFrames)
+        let importFrame = try frame("diagrams.import")
+        XCTAssertEqual(importFrame.midY, switchFrame.midY, accuracy: 1)
+        XCTAssertLessThanOrEqual(groupFrames[2].maxX, importFrame.minX)
+        XCTAssertEqual(model.selection, recording.id)
+
+        _ = try segment("Записи").accessibilityPerformPress?()
+        try await settle(hosting)
+        XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
+        XCTAssertNil(findElement("diagrams.import", in: hosting))
+        XCTAssertEqual(try frame("workspace.mode"), switchFrame)
         await model.shutdown()
     }
     private func labelText(_ object: NSObject) -> String? {

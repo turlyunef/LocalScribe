@@ -12,25 +12,17 @@ struct ContentView: View {
     @ObservedObject var model: AppModel
     @StateObject private var diagramWorkspace: DiagramWorkspaceModel
     @State private var mode: WorkspaceMode = .recordings
-    init(model: AppModel, initialMode: WorkspaceMode = .recordings) {
+    init(model: AppModel) {
         _model = ObservedObject(wrappedValue: model)
         _diagramWorkspace = StateObject(wrappedValue: DiagramWorkspaceModel(model: model))
-        _mode = State(wrappedValue: initialMode)
     }
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 0) {
-                // Independent selection, search and group state per mode;
-                // switching never touches queues, import or the microphone.
-                Picker("Режим", selection: $mode) {
-                    ForEach(WorkspaceMode.allCases) { value in Text(value.rawValue).tag(value) }
-                }.pickerStyle(.segmented)
-                    .padding(.horizontal, 12).padding(.top, 10)
-                    .accessibilityIdentifier("workspace.mode")
                 if mode == .recordings {
-                    RecordingGroupsSidebar(model: model)
+                    RecordingGroupsSidebar(model: model, mode: $mode)
                 } else {
-                    DiagramGroupsSidebar(model: model, workspace: diagramWorkspace)
+                    DiagramGroupsSidebar(model: model, workspace: diagramWorkspace, mode: $mode)
                 }
             }.navigationTitle("LocalScribe")
                 .navigationSplitViewColumnWidth(min: 240, ideal: 290)

@@ -6,8 +6,10 @@ import LocalScribeCore
 struct RecordingGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var search: RecordingSearch
-    init(model: AppModel) {
+    @Binding private var mode: WorkspaceMode
+    init(model: AppModel, mode: Binding<WorkspaceMode> = .constant(.recordings)) {
         self.model = model; self.search = model.recordingSearch
+        _mode = mode
     }
     @State private var editor: GroupNameDraft?
     @State private var deleting: RecordingGroup?
@@ -17,19 +19,19 @@ struct RecordingGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            HStack {
-                Text("Записи").font(.headline)
-                Spacer()
+            SidebarWorkspaceHeader(mode: $mode) {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
                 Button {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
-                } label: { Image(systemName: "folder.badge.plus") }
+                } label: {
+                    Image(systemName: "folder.badge.plus").frame(width: 20, height: 24)
+                }
                     .buttonStyle(.borderless)
                     .help("Добавить группу").accessibilityLabel("Добавить группу")
                     .accessibilityIdentifier("groups.add")
                     .disabled(model.deletingGroupID != nil)
-            }.padding(.horizontal, 12).padding(.vertical, 10)
+            }
             RecordingSearchField(search: search)
                 .padding(.horizontal, 12).padding(.bottom, 8)
             if search.active && search.completed {

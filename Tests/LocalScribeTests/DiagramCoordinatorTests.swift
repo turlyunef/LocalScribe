@@ -98,6 +98,60 @@ final class DiagramCoordinatorTests: XCTestCase {
         XCTAssertFalse(diagramGroups.groups.contains { $0.name == "Аудио" })
     }
 
+    func testGroupDeletionFreezesMembershipAndCanRetryAfterPartialFailure() async throws {
+        let repo = try makeRepository()
+        let members = try [seed(repo, date: 1).id, seed(repo, date: 2).id].sorted()
+        let outside = try seed(repo, date: 3)
+        let source = try pngSource()
+        let fail = Mutex<String?>(members[1])
+        let archive = DiagramCoordinator(repository: repo, removeItem: { repository, id in
+            if id == fail.withLock({ $0 }) { throw ScribeError.message("test deletion failure") }
+            try repository.delete(id)
+        })
+        let group = try await create(archive, "Проекты")
+        try await archive.moveDiagrams(Set(members), to: group.id)
+        let prepared = try await archive.prepareGroupDeletion(group.id)
+        XCTAssertEqual(prepared, Set(members))
+        do { try await archive.moveDiagrams([outside.id], to: group.id); XCTFail("Move into frozen group") } catch {}
+        do { try await archive.moveDiagrams([members[0]], to: RecordingGroup.ungroupedID); XCTFail("Move out of frozen group") } catch {}
+        do { _ = try await archive.importImage(source, groupID: group.id); XCTFail("Import into frozen group") } catch {}
+        do { try await archive.finishGroupDeletion(group.id); XCTFail("Expected deletion failure") } catch {}
+
+        let partial = await archive.snapshot()
+        XCTAssertEqual(Set(partial.manifests.map(\.id)), [members[1], outside.id])
+        XCTAssertEqual(partial.groups.groupID(for: members[1]), group.id)
+        XCTAssertEqual(partial.groups.defaultID, group.id)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(members[0]).path))
+
+        fail.withLock { $0 = nil }
+        _ = try await archive.prepareGroupDeletion(group.id)
+        try await archive.finishGroupDeletion(group.id)
+        let final = await archive.snapshot()
+        XCTAssertEqual(final.manifests.map(\.id), [outside.id])
+        XCTAssertEqual(final.groups.groups.map(\.id), [RecordingGroup.ungroupedID])
+        XCTAssertTrue(final.groups.membership.isEmpty)
+        XCTAssertEqual(try RecordingGroups.loadCatalog(at: repo.groupsURL), final.groups)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: source.path))
+    }
+
+    func testGroupDeletionPreservesDamagedMembersAndGroup() async throws {
+        let repo = try makeRepository()
+        let archive = DiagramCoordinator(repository: repo)
+        let group = try await create(archive, "Проекты")
+        let source = try pngSource()
+        let healthy = try await archive.importImage(source, groupID: group.id)
+        let damaged = try await archive.importImage(source, groupID: group.id)
+        try FileManager.default.removeItem(at: repo.folder(damaged.id).appendingPathComponent("manifest.json"))
+
+        _ = try await archive.prepareGroupDeletion(group.id)
+        do { try await archive.finishGroupDeletion(group.id); XCTFail("Expected damaged item") } catch {}
+        let snapshot = await archive.snapshot()
+        XCTAssertEqual(snapshot.groups.groupID(for: damaged.id), group.id)
+        XCTAssertEqual(snapshot.groups.groupID(for: healthy.id), group.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.originalURL(damaged).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.originalURL(healthy).path))
+    }
+
     func testSnapshotOrderAndMonotonicRevision() async throws {
         let repo = try makeRepository()
         let old = try seed(repo, date: 1)
