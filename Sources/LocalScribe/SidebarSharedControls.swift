@@ -1,9 +1,9 @@
 import SwiftUI
 
-struct SidebarWorkspaceHeader<GroupActions: View>: View {
+struct SidebarWorkspaceHeader<GroupActions: View, ArchiveActions: View>: View {
     @Binding var mode: WorkspaceMode
-    var importImage: (() -> Void)?
-    @ViewBuilder var groupActions: () -> GroupActions
+    @ViewBuilder let groupActions: () -> GroupActions
+    @ViewBuilder let archiveActions: () -> ArchiveActions
 
     var body: some View {
         HStack(spacing: 4) {
@@ -16,29 +16,40 @@ struct SidebarWorkspaceHeader<GroupActions: View>: View {
             .pickerStyle(.segmented)
             .controlSize(.small)
             .tint(.blue)
-            .frame(width: 116)
+            .frame(width: 120)
             .accessibilityIdentifier("workspace.mode")
 
             Spacer(minLength: 0)
             groupActions()
-            Group {
-                if let importImage {
-                    Button(action: importImage) {
-                        Image(systemName: "photo.badge.plus")
-                            .offset(y: 1)
-                            .frame(width: 20, height: 24)
-                    }
-                    .buttonStyle(.borderless)
-                    .help("Загрузить изображение").accessibilityLabel("Загрузить изображение")
-                    .accessibilityIdentifier("diagrams.import")
-                } else {
-                    Color.clear.accessibilityHidden(true)
-                }
-            }
-            .frame(width: 20, height: 24)
+            archiveActions()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+}
+
+struct SidebarActionButton: View {
+    let icon: String
+    let title: String
+    let identifier: String
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: icon)
+                .frame(width: 20, height: 24)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.borderless)
+        .help(title)
+        .accessibilityLabel(title)
+        .accessibilityIdentifier(identifier)
+    }
+}
+
+struct SidebarEmptyAction: View {
+    var body: some View {
+        Color.clear.frame(width: 20, height: 24).allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 

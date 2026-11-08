@@ -43,6 +43,7 @@ import LocalScribeCore
     @Published private var collapsed: Set<String> = []
     private(set) var corpusRevision: UInt64 = 0
     private(set) var queryGeneration: UInt64 = 0
+    private var publishedQueryGeneration: UInt64?
     private var layoutRevision: UInt64 = 0
     private var titles: [RecordingTitleSearch.Title] = []
     private var rows: [Row] = []
@@ -61,6 +62,7 @@ import LocalScribeCore
     private(set) var lastApplyDuration = Duration.zero
     var isRunning: Bool { running != nil || pending }
     var visible: [String: [String]] { active && completed ? filtered : normal }
+    var hasCurrentQueryResults: Bool { completed && publishedQueryGeneration == queryGeneration }
 
     init(executor: @escaping Executor = { request in try await RecordingSearch.execute(request) }) { self.executor = executor }
     deinit { running?.cancel() }
@@ -163,6 +165,7 @@ import LocalScribeCore
         index = output.index; indexedRevision = corpusRevision
         sortedRows = output.sortedRows; sortedRevision = layoutRevision
         normal = output.normal; filtered = output.filtered; matchingIDs = output.matches
+        publishedQueryGeneration = output.stamp.query
         completed = active
         onVisibilityChange?()
         lastApplyDuration = start.duration(to: .now)

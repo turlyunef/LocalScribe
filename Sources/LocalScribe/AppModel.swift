@@ -77,6 +77,9 @@ struct QueueJobID: Hashable, Sendable {
     @Published var installing = false
     private(set) var downloadingModels = false
     @Published var verifyingModels = false
+    var canStartRecording: Bool {
+        recordingID == nil && !startingRecording && !finalizingRecording && !installing && !preparingStorage && !shuttingDown
+    }
     @Published var modelLibrary = ModelLibrary()
     @Published var downloadProgress: ModelInstallProgress?
     @Published var downloadBatch = ""

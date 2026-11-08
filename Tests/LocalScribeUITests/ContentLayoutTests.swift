@@ -632,7 +632,7 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         _ = NSApplication.shared
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
         let hosting = NSHostingView(rootView: view)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 700),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 560),
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = hosting
@@ -698,9 +698,15 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         let segmentFrames = try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?()) }
         let groupButtons = ["expandAll", "collapseAll", "add"]
         let groupFrames = try groupButtons.map { try frame("groups.\($0)") }
-        XCTAssertLessThanOrEqual(switchFrame.maxX, groupFrames[0].minX)
-        for buttonFrame in groupFrames {
+        let recordingActions = try ["recordings.sidebar.new", "recordings.sidebar.import"].map(frame)
+        let headerFrames = [switchFrame] + groupFrames + recordingActions
+        for (left, right) in zip(headerFrames, headerFrames.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.maxX, right.minX)
+        }
+        for buttonFrame in groupFrames + recordingActions {
             XCTAssertEqual(switchFrame.midY, buttonFrame.midY, accuracy: 1)
+            XCTAssertEqual(buttonFrame.width, 20, accuracy: 1)
+            XCTAssertEqual(buttonFrame.height, 24, accuracy: 1)
         }
         XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
         XCTAssertNil(findElement("diagrams.import", in: hosting))
@@ -710,12 +716,13 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         XCTAssertNotNil(findElement("diagrams.search", in: hosting))
         XCTAssertNotNil(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: hosting))
         XCTAssertNil(findElement("groups.add", in: hosting))
+        XCTAssertNil(findElement("recordings.sidebar.new", in: hosting))
+        XCTAssertNil(findElement("recordings.sidebar.import", in: hosting))
         XCTAssertEqual(try frame("workspace.mode"), switchFrame)
         XCTAssertEqual(try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?()) }, segmentFrames)
         XCTAssertEqual(try groupButtons.map { try frame("diagrams.groups.\($0)") }, groupFrames)
         let importFrame = try frame("diagrams.import")
-        XCTAssertEqual(importFrame.midY, switchFrame.midY, accuracy: 1)
-        XCTAssertLessThanOrEqual(groupFrames[2].maxX, importFrame.minX)
+        XCTAssertEqual(importFrame, recordingActions[0])
         XCTAssertEqual(model.selection, recording.id)
 
         _ = try segment("Записи").accessibilityPerformPress?()

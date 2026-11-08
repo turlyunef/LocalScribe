@@ -4,11 +4,10 @@ import UniformTypeIdentifiers
 import LocalScribeCore
 
 /// Right column of the recording archive: live recording bar, result header,
-/// result tabs, status line and the shared file-drop receiver. Toolbar items
-/// and sheets of the recording archive live here as well.
+/// result tabs, status line, recording sheets and the shared file-drop receiver.
 struct RecordingDetailColumn: View {
     @ObservedObject var model: AppModel
-    @State private var recordingSheet = false
+    @Binding var recordingSheet: Bool
 
     var body: some View {
         VStack(spacing: 0) {
@@ -119,7 +118,11 @@ struct RecordingDetailColumn: View {
                 ContentUnavailableView {
                     Label("Разговор останется на вашем Mac", systemImage: "waveform")
                 } description: { Text("Запишите встроенный микрофон или импортируйте аудио.\nРаспознавание можно начать вместе с записью.\nУчастники и итоги — после сохранения звука.") } actions: {
-                    Button("Новая запись") { recordingSheet = true }.buttonStyle(.borderedProminent).disabled(model.startingRecording || model.finalizingRecording || model.installing).help("Настроить и начать запись встроенного микрофона")
+                    Button("Новая запись") { recordingSheet = true }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canStartRecording)
+                        .help("Настроить и начать запись встроенного микрофона")
+                        .accessibilityIdentifier("recordings.start.new")
                     Button("Импортировать аудио", action: model.chooseImport).help("Выбрать аудиофайлы для расшифровки")
                 }
             }
@@ -128,12 +131,6 @@ struct RecordingDetailColumn: View {
             .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
                 model.importProviders(providers); return true
             }
-            .toolbar {
-                ToolbarItemGroup {
-                    Button { recordingSheet = true } label: { Label("Новая запись", systemImage: "mic") }.disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording || model.installing).help("Настроить и начать запись встроенного микрофона")
-                    Button(action: model.chooseImport) { Label("Импорт", systemImage: "square.and.arrow.down") }.help("Выбрать аудиофайлы для расшифровки")
-                }
-            }
             .sheet(isPresented: $recordingSheet) {
                 VStack(alignment: .leading, spacing: 18) {
                     Label("Новая запись", systemImage: "mic.fill").font(.title2)
@@ -141,7 +138,20 @@ struct RecordingDetailColumn: View {
                     Text("Группа: \(model.defaultGroup.name) ✓").accessibilityIdentifier("recording.destination")
                     Text("Убедитесь, что участники знают о записи.").foregroundStyle(.secondary)
                     Text("Голоса в наушниках не записываются. Запись можно сохранить и без установленных моделей.").font(.callout).foregroundStyle(.secondary)
-                    HStack { Spacer(); Button("Отмена") { recordingSheet = false }.help("Закрыть окно без начала записи"); Button("Начать") { let destination = model.defaultGroup.id; recordingSheet = false; Task { await model.startRecording(groupID: destination) } }.buttonStyle(.borderedProminent).help("Начать запись встроенного микрофона") }
+                    HStack {
+                        Spacer()
+                        Button("Отмена") { recordingSheet = false }
+                            .keyboardShortcut(.cancelAction)
+                            .help("Закрыть окно без начала записи")
+                        Button("Начать") {
+                            let destination = model.defaultGroup.id
+                            recordingSheet = false
+                            Task { await model.startRecording(groupID: destination) }
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(!model.canStartRecording)
+                        .help("Начать запись встроенного микрофона")
+                    }
                 }.padding(28).frame(width: 440)
             }
             .sheet(item: $model.resultEdit) { draft in

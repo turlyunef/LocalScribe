@@ -7,30 +7,41 @@ struct RecordingGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var search: RecordingSearch
     @Binding private var mode: WorkspaceMode
-    init(model: AppModel, mode: Binding<WorkspaceMode> = .constant(.recordings)) {
+    private let deletion: Binding<SidebarDeletion?>?
+    private let newRecording: (() -> Void)?
+    init(model: AppModel, mode: Binding<WorkspaceMode> = .constant(.recordings),
+         deletion: Binding<SidebarDeletion?>? = nil, newRecording: (() -> Void)? = nil) {
         self.model = model; self.search = model.recordingSearch
         _mode = mode
+        self.deletion = deletion
+        self.newRecording = newRecording
     }
     @State private var editor: GroupNameDraft?
     @State private var deleting: RecordingGroup?
     @State private var deletingRecordings: SidebarDeletion?
     @State private var draggedRecording: String?
     @State private var draggedGroup: String?
+    private var deletionPresentation: Binding<SidebarDeletion?> { deletion ?? $deletingRecordings }
 
     var body: some View {
         VStack(spacing: 0) {
             SidebarWorkspaceHeader(mode: $mode) {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
-                Button {
+                SidebarActionButton(icon: "folder.badge.plus", title: "Добавить группу", identifier: "groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
-                } label: {
-                    Image(systemName: "folder.badge.plus").frame(width: 20, height: 24)
                 }
-                    .buttonStyle(.borderless)
-                    .help("Добавить группу").accessibilityLabel("Добавить группу")
-                    .accessibilityIdentifier("groups.add")
-                    .disabled(model.deletingGroupID != nil)
+                .disabled(model.deletingGroupID != nil)
+            } archiveActions: {
+                if let newRecording {
+                    SidebarActionButton(icon: "mic", title: "Новая запись", identifier: "recordings.sidebar.new",
+                                        action: newRecording)
+                        .disabled(!model.canStartRecording)
+                    SidebarActionButton(icon: "square.and.arrow.down", title: "Импортировать аудио",
+                                        identifier: "recordings.sidebar.import", action: model.chooseImport)
+                } else {
+                    SidebarEmptyAction()
+                }
             }
             RecordingSearchField(search: search)
                 .padding(.horizontal, 12).padding(.bottom, 8)
@@ -100,7 +111,7 @@ struct RecordingGroupsSidebar: View {
                                 .dragConfiguration(DragConfiguration(allowMove: true))
                                 .contextMenu {
                                     RecordingContextMenuItems(model: model, recordingID: recording.id) { ids in
-                                        deletingRecordings = SidebarDeletion(ids: ids)
+                                        SidebarDeletion.request(ids, model: model, presentation: deletionPresentation)
                                     }
                                 }
                                 .id(recording.id)
@@ -113,8 +124,8 @@ struct RecordingGroupsSidebar: View {
         .sheet(item: $deleting) { group in
             DeleteRecordingGroupView(model: model, group: group) { deleting = nil }
         }
-        .sheet(item: $deletingRecordings) { deletion in
-            DeleteSidebarRecordingsView(model: model, ids: deletion.ids) { deletingRecordings = nil }
+        .sheet(item: deletionPresentation) { deletion in
+            DeleteSidebarRecordingsView(model: model, ids: deletion.ids) { deletionPresentation.wrappedValue = nil }
         }
     }
     private func nameEditor(_ draft: GroupNameDraft) -> some View {
@@ -333,9 +344,16 @@ private struct GroupInsertionLine: View {
     }
 }
 
-private struct SidebarDeletion: Identifiable {
+struct SidebarDeletion: Identifiable {
     let id = UUID()
     let ids: Set<String>
+
+    @MainActor @discardableResult
+    static func request(_ ids: Set<String>, model: AppModel, presentation: Binding<Self?>) -> Bool {
+        guard presentation.wrappedValue == nil, model.canDeleteSidebarRecordings(ids) else { return false }
+        presentation.wrappedValue = Self(ids: ids)
+        return true
+    }
 }
 
 struct DeleteSidebarRecordingsView: View {

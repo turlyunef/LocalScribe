@@ -12,20 +12,25 @@ struct ContentView: View {
     @ObservedObject var model: AppModel
     @StateObject private var diagramWorkspace: DiagramWorkspaceModel
     @State private var mode: WorkspaceMode = .recordings
+    @State private var columnVisibility: NavigationSplitViewVisibility = .all
+    @State private var recordingSheet = false
+    @State private var deletingRecordings: SidebarDeletion?
     init(model: AppModel) {
         _model = ObservedObject(wrappedValue: model)
         _diagramWorkspace = StateObject(wrappedValue: DiagramWorkspaceModel(model: model))
     }
     var body: some View {
-        NavigationSplitView {
+        NavigationSplitView(columnVisibility: $columnVisibility) {
             VStack(spacing: 0) {
                 if mode == .recordings {
-                    RecordingGroupsSidebar(model: model, mode: $mode)
+                    RecordingGroupsSidebar(model: model, mode: $mode, deletion: $deletingRecordings) {
+                        recordingSheet = true
+                    }
                 } else {
                     DiagramGroupsSidebar(model: model, workspace: diagramWorkspace, mode: $mode)
                 }
             }.navigationTitle("LocalScribe")
-                .navigationSplitViewColumnWidth(min: 240, ideal: 290)
+                .navigationSplitViewColumnWidth(min: 280, ideal: 290)
             VStack(spacing: 6) {
                 Label("Всё обрабатывается на Mac", systemImage: "lock.shield").font(.caption)
                     .accessibilityIdentifier("sidebar.localProcessing")
@@ -37,14 +42,51 @@ struct ContentView: View {
             }.foregroundStyle(.secondary).padding()
         } detail: {
             if mode == .recordings {
-                RecordingDetailColumn(model: model)
+                RecordingDetailColumn(model: model, recordingSheet: $recordingSheet)
             } else {
                 DiagramDetailColumn(model: model, workspace: diagramWorkspace)
             }
         }
-        .disabled(model.preparingStorage || model.shuttingDown)
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button { model.settingsWindow.show() } label: {
+                    Label("Настройки", systemImage: "gearshape")
+                }
+                .help("Открыть настройки")
+                .accessibilityIdentifier("workspace.settings")
+            }
+        }
+        .background(WorkspaceKeyboardShortcut(handle: handleShortcut))
+        .disabled(blocked)
     }
 
+    private var blocked: Bool { model.preparingStorage || model.shuttingDown }
+
+    private func handleShortcut(_ shortcut: WorkspaceKeyboardShortcut.Action) -> Bool {
+        guard !blocked, !recordingSheet, deletingRecordings == nil, model.resultEdit == nil else { return false }
+        switch shortcut {
+        case .closeSelection:
+            if mode == .diagrams {
+                guard diagramWorkspace.selected != nil else { return false }
+                diagramWorkspace.selection = nil
+                model.selection = nil
+                mode = .recordings
+            } else {
+                guard model.selected != nil else { return false }
+                model.selection = nil
+            }
+            return true
+        case .deleteRecordings:
+            guard mode == .recordings, columnVisibility != .detailOnly else { return false }
+            let search = model.recordingSearch
+            var ids = model.sidebarSelection.ids
+            if search.active {
+                guard search.hasCurrentQueryResults else { return false }
+                ids.formIntersection(model.sidebarRecordingOrder)
+            }
+            return SidebarDeletion.request(ids, model: model, presentation: $deletingRecordings)
+        }
+    }
 }
 
 struct RecordingStatusText: View {

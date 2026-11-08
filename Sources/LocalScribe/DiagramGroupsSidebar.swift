@@ -21,15 +21,17 @@ struct DiagramGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SidebarWorkspaceHeader(mode: $mode, importImage: workspace.presentImportPanel) {
+            SidebarWorkspaceHeader(mode: $mode) {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
-                Button { if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") } } label: {
-                    Image(systemName: "folder.badge.plus").frame(width: 20, height: 24)
-                }.buttonStyle(.borderless)
-                    .help("Добавить группу схем").accessibilityLabel("Добавить группу схем")
-                    .accessibilityIdentifier("diagrams.groups.add")
-                    .disabled(model.deletingDiagramJobs)
+                SidebarActionButton(icon: "folder.badge.plus", title: "Добавить группу схем", identifier: "diagrams.groups.add") {
+                    if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
+                }
+                .disabled(model.deletingDiagramJobs)
+            } archiveActions: {
+                SidebarActionButton(icon: "photo.badge.plus", title: "Загрузить изображение", identifier: "diagrams.import",
+                                    action: workspace.presentImportPanel)
+                SidebarEmptyAction()
             }
             RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: "Поиск по названиям",
                                  label: "Поиск по названиям схем", shortcutActive: true)
