@@ -90,6 +90,7 @@ final class WorkspaceKeyboardTests: XCTestCase {
     }
 
     private func escape(_ window: NSWindow) throws { try key(kVK_Escape, "\u{1b}", in: window) }
+    private func enter(_ window: NSWindow) throws { try key(kVK_Return, "\r", in: window) }
 
     private func commandDelete(_ window: NSWindow, modifiers: NSEvent.ModifierFlags = .command,
                                repeatKey: Bool = false) throws {
@@ -238,6 +239,15 @@ final class WorkspaceKeyboardTests: XCTestCase {
         try await settle(window)
         let sheet = try XCTUnwrap(window.attachedSheet)
         XCTAssertNotNil(element(confirmDelete, in: sheet.contentView))
+        model.recordingID = rows[0].id
+        try await settle(window)
+        XCTAssertEqual(element(confirmDelete, in: sheet.contentView)?.isAccessibilityEnabled?(), false)
+        try enter(sheet)
+        try await settle(window)
+        XCTAssertTrue(window.attachedSheet === sheet)
+        XCTAssertEqual(Set(model.recordings.map(\.id)), Set(rows.map(\.id)))
+        model.recordingID = nil
+        try await settle(window)
         try commandDelete(window)
         try escape(window) // A parent-targeted event must also leave the selection intact.
         XCTAssertEqual(model.selection, rows[0].id)
@@ -299,7 +309,7 @@ final class WorkspaceKeyboardTests: XCTestCase {
         let sheet = try XCTUnwrap(window.attachedSheet)
         model.recordingSearch.query = ""
         model.selection = rows[2].id
-        try press(confirmDelete, in: sheet)
+        try enter(sheet)
         for _ in 0..<20 where model.recordings.contains(where: { $0.id == rows[1].id }) {
             try await Task.sleep(for: .milliseconds(50))
         }
@@ -383,7 +393,7 @@ final class WorkspaceKeyboardTests: XCTestCase {
         let deletedID = try XCTUnwrap(diagrams.prefix(3).map(\.id).min())
         await model.deleteDiagrams([deletedID])
         XCTAssertNil(model.diagram(deletedID))
-        try press(confirmDeleteDiagrams, in: multiSheet)
+        try enter(multiSheet)
         for _ in 0..<20 where model.diagrams.count != 1 {
             try await Task.sleep(for: .milliseconds(50))
         }
@@ -407,6 +417,25 @@ final class WorkspaceKeyboardTests: XCTestCase {
             try await settle(window)
             XCTAssertNil(window.attachedSheet)
         }
+
+        try press(sidebarRecording, in: window)
+        try await settle(window)
+        let recordingSheet = try XCTUnwrap(window.attachedSheet)
+        model.installing = true
+        try await settle(window)
+        try enter(recordingSheet)
+        try await settle(window)
+        XCTAssertTrue(window.attachedSheet === recordingSheet)
+        model.installing = false
+        try await settle(window)
+        try enter(recordingSheet)
+        // Block the queued start before yielding the main actor so no microphone access is requested.
+        model.installing = true
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertNil(model.recordingID)
+        model.installing = false
+
         for state in [\.startingRecording, \.finalizingRecording, \.installing] as [ReferenceWritableKeyPath<AppModel, Bool>] {
             model[keyPath: state] = true
             try await settle(window)

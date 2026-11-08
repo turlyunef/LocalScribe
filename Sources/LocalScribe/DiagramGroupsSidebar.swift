@@ -352,6 +352,7 @@ struct DeleteDiagramsView: View {
                     dismiss()
                     Task { await workspace.deleteSelected(ids) }
                 }
+                .keyboardShortcut(.defaultAction)
                 .accessibilityIdentifier("diagrams.sidebar.confirmDelete")
             }
         }.padding(24).frame(width: 500).onExitCommand(perform: dismiss)

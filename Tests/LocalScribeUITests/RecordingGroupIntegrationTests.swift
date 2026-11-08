@@ -175,7 +175,7 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         await model.shutdown()
     }
 
-    func testBatchDeletionProtectsMicrophoneAndConfirmationHasNoReturnShortcut() async throws {
+    func testBatchDeletionProtectsMicrophoneAndDisablesConfirmation() async throws {
         let (repo, model) = try fixture()
         let a = Manifest(sourceType: "microphone", title: "Capture", filename: "a.caf")
         let b = Manifest(sourceType: "import", title: "Keep", filename: "b.wav")
@@ -189,7 +189,6 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         defer { window.close() }
         try await settle(view)
         XCTAssertEqual(element("sidebar.confirmDeleteRecordings", in: view)?.isAccessibilityEnabled?(), false)
-        XCTAssertNil(window.defaultButtonCell)
         model.recordingID = nil
         try await settle(view)
         XCTAssertEqual(element("sidebar.confirmDeleteRecordings", in: view)?.isAccessibilityEnabled?(), true)

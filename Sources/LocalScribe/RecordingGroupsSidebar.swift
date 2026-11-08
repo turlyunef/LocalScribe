@@ -372,9 +372,11 @@ struct DeleteSidebarRecordingsView: View {
                 Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Удалить", role: .destructive) {
+                    guard model.canDeleteSidebarRecordings(ids) else { return }
                     dismiss()
                     Task { await model.deleteSidebarRecordings(ids) }
                 }
+                .keyboardShortcut(.defaultAction)
                 .disabled(!model.canDeleteSidebarRecordings(ids))
                 .accessibilityIdentifier("sidebar.confirmDeleteRecordings")
             }

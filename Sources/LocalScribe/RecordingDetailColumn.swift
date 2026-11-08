@@ -144,11 +144,13 @@ struct RecordingDetailColumn: View {
                             .keyboardShortcut(.cancelAction)
                             .help("Закрыть окно без начала записи")
                         Button("Начать") {
+                            guard model.canStartRecording else { return }
                             let destination = model.defaultGroup.id
                             recordingSheet = false
                             Task { await model.startRecording(groupID: destination) }
                         }
                         .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
                         .disabled(!model.canStartRecording)
                         .help("Начать запись встроенного микрофона")
                     }
