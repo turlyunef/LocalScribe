@@ -4,7 +4,7 @@ import Carbon.HIToolbox
 
 /// Window-level shortcuts that let sheets and text editors handle their own keys.
 struct WorkspaceKeyboardShortcut: NSViewRepresentable {
-    enum Action { case closeSelection, deleteRecordings }
+    enum Action { case closeSelection, deleteSelection }
     let handle: (Action) -> Bool
 
     func makeNSView(context: Context) -> ShortcutView { ShortcutView() }
@@ -34,7 +34,7 @@ struct WorkspaceKeyboardShortcut: NSViewRepresentable {
                     return self.handle?(.closeSelection) == true ? nil : event
                 case kVK_Delete where modifiers == .command:
                     guard text == nil else { return event }
-                    return self.handle?(.deleteRecordings) == true ? nil : event
+                    return self.handle?(.deleteSelection) == true ? nil : event
                 default:
                     return event
                 }

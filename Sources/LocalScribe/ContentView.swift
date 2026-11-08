@@ -15,6 +15,7 @@ struct ContentView: View {
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var recordingSheet = false
     @State private var deletingRecordings: SidebarDeletion?
+    @State private var deletingDiagrams: SidebarDiagramDeletion?
     init(model: AppModel) {
         _model = ObservedObject(wrappedValue: model)
         _diagramWorkspace = StateObject(wrappedValue: DiagramWorkspaceModel(model: model))
@@ -27,10 +28,9 @@ struct ContentView: View {
                         recordingSheet = true
                     }
                 } else {
-                    DiagramGroupsSidebar(model: model, workspace: diagramWorkspace, mode: $mode)
+                    DiagramGroupsSidebar(model: model, workspace: diagramWorkspace, mode: $mode, deletion: $deletingDiagrams)
                 }
-            }.navigationTitle("LocalScribe")
-                .navigationSplitViewColumnWidth(min: 280, ideal: 290)
+            }.navigationSplitViewColumnWidth(min: 280, ideal: 290)
             VStack(spacing: 6) {
                 Label("Всё обрабатывается на Mac", systemImage: "lock.shield").font(.caption)
                     .accessibilityIdentifier("sidebar.localProcessing")
@@ -47,8 +47,10 @@ struct ContentView: View {
                 DiagramDetailColumn(model: model, workspace: diagramWorkspace)
             }
         }
+        .toolbar(removing: .title)
         .toolbar {
-            ToolbarItem(placement: .navigation) {
+            ToolbarItem { Spacer() }
+            ToolbarItem {
                 Button { model.settingsWindow.show() } label: {
                     Label("Настройки", systemImage: "gearshape")
                 }
@@ -63,21 +65,29 @@ struct ContentView: View {
     private var blocked: Bool { model.preparingStorage || model.shuttingDown }
 
     private func handleShortcut(_ shortcut: WorkspaceKeyboardShortcut.Action) -> Bool {
-        guard !blocked, !recordingSheet, deletingRecordings == nil, model.resultEdit == nil else { return false }
+        guard !blocked, !recordingSheet, deletingRecordings == nil, deletingDiagrams == nil,
+              model.resultEdit == nil else { return false }
         switch shortcut {
         case .closeSelection:
             if mode == .diagrams {
                 guard diagramWorkspace.selected != nil else { return false }
                 diagramWorkspace.selection = nil
-                model.selection = nil
-                mode = .recordings
             } else {
                 guard model.selected != nil else { return false }
                 model.selection = nil
             }
             return true
-        case .deleteRecordings:
-            guard mode == .recordings, columnVisibility != .detailOnly else { return false }
+        case .deleteSelection:
+            guard columnVisibility != .detailOnly else { return false }
+            if mode == .diagrams {
+                let search = diagramWorkspace.search
+                var ids = diagramWorkspace.sidebarSelection.ids
+                if search.active {
+                    guard search.hasCurrentQueryResults else { return false }
+                    ids.formIntersection(diagramWorkspace.sidebarDiagramOrder)
+                }
+                return SidebarDiagramDeletion.request(ids, model: model, presentation: $deletingDiagrams)
+            }
             let search = model.recordingSearch
             var ids = model.sidebarSelection.ids
             if search.active {

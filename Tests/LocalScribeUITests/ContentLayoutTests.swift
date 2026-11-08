@@ -527,11 +527,15 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertFalse(descendants(try element("result.section", in: hosting)).contains { text($0) == "Предупреждения" })
 
         let warning = "В интервале 00:02:09–00:02:11 есть звук, но начало речи не распознано."
-        try await model.archive?.update(manifest.id) { $0.warnings = [warning] }
+        try await model.archive?.update(manifest.id) {
+            $0.state = .completedWithWarnings
+            $0.warnings = [warning]
+        }
         await model.reload()
         for width: CGFloat in [1100, 1400] {
             window.setContentSize(NSSize(width: width, height: 700))
             try await settle(hosting)
+            XCTAssertEqual(text(try element("recording.status.\(manifest.id)", in: hosting)), "Готово")
             let picker = try element("result.section", in: hosting)
             let buttons = try ["Расшифровка", "Итоги", "Предупреждения"].map { title in
                 try XCTUnwrap(descendants(picker).first { text($0) == title }, title)
@@ -561,7 +565,10 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertFalse(descendants(try element("result.section", in: hosting)).contains { text($0) == "Предупреждения" })
         model.selection = manifest.id; model.tab = .warnings
         try await settle(hosting)
-        try await model.archive?.update(manifest.id) { $0.warnings = [] }
+        try await model.archive?.update(manifest.id) {
+            $0.state = .completed
+            $0.warnings = []
+        }
         await model.reload()
         try await settle(hosting)
         XCTAssertEqual(model.tab, .transcript)

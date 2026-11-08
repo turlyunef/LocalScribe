@@ -8,13 +8,15 @@ struct DiagramGroupsSidebar: View {
     @ObservedObject var workspace: DiagramWorkspaceModel
     @ObservedObject private var search: RecordingSearch
     @Binding private var mode: WorkspaceMode
-    init(model: AppModel, workspace: DiagramWorkspaceModel, mode: Binding<WorkspaceMode>) {
+    @Binding private var deletingDiagrams: SidebarDiagramDeletion?
+    init(model: AppModel, workspace: DiagramWorkspaceModel, mode: Binding<WorkspaceMode>,
+         deletion: Binding<SidebarDiagramDeletion?>) {
         self.model = model; self.workspace = workspace; self.search = model.diagramSearch
         _mode = mode
+        _deletingDiagrams = deletion
     }
     @State private var editor: GroupNameDraft?
     @State private var deletingGroup: RecordingGroup?
-    @State private var deletingDiagrams: SidebarDiagramDeletion?
     @State private var renaming: DiagramManifest?
     @State private var draggedDiagram: String?
     @State private var draggedGroup: String?
@@ -104,7 +106,9 @@ struct DiagramGroupsSidebar: View {
                                 .contextMenu {
                                     DiagramContextMenuItems(workspace: workspace, diagramID: diagram.id,
                                         rename: { renaming = diagram },
-                                        delete: { ids in deletingDiagrams = SidebarDiagramDeletion(ids: ids) })
+                                        delete: { ids in
+                                            SidebarDiagramDeletion.request(ids, model: model, presentation: $deletingDiagrams)
+                                        })
                                 }
                                 .id(diagram.id)
                             }
@@ -319,9 +323,18 @@ private struct DiagramGroupInsertionLine: View {
     }
 }
 
-private struct SidebarDiagramDeletion: Identifiable {
+struct SidebarDiagramDeletion: Identifiable {
     let id = UUID()
     let ids: Set<String>
+
+    @MainActor @discardableResult
+    static func request(_ ids: Set<String>, model: AppModel, presentation: Binding<Self?>) -> Bool {
+        guard presentation.wrappedValue == nil, !model.deletingDiagramJobs else { return false }
+        let existingIDs = ids.filter { model.diagram($0) != nil }
+        guard !existingIDs.isEmpty else { return false }
+        presentation.wrappedValue = Self(ids: existingIDs)
+        return true
+    }
 }
 
 struct DeleteDiagramsView: View {

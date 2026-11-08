@@ -205,7 +205,8 @@ enum DiagramExportFormat: String, CaseIterable {
         selection = id; sidebarRevealID = id
     }
     func deleteSelected(_ ids: Set<String>) async {
-        await model.deleteDiagrams(ids)
+        // Another window may have deleted some of the confirmed diagrams.
+        await model.deleteDiagrams(ids.filter { model.diagram($0) != nil })
         reconcileSelectionAfterDeletion()
     }
     func deleteGroup(_ id: String, deleteDiagrams: Bool) async {

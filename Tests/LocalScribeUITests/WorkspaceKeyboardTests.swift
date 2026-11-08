@@ -117,11 +117,18 @@ final class WorkspaceKeyboardTests: XCTestCase {
         try click("sidebar.recording.\(row.id)", modifiers: modifiers, in: window)
     }
 
+    private func clickDiagram(_ diagram: DiagramManifest, modifiers: NSEvent.ModifierFlags = [],
+                              in window: NSWindow) throws {
+        try click("diagrams.sidebar.diagram.\(diagram.id)", modifiers: modifiers, in: window)
+    }
+
     func testEscapeKeepsSearchLocalAndClosesEitherWorkspaceSelection() async throws {
         let (model, rows) = try await fixture()
         let diagram = DiagramManifest(title: "Architecture", filename: "a.png", ext: "png", uti: "public.png")
+        let otherDiagram = DiagramManifest(title: "Flow", filename: "b.png", ext: "png", uti: "public.png")
         let diagramArchive = try XCTUnwrap(model.diagramArchive)
         try await diagramArchive.save(diagram)
+        try await diagramArchive.save(otherDiagram)
         await model.reloadDiagrams()
         let window = host(model)
         defer { window.close() }
@@ -166,7 +173,28 @@ final class WorkspaceKeyboardTests: XCTestCase {
         try escape(window)
         XCTAssertEqual(model.selection, rows[0].id)
         XCTAssertNotNil(element("diagrams.search", in: window.contentView))
-        try click("diagrams.sidebar.diagram.\(diagram.id)", in: window)
+        try clickDiagram(diagram, in: window)
+        try await settle(window)
+        try clickDiagram(otherDiagram, modifiers: .command, in: window)
+        try await settle(window)
+        XCTAssertNotNil(element("diagrams.openSettings", in: window.contentView))
+        try escape(window)
+        try await settle(window)
+        XCTAssertNotNil(element("diagrams.emptyImport", in: window.contentView))
+        XCTAssertNotNil(element("diagrams.search", in: window.contentView))
+        XCTAssertNil(element(startRecording, in: window.contentView))
+        XCTAssertEqual(model.selection, rows[0].id)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id])
+        try commandDelete(window)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+
+        try clickDiagram(diagram, in: window)
+        try mode("Записи", in: window)
+        try await settle(window)
+        XCTAssertEqual(model.selection, rows[0].id)
+        try clickRecording(rows[2], modifiers: .command, in: window)
+        XCTAssertEqual(model.sidebarSelection.ids, [rows[0].id, rows[2].id])
         try escape(window)
         try await settle(window)
         XCTAssertNil(model.selection)
@@ -175,6 +203,11 @@ final class WorkspaceKeyboardTests: XCTestCase {
         XCTAssertNil(element("diagrams.search", in: window.contentView))
         XCTAssertNil(model.transcript)
         XCTAssertNil(model.summary)
+
+        try mode("Схемы", in: window)
+        try await settle(window)
+        XCTAssertNotNil(element("diagrams.openSettings", in: window.contentView))
+        XCTAssertNil(element("diagrams.emptyImport", in: window.contentView))
         await model.shutdown()
     }
 
@@ -271,6 +304,92 @@ final class WorkspaceKeyboardTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         }
         XCTAssertEqual(Set(model.recordings.map(\.id)), [rows[0].id, rows[2].id])
+        await model.shutdown()
+    }
+
+    func testCommandDeleteInDiagramsUsesCurrentVisibleSelectionAndFreezesConfirmation() async throws {
+        let (model, rows) = try await fixture()
+        let archive = try XCTUnwrap(model.diagramArchive)
+        let diagrams = ["Architecture", "Flow", "Network", "Sequence"].map { title in
+            DiagramManifest(title: title, filename: "\(title).png", ext: "png", uti: "public.png")
+        }
+        for diagram in diagrams { try await archive.save(diagram) }
+        await model.reloadDiagrams()
+        let window = host(model)
+        defer { window.close() }
+        try await settle(window)
+        try clickRecording(rows[0], in: window)
+        try mode("Схемы", in: window)
+        try await settle(window)
+
+        try commandDelete(window)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        try clickDiagram(diagrams[0], in: window)
+        try await settle(window)
+        try clickDiagram(diagrams[1], modifiers: .command, in: window)
+        try await settle(window)
+
+        let search = model.diagramSearch
+        window.makeFirstResponder(window)
+        search.query = "Architecture"
+        XCTAssertFalse(search.hasCurrentQueryResults)
+        try commandDelete(window)
+        await search.waitUntilIdle()
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(search.matchingIDs, [diagrams[0].id])
+
+        try key(kVK_ANSI_F, "f", modifiers: .command, in: window)
+        try await settle(window)
+        XCTAssertTrue(window.firstResponder is NSTextView)
+        try commandDelete(window)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        window.makeFirstResponder(window)
+
+        search.query = "Architecture"
+        await search.waitUntilIdle()
+        search.setExpanded(RecordingGroup.ungroupedID, false)
+        try commandDelete(window)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        search.setExpanded(RecordingGroup.ungroupedID, true)
+        try commandDelete(window)
+        try await settle(window)
+        let filteredSheet = try XCTUnwrap(window.attachedSheet)
+        let confirmDeleteDiagrams = "diagrams.sidebar.confirmDelete"
+        XCTAssertNotNil(element(confirmDeleteDiagrams, in: filteredSheet.contentView))
+        try escape(filteredSheet)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(Set(model.diagrams.map(\.id)), Set(diagrams.map(\.id)))
+        XCTAssertNotNil(element("diagrams.openSettings", in: window.contentView))
+
+        search.query = ""
+        try await settle(window)
+        try clickDiagram(diagrams[0], in: window)
+        try await settle(window)
+        try clickDiagram(diagrams[1], modifiers: .command, in: window)
+        try await settle(window)
+        try clickDiagram(diagrams[2], modifiers: .command, in: window)
+        try await settle(window)
+        try commandDelete(window)
+        try await settle(window)
+        let multiSheet = try XCTUnwrap(window.attachedSheet)
+        search.query = "Sequence"
+        await search.waitUntilIdle()
+        // Simulate another window deleting the first UUID in the frozen batch.
+        let deletedID = try XCTUnwrap(diagrams.prefix(3).map(\.id).min())
+        await model.deleteDiagrams([deletedID])
+        XCTAssertNil(model.diagram(deletedID))
+        try press(confirmDeleteDiagrams, in: multiSheet)
+        for _ in 0..<20 where model.diagrams.count != 1 {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(model.diagrams.map(\.id), [diagrams[3].id])
+        XCTAssertEqual(Set(model.recordings.map(\.id)), Set(rows.map(\.id)))
+        XCTAssertEqual(model.selection, rows[0].id)
         await model.shutdown()
     }
 

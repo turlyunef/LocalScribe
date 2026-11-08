@@ -414,6 +414,11 @@ struct DeleteRecordingGroupView: View {
 private struct SidebarRecordingRow: View {
     @ObservedObject var model: AppModel
     let recording: Manifest
+
+    private var displayedState: JobState {
+        recording.state == .completedWithWarnings ? .completed : recording.state
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(recording.displayTitle).lineLimit(2).fontWeight(.medium)
@@ -422,8 +427,8 @@ private struct SidebarRecordingRow: View {
                 if recording.state == .queued, let position = model.queuePosition(for: recording.id) {
                     Text("\(position)").foregroundStyle(.red).accessibilityLabel("Место в очереди: \(position)").accessibilityIdentifier("recording.queuePosition.\(recording.id)")
                 }
-                Label(recording.state == .queued && model.queuePosition(for: recording.id) != nil ? model.resourcePauseTitle ?? recording.state.title : recording.state.title,
-                      systemImage: recording.state == .recording ? "record.circle.fill" : recording.state == .completed ? "checkmark.circle" : "waveform")
+                Label(recording.state == .queued && model.queuePosition(for: recording.id) != nil ? model.resourcePauseTitle ?? displayedState.title : displayedState.title,
+                      systemImage: recording.state == .recording ? "record.circle.fill" : displayedState == .completed ? "checkmark.circle" : "waveform")
                     .foregroundStyle(recording.state == .recording ? .red : .secondary)
                     .accessibilityIdentifier("recording.status.\(recording.id)")
             }.font(.caption)
