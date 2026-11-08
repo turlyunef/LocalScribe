@@ -20,14 +20,6 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
         try FileManager.default.removeItem(at: url); temporary = nil
         return file
     }
-    static func sourceURL(repository: String, revision: String, path: String) throws -> URL {
-        guard !repository.isEmpty, !revision.isEmpty, !path.isEmpty,
-              let url = URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(path)", encodingInvalidCharacters: false),
-              url.scheme == "https", url.host == "huggingface.co", url.query == nil, url.fragment == nil else {
-            throw ScribeError.message("Некорректный адрес файла в закреплённом каталоге моделей")
-        }
-        return url
-    }
     func download(_ profileID: String, fileIndex: Int, requestID: String, withReply reply: @escaping (FileHandle?, String?) -> Void) {
         DispatchQueue.main.async {
             guard self.task == nil else { reply(nil,"Другая загрузка ещё работает"); return }
@@ -38,7 +30,7 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
                     let catalog = try Disk.read(ModelCatalog.self, at: Bundle.main.resourceURL!.appendingPathComponent("models.lock.json"))
                     guard let profile = catalog.models.first(where: { $0.id == profileID }), profile.files.indices.contains(fileIndex) else { throw ScribeError.message("Файл не входит в закреплённый каталог") }
                     let file = profile.files[fileIndex]
-                    let url = try Self.sourceURL(repository: profile.repository, revision: profile.revision, path: file.path)
+                    let url = try ModelProfile.downloadURL(repository: profile.repository, revision: profile.revision, path: file.path)
                     let transfer = ModelFileDownload(expectedSize: file.size) { bytes in
                         (self.connection?.remoteObjectProxy as? ModelDownloadProgressProtocol)?.update(requestID, bytesWritten: bytes)
                     }

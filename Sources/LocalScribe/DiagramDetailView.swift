@@ -57,8 +57,12 @@ struct DiagramDetailColumn: View {
         HStack(spacing: 10) {
             switch diagram.state {
             case .waitingForModels:
-                SettingsLink { Label("Открыть настройки", systemImage: "gear") }
-                    .accessibilityIdentifier("diagrams.openSettings")
+                Button {
+                    model.settingsWindow.show(tab: .diagrams)
+                } label: {
+                    Label("Открыть настройки", systemImage: "gear")
+                }
+                .accessibilityIdentifier("diagrams.openSettings")
                 Button("Распознать") { Task { await model.recognizeDiagram(diagram.id) } }
                     .disabled(!model.diagramModelsReady)
                     .help(model.diagramModelsReady ? "Распознать схему локально" : "Сначала загрузите модель схем в настройках")

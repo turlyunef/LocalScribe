@@ -73,9 +73,25 @@ final class ModelCompatibilityTests: XCTestCase {
         XCTAssertTrue(model.modelLibrary.isInstalled(catalog.models.last!))
         XCTAssertEqual(model.initialModelID(for: .summary), "summary")
         let compatible = try XCTUnwrap(catalog.models.first { $0.id == "summary" })
-        model.selectModel(compatible)
+        let draft = SettingsDraft(model: model)
+        draft.modelIDs[.summary] = compatible.id
+        draft.automaticSummaries = false
+        XCTAssertTrue(draft.hasChanges(from: model))
+        XCTAssertEqual(model.modelLibrary.selectedByRole["summary"], "summary-heavy")
+
+        let selection = repo.models.appendingPathComponent("selection.json")
+        let before = try Data(contentsOf: selection)
+        draft.modelIDs[.asr] = "missing-profile"
+        XCTAssertThrowsError(try model.applySettings(draft))
+        XCTAssertEqual(try Data(contentsOf: selection), before)
+        XCTAssertTrue(model.automaticSummaries)
+
+        draft.modelIDs[.asr] = nil
+        try model.applySettings(draft)
         XCTAssertTrue(model.modelsReady)
         XCTAssertEqual(model.activeCatalog?.models.first { $0.purpose == .summary }?.id, "summary")
+        XCTAssertFalse(model.automaticSummaries)
+        XCTAssertFalse(draft.hasChanges(from: model))
     }
     func testQwenInstallationIncludesAlignerAndSelectionDoesNotRewriteArchive() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -133,7 +149,7 @@ final class ModelCompatibilityTests: XCTestCase {
         try model.modelLibrary.save(at: repo.models)
         let path = repo.models.appendingPathComponent("selection.json"), before = try Data(contentsOf: path)
         _ = NSApplication.shared
-        let host = NSHostingView(rootView: ModelSettings(model: model))
+        let host = NSHostingView(rootView: ModelSettings(model: model, draft: SettingsDraft(model: model)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 900, height: 1500), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
         defer { window.close() }
@@ -166,7 +182,7 @@ final class ModelCompatibilityTests: XCTestCase {
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(repository: repo, startServices: false, userDefaults: defaults, catalog: catalog, hardware: hardware)
         _ = NSApplication.shared
-        let host = NSHostingView(rootView: ModelSettings(model: model))
+        let host = NSHostingView(rootView: ModelSettings(model: model, draft: SettingsDraft(model: model)))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 1300), styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false; window.contentView = host; window.orderFront(nil)
         defer { window.close() }

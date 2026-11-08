@@ -39,6 +39,14 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     public var purpose: ModelRole? { role ?? ModelRole(rawValue: id) }
     public var displayName: String { name ?? repository.components(separatedBy: "/").last ?? id }
     public var bytes: Int64 { files.reduce(0) { $0 + $1.size } }
+    public static func downloadURL(repository: String, revision: String, path: String) throws -> URL {
+        guard !repository.isEmpty, !revision.isEmpty, !path.isEmpty,
+              let url = URL(string: "https://huggingface.co/\(repository)/resolve/\(revision)/\(path)", encodingInvalidCharacters: false),
+              url.scheme == "https", url.host == "huggingface.co", url.query == nil, url.fragment == nil else {
+            throw ScribeError.message("Некорректный адрес файла в закреплённом каталоге моделей")
+        }
+        return url
+    }
     public func validatePaths() throws {
         guard Self.safeComponent(id), !files.isEmpty,
               files.allSatisfy({ $0.size >= 0 && !$0.localPath.hasPrefix("/") && !$0.localPath.isEmpty &&

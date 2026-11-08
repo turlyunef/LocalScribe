@@ -27,6 +27,10 @@ import LocalScribeCore
                 .onAppear { delegate.model = model; model.errorHandler.startPresenting() }
         }.defaultSize(width: 1100, height: 740)
         .commands {
+            CommandGroup(replacing: .appSettings) {
+                Button("Настройки…") { model.settingsWindow.show() }
+                    .keyboardShortcut(",", modifiers: .command)
+            }
             CommandGroup(replacing: .appInfo) {
                 Button("О LocalScribe") {
                     delegate.aboutPanel.show(options: [
@@ -36,13 +40,15 @@ import LocalScribeCore
                 }
             }
         }
-        Settings { ModelSettings(model: model).frame(width: 760, height: 760) }
         MenuBarExtra("LocalScribe", systemImage: model.recordingID == nil ? "waveform" : "record.circle.fill") {
             if model.recordingID != nil {
                 RecordingStatusText(indicators: model.indicators, finalizing: model.finalizingRecording, prefix: "Идёт запись")
                 Button("Остановить и сохранить") { Task { await model.stopRecording() } }.disabled(model.finalizingRecording).help("Остановить запись и сохранить аудио")
             } else { Text("LocalScribe · локальный архив") }
-            Button("Открыть окно") { NSApplication.shared.activate(ignoringOtherApps: true); NSApplication.shared.windows.first?.makeKeyAndOrderFront(nil) }.help("Показать главное окно LocalScribe")
+            Button("Открыть окно") {
+                NSApp.activate(ignoringOtherApps: true)
+                NSApp.windows.first { $0.canBecomeMain && $0 !== model.settingsWindow.window }?.makeKeyAndOrderFront(nil)
+            }.help("Показать главное окно LocalScribe")
         }
     }
 }

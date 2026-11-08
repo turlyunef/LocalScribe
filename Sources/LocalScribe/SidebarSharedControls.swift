@@ -24,7 +24,9 @@ struct SidebarWorkspaceHeader<GroupActions: View>: View {
             Group {
                 if let importImage {
                     Button(action: importImage) {
-                        Image(systemName: "photo.badge.plus").frame(width: 20, height: 24)
+                        Image(systemName: "photo.badge.plus")
+                            .offset(y: 1)
+                            .frame(width: 20, height: 24)
                     }
                     .buttonStyle(.borderless)
                     .help("Загрузить изображение").accessibilityLabel("Загрузить изображение")

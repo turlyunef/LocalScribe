@@ -46,6 +46,15 @@ final class ModelHardwareTests: XCTestCase {
         var invalid = large; invalid.workingMemoryGB = -1
         XCTAssertFalse(machine(128).compatibility(for: invalid).isCompatible)
     }
+
+    func testDiagramRecommendationsRespectRAMAndMetalBudget() throws {
+        let catalog = try catalog()
+        XCTAssertEqual(machine(8).recommendedProfile(for: .diagram, in: catalog)?.id, "diagram-qwen3-vl-4b")
+        XCTAssertEqual(machine(16).recommendedProfile(for: .diagram, in: catalog)?.id, "diagram-qwen3-vl-8b")
+        XCTAssertEqual(machine(32).recommendedProfile(for: .diagram, in: catalog)?.id, "diagram-qwen3-vl-32b")
+        XCTAssertEqual(machine(32, gpu: 23).recommendedProfile(for: .diagram, in: catalog)?.id, "diagram-qwen3-vl-8b")
+        XCTAssertNil(machine(32, gpu: 4).recommendedProfile(for: .diagram, in: catalog))
+    }
     func testExperimentalASRProfilesAccountForFullContextWorkingBudget() throws {
         let catalog = try catalog()
         let vibe = try XCTUnwrap(catalog.models.first { $0.id == "asr-vibevoice-4bit" })
@@ -66,7 +75,7 @@ final class ModelHardwareTests: XCTestCase {
             try profile.validatePaths()
             XCTAssertEqual(profile.revision.count, 40)
             XCTAssertTrue(profile.files.allSatisfy { $0.sha256.count == 64 && $0.size >= 0 })
-            if profile.purpose == .asr || profile.purpose == .summary {
+            if profile.purpose == .asr || profile.purpose == .summary || profile.purpose == .diagram {
                 if profile.experimental == true { XCTAssertEqual(profile.recommendationRank, 0) }
                 else { XCTAssertGreaterThan(profile.recommendationRank ?? 0, 0) }
                 XCTAssertGreaterThan(profile.recommendedMemoryGB ?? 0, 0)

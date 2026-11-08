@@ -80,7 +80,7 @@ public struct ModelHardware: Sendable {
     }
 
     public func recommendedProfile(for role: ModelRole, in catalog: ModelCatalog) -> ModelProfile? {
-        guard role == .asr || role == .summary else { return nil }
+        guard role == .asr || role == .summary || role == .diagram else { return nil }
         return catalog.models.filter {
             $0.purpose == role && ($0.recommendationRank ?? 0) > 0 && compatibility(for: $0).isCompatible
         }.sorted {

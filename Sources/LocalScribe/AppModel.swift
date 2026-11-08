@@ -70,9 +70,12 @@ struct QueueJobID: Hashable, Sendable {
     private(set) var copyTask: Task<Void, Never>?
     private var exportTasks: [UUID: Task<Void, Never>] = [:]
     var status: String { get { indicators.status } set { indicators.status = newValue } }
+    @Published var settingsTab: SettingsTab = .recordings
+    lazy var settingsWindow = SettingsWindow(model: self, defaults: userDefaults)
     @Published var modelsStatus = "Проверяем модели…"
     @Published var modelsReady = false
     @Published var installing = false
+    private(set) var downloadingModels = false
     @Published var verifyingModels = false
     @Published var modelLibrary = ModelLibrary()
     @Published var downloadProgress: ModelInstallProgress?
@@ -326,7 +329,9 @@ struct QueueJobID: Hashable, Sendable {
     }
     private func updateModelsStatus() {
         modelsReady = activeCatalog != nil
-        let incompatible = catalog?.models.filter { modelLibrary.isSelected($0) }.compactMap { hardware.warning(for: $0) } ?? []
+        let incompatible = catalog?.models.filter {
+            $0.purpose != .diagram && modelLibrary.isSelected($0)
+        }.compactMap { hardware.warning(for: $0) } ?? []
         modelsStatus = !incompatible.isEmpty ? "Выберите совместимую модель. " + incompatible.joined(separator: " ") :
             (modelsReady ? "Модели готовы · обработка без интернета" : "Загрузите модели для всех этапов обработки")
     }
@@ -359,10 +364,10 @@ struct QueueJobID: Hashable, Sendable {
     func installModels(_ profiles: [ModelProfile]) {
         guard let repository, let catalog, canManageModels, !profiles.isEmpty,
               let profiles = compatibleProfiles(profiles) else { return }
-        installing = true; downloadProgress = nil
+        downloadingModels = true; installing = true; downloadProgress = nil
         installTask = Task {
             defer {
-                installing = false; installTask = nil; downloadProgress = nil; downloadBatch = ""; downloader.close()
+                downloadingModels = false; installing = false; installTask = nil; downloadProgress = nil; downloadBatch = ""; downloader.close()
                 Task { await processQueue() }
             }
             do {
@@ -428,12 +433,31 @@ struct QueueJobID: Hashable, Sendable {
         }
     }
     func selectModel(_ profile: ModelProfile) {
-        guard let repository, let catalog, canManageModels, !modelLibrary.isSelected(profile),
+        guard canManageModels, !modelLibrary.isSelected(profile),
               let profile = compatibleProfiles([profile])?.first else { return }
-        do {
-            var updated = modelLibrary; try updated.select(profile, catalog: catalog, hardware: hardware)
-            try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
-        } catch { errorHandler.report(error) }
+        do { try selectModels([profile.id]) }
+        catch { errorHandler.report(error) }
+    }
+    func applySettings(_ draft: SettingsDraft) throws {
+        let changes = draft.changedModels(in: modelLibrary)
+        if !changes.isEmpty { try selectModels(Array(changes.values)) }
+        if backgroundRecognition != draft.backgroundRecognition { backgroundRecognition = draft.backgroundRecognition }
+        if automaticSummaries != draft.automaticSummaries { automaticSummaries = draft.automaticSummaries }
+    }
+    private func selectModels(_ ids: [String]) throws {
+        guard let repository, let catalog, canManageModels else {
+            throw ScribeError.message("Выбор моделей можно сохранить после завершения записи и обработки.")
+        }
+        var updated = modelLibrary
+        for id in ids {
+            guard let profile = catalog.models.first(where: { $0.id == id }) else {
+                throw ScribeError.message("Модель отсутствует в закреплённом каталоге")
+            }
+            try updated.select(profile, catalog: catalog, hardware: hardware)
+        }
+        try updated.save(at: repository.models)
+        modelLibrary = updated
+        updateModelsStatus()
     }
     func removeModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels else { return }

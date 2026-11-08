@@ -29,8 +29,11 @@ struct ContentView: View {
             VStack(spacing: 6) {
                 Label("Всё обрабатывается на Mac", systemImage: "lock.shield").font(.caption)
                     .accessibilityIdentifier("sidebar.localProcessing")
-                SettingsLink { Text(model.modelsReady ? "Модели готовы" : "Установить модели") }.font(.caption).help("Открыть настройки и управление моделями")
-                    .accessibilityIdentifier("sidebar.models")
+                Button((mode == .recordings ? model.modelsReady : model.diagramModelsReady) ? "Модели готовы" : "Установить модели") {
+                    model.settingsWindow.show(tab: mode == .recordings ? .recordings : .diagrams)
+                }
+                .buttonStyle(.link).font(.caption).help("Открыть настройки и управление моделями")
+                .accessibilityIdentifier("sidebar.models")
             }.foregroundStyle(.secondary).padding()
         } detail: {
             if mode == .recordings {
@@ -92,13 +95,21 @@ struct ResultTextView: NSViewRepresentable {
     }
 }
 
+enum SettingsTab {
+    case recordings, diagrams, general
+}
+
 struct ModelSettings: View {
     @ObservedObject var model: AppModel
+    @ObservedObject var draft: SettingsDraft
     @State private var asrID = ""
     @State private var summaryID = ""
+    @State private var diagramID = ""
     @State private var showFiles = false
     @State private var manuallyChosenRoles: Set<ModelRole> = []
     private var profiles: [ModelProfile] { model.catalog?.models ?? [] }
+    private var recordingProfiles: [ModelProfile] { profiles.filter { $0.purpose != .diagram } }
+    private var diagramProfiles: [ModelProfile] { profiles.filter { $0.purpose == .diagram } }
     private var downloads: [ModelProfile] { model.profilesToInstall(asrID: asrID, summaryID: summaryID) }
     private var downloadSelectionCompatible: Bool {
         let selected = profiles.filter { $0.id == asrID || $0.id == summaryID || $0.purpose == .diarization }
@@ -107,16 +118,26 @@ struct ModelSettings: View {
             selected.allSatisfy { model.hardware.compatibility(for: $0).isCompatible }
     }
     var body: some View {
+        TabView(selection: $model.settingsTab) {
+            Tab("Записи", systemImage: "waveform", value: .recordings) { recordingSettings }
+            Tab("Схемы", systemImage: "square.grid.2x2", value: .diagrams) { diagramSettings }
+            Tab("Общие", systemImage: "gearshape", value: .general) { generalSettings }
+        }
+        .onAppear { initializeSelection() }
+        .onChange(of: profiles.map(\.id)) { _, _ in initializeSelection() }
+        .onChange(of: model.modelLibrary.selectedByRole) { _, _ in initializeSelection() }
+        .onChange(of: model.modelLibrary.installedAt) { _, installed in
+            draft.modelIDs = draft.modelIDs.filter { installed[$0.value] != nil }
+        }
+    }
+
+    private var recordingSettings: some View {
         Form {
-            Section("Модели для автономной работы") {
-                Text(model.modelsStatus)
+            modelActivity
+            Section("Модели записей") {
+                if !model.installing && !model.verifyingModels { Text(model.modelsStatus) }
                 Text("Выбранные модели применяются к новым заданиям. Сохранённые записи меняются только по команде «Продолжить», «Обработать заново» или «Пересоздать итоги».")
                     .font(.caption).foregroundStyle(.secondary)
-                if model.installing { downloadStatus }
-                else {
-                    Button("Проверить установленные модели") { Task { await model.verifyModels() } }.disabled(!model.canManageModels).help("Проверить целостность файлов установленных моделей")
-                    if model.verifyingModels { ProgressView().controlSize(.small) }
-                }
             }
             Section("Загрузить модели записей") {
                 modelPicker("Распознавание", role: .asr, selection: $asrID)
@@ -147,27 +168,15 @@ struct ModelSettings: View {
                 }
                 Text("Нужные токенизатор, выравниватель и модель участников загрузятся автоматически. После успешной установки новая модель станет выбранной; ранее загруженные останутся на диске.")
                     .font(.caption).foregroundStyle(.secondary)
-                ModelPopup(options: profiles.map(menuOption), selection: .constant(""), prompt: "Импортировать из папки…", imports: true) { id in
-                    if let profile = profiles.first(where: { $0.id == id }) { model.importModel(profile) }
-                }.frame(maxWidth: .infinity, alignment: .leading)
-                    .accessibilityIdentifier("settings.models.import")
+                importPicker(recordingProfiles, identifier: "settings.models.import")
             }.disabled(!model.canManageModels)
-            Section("Модель схем (режим «Схемы»)") {
-                Text(model.diagramModelsReady ? "Модель схем готова · распознавание без интернета" : "Загрузите модель схем; полный комплект моделей записей для этого не нужен")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("settings.diagramModels.status")
-                ForEach(profiles.filter { $0.purpose == .diagram }) { profile in
-                    diagramProfileRow(profile)
-                }
-                if profiles.filter({ $0.purpose == .diagram }).isEmpty {
-                    Text("Профиль модели схем отсутствует в каталоге").foregroundStyle(.secondary)
-                }
-            }
             Section("Загруженные модели") {
                 ForEach(profiles.filter { $0.purpose == nil && model.modelLibrary.isInstalled($0) }) { profile in
                     installedRow(profile)
                 }
-                if model.modelLibrary.installedAt.isEmpty { Text("Пока нет загруженных моделей").foregroundStyle(.secondary) }
+                if !recordingProfiles.contains(where: model.modelLibrary.isInstalled) {
+                    Text("Пока нет загруженных моделей").foregroundStyle(.secondary)
+                }
                 ForEach(ModelRole.audioRoles, id: \.self) { role in
                     let installed = profiles.filter { $0.purpose == role && model.modelLibrary.isInstalled($0) }
                     if !installed.isEmpty {
@@ -177,24 +186,84 @@ struct ModelSettings: View {
                 }
             }
             Section {
-                if let profile = model.activeCatalog?.models.first(where: { $0.purpose == .asr }), !profile.supportsClosedFragments {
+                if let profile = selectedProfile(for: .asr), !profile.supportsClosedFragments {
                     Text("Выбранный профиль обрабатывает запись после остановки микрофона. Фоновое распознавание для него пока недоступно.")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                Toggle("Распознавать во время записи", isOn: $model.backgroundRecognition)
+                Toggle("Распознавать во время записи", isOn: $draft.backgroundRecognition)
                     .toggleStyle(.checkbox)
                     .disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording)
                     .accessibilityIdentifier("settings.backgroundRecognition")
                     .help("Применяется с начала следующей записи. Обработка ждёт завершения старых заданий; участники и итоги — после остановки.")
-                if model.backgroundRecognition && !model.modelsReady {
+                if draft.backgroundRecognition && !model.modelsReady {
                     Text("Для фонового распознавания сначала установите модели")
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("settings.backgroundRecognition.modelsRequired")
                 }
-                Toggle("Создавать автоматически итоги встречи", isOn: $model.automaticSummaries)
+                Toggle("Создавать автоматически итоги встречи", isOn: $draft.automaticSummaries)
                     .toggleStyle(.checkbox)
                     .accessibilityIdentifier("settings.automaticSummaries")
                     .help("Отключите, чтобы завершать обработку после расшифровки и определения участников. «Пересоздать итоги» с выбором языка доступно при любом значении настройки.")
+            }
+        }.formStyle(.grouped)
+    }
+
+    private var diagramSettings: some View {
+        Form {
+            modelActivity
+            Section("Модели схем") {
+                Group {
+                    if let active = selectedProfile(for: .diagram), model.hardware.compatibility(for: active).isCompatible {
+                        Text("Выбрана \(active.displayName) · распознавание без интернета")
+                    } else {
+                        Text("Загрузите или выберите совместимую модель схем")
+                    }
+                }
+                .accessibilityIdentifier("settings.diagramModels.status")
+                Text("Выбранная модель применяется к новым запускам распознавания схем.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if diagramProfiles.isEmpty {
+                Section { Text("Профили моделей схем отсутствуют в каталоге").foregroundStyle(.secondary) }
+            } else {
+                Section("Загрузить модель схем") {
+                    modelPicker("Распознавание", role: .diagram, selection: $diagramID)
+                    if let profile = diagramProfiles.first(where: { $0.id == diagramID }) {
+                        if let ram = profile.recommendedMemoryGB, let working = profile.workingMemoryGB {
+                            Text("RAM: от \(ram) ГБ · рабочий объём этапа: \(working) ГБ")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        if let warning = model.hardware.warning(for: profile) {
+                            Label(warning, systemImage: "exclamationmark.triangle.fill")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
+                        HStack {
+                            Button("Загрузить выбранную") { model.installModels([profile]) }
+                                .buttonStyle(.borderedProminent)
+                                .disabled(model.modelLibrary.isInstalled(profile) || !model.hardware.compatibility(for: profile).isCompatible)
+                                .accessibilityIdentifier("settings.diagramModels.install.\(profile.id)")
+                            Text(model.modelLibrary.isInstalled(profile) ? "Уже установлена" : size(profile.bytes))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    importPicker(diagramProfiles, identifier: "settings.diagramModels.import")
+                }.disabled(!model.canManageModels)
+            }
+            Section("Загруженные модели") {
+                let installed = diagramProfiles.filter(model.modelLibrary.isInstalled)
+                if installed.isEmpty { Text("Пока нет загруженных моделей").foregroundStyle(.secondary) }
+                ForEach(installed) { profile in installedRow(profile) }
+            }
+        }.formStyle(.grouped)
+    }
+
+    private var generalSettings: some View {
+        Form {
+            modelActivity
+            Section("Обслуживание моделей") {
+                Button("Проверить установленные модели") { Task { await model.verifyModels() } }
+                    .disabled(!model.canManageModels).help("Проверить целостность файлов установленных моделей")
+                    .accessibilityIdentifier("settings.models.verify")
             }
             Section("Этот Mac") {
                 Text("\(model.hardware.chip) · \(model.hardware.cpuCores) ядер CPU · \(model.hardware.memoryBytes / 1_073_741_824) ГБ RAM")
@@ -208,16 +277,32 @@ struct ModelSettings: View {
                 Text("LocalScribe " + AppInfo.version + " · локальная предварительная сборка").font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
-            .onAppear { initializeSelection() }
-            .onChange(of: profiles.map(\.id)) { _, _ in initializeSelection() }
-            .onChange(of: model.modelLibrary.selectedByRole) { _, _ in initializeSelection() }
     }
+
+    @ViewBuilder private var modelActivity: some View {
+        if model.installing || model.verifyingModels {
+            Section("Операции с моделями") {
+                Text(model.modelsStatus)
+                if model.installing { downloadStatus }
+                else { ProgressView().controlSize(.small) }
+            }
+        }
+    }
+
     private func initializeSelection() {
         if !manuallyChosenRoles.contains(.asr) { asrID = model.initialModelID(for: .asr) }
         if !manuallyChosenRoles.contains(.summary) { summaryID = model.initialModelID(for: .summary) }
+        if !manuallyChosenRoles.contains(.diagram) { diagramID = model.initialModelID(for: .diagram) }
     }
     private func menuOption(_ profile: ModelProfile) -> ModelMenuOption {
         ModelMenuOption(profile: profile, hardware: model.hardware, recommended: model.isRecommended(profile))
+    }
+    private func importPicker(_ candidates: [ModelProfile], identifier: String) -> some View {
+        ModelPopup(options: candidates.map(menuOption), selection: .constant(""), prompt: "Импортировать из папки…", imports: true) { id in
+            if let profile = candidates.first(where: { $0.id == id }) { model.importModel(profile) }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityIdentifier(identifier)
     }
     private func modelPicker(_ title: String, role: ModelRole, selection: Binding<String>) -> some View {
         HStack {
@@ -231,52 +316,19 @@ struct ModelSettings: View {
         }
     }
     private func size(_ bytes: Int64) -> String { ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file) }
-    /// The optional diagram model: installation never affects audio readiness
-    /// and never queues recordings or diagrams.
-    @ViewBuilder private func diagramProfileRow(_ profile: ModelProfile) -> some View {
-        HStack(alignment: .top) {
-            if model.modelLibrary.isInstalled(profile) {
-                Toggle(isOn: Binding(get: { model.modelLibrary.isSelected(profile) }, set: { checked in if checked { model.selectModel(profile) } })) {
-                    Text(profile.displayName)
-                }
-                .toggleStyle(.checkbox)
-                .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible)
-                .help(model.hardware.warning(for: profile) ?? "Использовать \(profile.displayName) для распознавания схем")
-                .accessibilityIdentifier("settings.diagramModels.installed.\(profile.id)")
-                Spacer()
-                Text(size(profile.bytes)).font(.caption).foregroundStyle(.secondary)
-                Button(role: .destructive) { model.removeModel(profile) } label: { Image(systemName: "trash").foregroundStyle(.red) }
-                    .buttonStyle(.borderless).help("Удалить \(profile.displayName)").accessibilityLabel("Удалить \(profile.displayName)")
-                    .disabled(!model.canManageModels)
-            } else {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack {
-                        Text(profile.displayName)
-                        Spacer()
-                        Button("Загрузить") { model.installModels([profile]) }
-                            .buttonStyle(.borderedProminent)
-                            .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible)
-                            .help("Скачать и проверить все файлы модели")
-                            .accessibilityIdentifier("settings.diagramModels.install.\(profile.id)")
-                        Text(size(profile.bytes)).font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let ram = profile.recommendedMemoryGB, let working = profile.workingMemoryGB {
-                        Text("RAM: от \(ram) ГБ · рабочий объём: \(working) ГБ").font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let description = profile.profileDescription {
-                        Text(description).font(.caption).foregroundStyle(.secondary)
-                    }
-                    if let warning = model.hardware.warning(for: profile) {
-                        Label(warning, systemImage: "exclamationmark.triangle.fill").font(.caption).foregroundStyle(.orange)
-                    }
-                }
-            }
-        }
+    private func selectedProfile(for role: ModelRole) -> ModelProfile? {
+        let id = draft.modelIDs[role] ?? model.modelLibrary.selectedByRole[role.rawValue]
+        return profiles.first { $0.id == id && model.modelLibrary.isInstalled($0) }
     }
     @ViewBuilder private func installedRow(_ profile: ModelProfile) -> some View {
         HStack(alignment: .top) {
-            if profile.purpose == .asr || profile.purpose == .summary {
-                Toggle(isOn: Binding(get: { model.modelLibrary.isSelected(profile) }, set: { checked in if checked { model.selectModel(profile) } })) {
+            if let role = profile.purpose, role == .asr || role == .summary || role == .diagram {
+                Toggle(isOn: Binding(
+                    get: { selectedProfile(for: role)?.id == profile.id },
+                    set: { checked in
+                        if checked { draft.modelIDs[role] = model.modelLibrary.isSelected(profile) ? nil : profile.id }
+                    }
+                )) {
                     Text(profile.displayName + (model.isRecommended(profile) ? " · Максимально рекомендуется" : ""))
                         .fontWeight(model.isRecommended(profile) ? .bold : .regular)
                 }
@@ -284,7 +336,7 @@ struct ModelSettings: View {
                 .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible)
                 .foregroundStyle(model.hardware.compatibility(for: profile).isCompatible ? Color.primary : Color.secondary)
                 .help(model.hardware.warning(for: profile) ?? "Использовать \(profile.displayName) для новых заданий")
-                .accessibilityIdentifier("settings.models.installed.\(profile.id)")
+                .accessibilityIdentifier("settings.\(profile.purpose == .diagram ? "diagramModels" : "models").installed.\(profile.id)")
                 .accessibilityHint(model.hardware.warning(for: profile) ?? "Модель совместима с этим Mac")
             } else {
                 Label(profile.displayName, systemImage: model.modelLibrary.isSelected(profile) ? "checkmark.circle.fill" : "circle")
@@ -310,7 +362,17 @@ struct ModelSettings: View {
                     Text("Проверено файлов: \(progress.completedFiles) / \(profile.files.count)")
                 }.font(.caption)
                 if profile.files.indices.contains(progress.fileIndex) {
-                    Text(profile.files[progress.fileIndex].localPath).font(.caption).lineLimit(2).textSelection(.enabled)
+                    let file = profile.files[progress.fileIndex]
+                    Text(file.localPath).font(.caption).lineLimit(2).textSelection(.enabled)
+                    if model.downloadingModels,
+                       let url = try? ModelProfile.downloadURL(repository: profile.repository, revision: profile.revision, path: file.path) {
+                        Text("Источник: \(url.absoluteString)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .accessibilityIdentifier("settings.models.downloadSource")
+                    }
                 }
                 DisclosureGroup("Все файлы модели", isExpanded: $showFiles) {
                     ForEach(Array(profile.files.enumerated()), id: \.offset) { index, file in

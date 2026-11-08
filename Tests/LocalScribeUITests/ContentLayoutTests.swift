@@ -218,7 +218,7 @@ final class ContentLayoutTests: XCTestCase {
         await model.shutdown()
     }
 
-    func testBackgroundRecognitionIsStandardCheckboxAboveHardwareInSettings() async throws {
+    func testBackgroundRecognitionIsStandardCheckboxInRecordingSettings() async throws {
         let suite = "LocalScribeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
@@ -226,7 +226,8 @@ final class ContentLayoutTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let model = AppModel(repository: try RecordingRepository(root: root), startServices: false,
                              userDefaults: defaults)
-        let (hosting, window) = host(ModelSettings(model: model), width: 760, height: 1300)
+        let draft = SettingsDraft(model: model)
+        let (hosting, window) = host(ModelSettings(model: model, draft: draft), width: 760, height: 1300)
         defer { window.close() }
         try await settle(hosting)
         let checkbox = try element("settings.backgroundRecognition", in: hosting)
@@ -237,19 +238,20 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertEqual(value?.boolValue, true)
         XCTAssertTrue(checkbox.isAccessibilityEnabled?() ?? false)
         let frame = try XCTUnwrap(checkbox.accessibilityFrame?())
-        let hardware = try XCTUnwrap(element("settings.hardware", in: hosting).accessibilityFrame?())
         XCTAssertGreaterThan(frame.width, 0)
-        XCTAssertGreaterThanOrEqual(frame.minY, hardware.maxY)
+        XCTAssertNil(findElement("settings.hardware", in: hosting))
+        XCTAssertNil(findElement("settings.diagramModels.status", in: hosting))
         XCTAssertNotNil(try element("settings.backgroundRecognition.modelsRequired", in: hosting))
 
         XCTAssertTrue(checkbox.accessibilityPerformPress?() ?? false)
         try await settle(hosting)
-        XCTAssertFalse(model.backgroundRecognition)
-        XCTAssertEqual(defaults.object(forKey: "backgroundRecognition") as? Bool, false)
+        XCTAssertFalse(draft.backgroundRecognition)
+        XCTAssertTrue(model.backgroundRecognition)
+        XCTAssertNil(defaults.object(forKey: "backgroundRecognition"))
         XCTAssertFalse(descendants(hosting).contains {
             $0.accessibilityIdentifier?() == "settings.backgroundRecognition.modelsRequired"
         })
-        model.backgroundRecognition = true
+        draft.backgroundRecognition = true
         model.modelsReady = true
         try await settle(hosting)
         XCTAssertFalse(descendants(hosting).contains {
@@ -298,7 +300,8 @@ final class ContentLayoutTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let model = AppModel(repository: try RecordingRepository(root: root), startServices: false, userDefaults: defaults)
-        let (hosting, window) = host(ModelSettings(model: model), width: 760, height: 1400)
+        let draft = SettingsDraft(model: model)
+        let (hosting, window) = host(ModelSettings(model: model, draft: draft), width: 760, height: 1400)
         defer { window.close() }
         try await settle(hosting)
         let checkbox = try element("settings.automaticSummaries", in: hosting)
@@ -309,16 +312,118 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertEqual(value?.boolValue, true)
         let frame = try XCTUnwrap(checkbox.accessibilityFrame?())
         let background = try XCTUnwrap(element("settings.backgroundRecognition", in: hosting).accessibilityFrame?())
-        let hardware = try XCTUnwrap(element("settings.hardware", in: hosting).accessibilityFrame?())
         XCTAssertGreaterThan(frame.width, 0)
         XCTAssertLessThanOrEqual(frame.maxY, background.minY)
-        XCTAssertGreaterThanOrEqual(frame.minY, hardware.maxY)
         XCTAssertTrue(checkbox.accessibilityPerformPress?() ?? false)
         try await settle(hosting)
-        XCTAssertFalse(model.automaticSummaries)
+        XCTAssertFalse(draft.automaticSummaries)
+        XCTAssertTrue(model.automaticSummaries)
         XCTAssertTrue(model.backgroundRecognition)
+        XCTAssertNil(defaults.object(forKey: "automaticSummaries"))
+        try model.applySettings(draft)
+        XCTAssertFalse(model.automaticSummaries)
         XCTAssertEqual(defaults.object(forKey: "automaticSummaries") as? Bool, false)
+        model.settingsTab = .diagrams
+        try await settle(hosting)
+        XCTAssertNotNil(findElement("settings.diagramModels.status", in: hosting))
+        XCTAssertNil(findElement("settings.automaticSummaries", in: hosting))
+        XCTAssertNil(findElement("settings.hardware", in: hosting))
+
+        model.settingsTab = .general
+        try await settle(hosting)
+        XCTAssertNotNil(findElement("settings.hardware", in: hosting))
+        XCTAssertNotNil(findElement("settings.models.verify", in: hosting))
+        XCTAssertNil(findElement("settings.diagramModels.status", in: hosting))
+        XCTAssertNil(findElement("settings.backgroundRecognition", in: hosting))
         await model.shutdown()
+    }
+
+    func testSettingsWindowKeepsTitleAndSizeAcrossTabsAndReopening() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(repository: try RecordingRepository(root: root), startServices: false, userDefaults: defaults)
+        _ = NSApplication.shared
+        let settings = model.settingsWindow
+        defer { settings.window?.close() }
+        settings.show(tab: .general)
+        let window = try XCTUnwrap(settings.window)
+        let view = try XCTUnwrap(window.contentView)
+        try await settle(view)
+        XCTAssertTrue(window.styleMask.contains(.resizable))
+        XCTAssertTrue(try XCTUnwrap(window.screen).visibleFrame.contains(window.frame))
+        XCTAssertEqual(window.title, "Настройки")
+        let size = NSSize(width: 620, height: 420)
+        window.setContentSize(size)
+        settings.show(tab: .diagrams)
+        try await settle(view)
+        XCTAssertTrue(settings.window === window)
+        XCTAssertEqual(window.title, "Настройки")
+        XCTAssertEqual(window.contentRect(forFrameRect: window.frame).size, size)
+        XCTAssertNotNil(findElement("settings.ok", in: view))
+        XCTAssertNotNil(findElement("settings.cancel", in: view))
+
+        window.performClose(nil)
+        XCTAssertNil(settings.window)
+        settings.show()
+        let reopened = try XCTUnwrap(settings.window)
+        XCTAssertEqual(reopened.contentRect(forFrameRect: reopened.frame).size, size)
+    }
+
+    func testSettingsWindowCancelsDraftAndConfirmsClosingWithEdits() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(repository: try RecordingRepository(root: root), startServices: false, userDefaults: defaults)
+        _ = NSApplication.shared
+        let settings = model.settingsWindow
+        defer { settings.window?.close() }
+
+        func openAndEdit() async throws -> (NSWindow, NSView) {
+            settings.show(tab: .recordings)
+            let window = try XCTUnwrap(settings.window)
+            window.setContentSize(NSSize(width: 760, height: 1400))
+            let view = try XCTUnwrap(window.contentView)
+            try await settle(view)
+            let checkbox = try element("settings.automaticSummaries", in: view)
+            XCTAssertTrue(checkbox.accessibilityPerformPress?() ?? false)
+            try await settle(view)
+            return (window, view)
+        }
+
+        let (_, firstView) = try await openAndEdit()
+        XCTAssertTrue(try element("settings.cancel", in: firstView).accessibilityPerformPress?() ?? false)
+        try await settle(firstView)
+        XCTAssertNil(settings.window)
+        XCTAssertTrue(model.automaticSummaries)
+
+        let (secondWindow, secondView) = try await openAndEdit()
+        secondWindow.performClose(nil)
+        let discardSheet = try XCTUnwrap(secondWindow.attachedSheet)
+        secondWindow.endSheet(discardSheet, returnCode: .alertSecondButtonReturn)
+        try await settle(secondView)
+        XCTAssertNil(settings.window)
+        XCTAssertTrue(model.automaticSummaries)
+        XCTAssertNil(defaults.object(forKey: "automaticSummaries"))
+
+        let (thirdWindow, thirdView) = try await openAndEdit()
+        thirdWindow.performClose(nil)
+        let saveSheet = try XCTUnwrap(thirdWindow.attachedSheet)
+        thirdWindow.endSheet(saveSheet, returnCode: .alertFirstButtonReturn)
+        try await settle(thirdView)
+        XCTAssertNil(settings.window)
+        XCTAssertFalse(model.automaticSummaries)
+        XCTAssertEqual(defaults.object(forKey: "automaticSummaries") as? Bool, false)
+
+        let (_, fourthView) = try await openAndEdit()
+        XCTAssertTrue(try element("settings.ok", in: fourthView).accessibilityPerformPress?() ?? false)
+        try await settle(fourthView)
+        XCTAssertNil(settings.window)
+        XCTAssertTrue(model.automaticSummaries)
     }
 
     func testDisabledAutomaticSummariesNoticeOnlyReplacesMissingSummary() async throws {

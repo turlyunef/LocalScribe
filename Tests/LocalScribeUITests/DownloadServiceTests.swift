@@ -7,13 +7,13 @@ import LocalScribeCore
 final class DownloadServiceTests: XCTestCase {
     func testMalformedCatalogURLsReturnErrorsAndAllPinnedFilesRemainSupported() throws {
         for path in ["bad%ZZ.json", "file#fragment", "file?query", "bad\nfile", ""] {
-            XCTAssertThrowsError(try DownloadService.sourceURL(repository: "owner/model", revision: "fixed", path: path))
+            XCTAssertThrowsError(try ModelProfile.downloadURL(repository: "owner/model", revision: "fixed", path: path))
         }
         let root = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
         let catalog = try Disk.read(ModelCatalog.self, at: root.appendingPathComponent("Resources/models.lock.json"))
         for profile in catalog.models {
             for file in profile.files {
-                let url = try DownloadService.sourceURL(repository: profile.repository, revision: profile.revision, path: file.path)
+                let url = try ModelProfile.downloadURL(repository: profile.repository, revision: profile.revision, path: file.path)
                 XCTAssertEqual(url.absoluteString, "https://huggingface.co/\(profile.repository)/resolve/\(profile.revision)/\(file.path)")
             }
         }
