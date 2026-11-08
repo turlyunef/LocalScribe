@@ -32,7 +32,7 @@ struct DiagramGroupsSidebar: View {
                 .disabled(model.deletingDiagramJobs)
             } archiveActions: {
                 SidebarActionButton(icon: "photo.badge.plus", title: "Загрузить изображение", identifier: "diagrams.import",
-                                    action: workspace.presentImportPanel)
+                                    iconVerticalOffset: 2, action: workspace.presentImportPanel)
                 SidebarEmptyAction()
             }
             RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: "Поиск по названиям",

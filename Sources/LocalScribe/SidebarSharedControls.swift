@@ -32,11 +32,13 @@ struct SidebarActionButton: View {
     let icon: String
     let title: String
     let identifier: String
+    var iconVerticalOffset: CGFloat = 0
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             Image(systemName: icon)
+                .offset(y: iconVerticalOffset)
                 .frame(width: 20, height: 24)
                 .contentShape(Rectangle())
         }
