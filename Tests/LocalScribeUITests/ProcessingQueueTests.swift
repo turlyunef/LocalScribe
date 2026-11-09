@@ -855,6 +855,42 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
         await model.shutdown()
     }
+    func testWorkerCrashBySignalReportsTechnicalContextInErrorCopy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root)
+        // Фикстурный worker заменяется процессом, который падает по SIGTRAP
+        // сразу после события progress — образец реального «кода 5».
+        let script = #"""
+        #!/usr/bin/python3
+        import sys, json, os, signal
+        c = json.loads(sys.stdin.readline())
+        print(json.dumps(dict(version=1, jobId=c['jobId'], runId=c['runId'], type='progress',
+                              message='Распознаём речь — часть 1 из 2')), flush=True)
+        os.kill(os.getpid(), signal.SIGTRAP)
+        """#
+        let executable = root.appendingPathComponent("worker.py")
+        try script.write(to: executable, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
+        let m = try completed(repo, title: "Crash")
+        await model.enqueue(m.id)
+        try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .failed }
+        let message = "Процесс обработки прерван (код 5). Контрольные точки сохранены."
+        XCTAssertEqual(model.errorHandler.messages, [message])
+        XCTAssertEqual(try repo.load(m.id).lastError, message)
+        let context = try XCTUnwrap(model.errorHandler.reports.first?.context)
+        let workerLine = try XCTUnwrap(context.first { $0.0 == "процесс worker" }?.1)
+        XCTAssertTrue(workerLine.contains("SIGTRAP"))
+        XCTAssertEqual(context.first { $0.0 == "этап" }?.1, "preparingAudio")
+        XCTAssertTrue(context.first { $0.0 == "последнее событие протокола" }?.1.contains("progress") == true)
+        let text = try XCTUnwrap(model.errorHandler.copyCurrent())
+        XCTAssertTrue(text.contains("Технические сведения:"))
+        XCTAssertTrue(text.contains("SIGTRAP"))
+        XCTAssertTrue(text.contains("Стек вызовов (GUI):"))
+        XCTAssertFalse(model.errorHandler.reports[0].stack.isEmpty)
+        await model.shutdown()
+    }
+
     func testFailedSavedCaptureCanActuallyResumeItsExistingRun() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

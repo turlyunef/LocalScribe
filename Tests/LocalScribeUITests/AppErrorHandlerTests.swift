@@ -85,6 +85,30 @@ final class AppErrorHandlerTests: XCTestCase {
         XCTAssertEqual(handler.reports.count, 1)
     }
 
+    func testCopyIncludesTechnicalContextAndGUIStack() throws {
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let handler = AppErrorHandler(pasteboard: pasteboard)
+        handler.report(message: "Процесс обработки прерван (код 5). Контрольные точки сохранены.",
+                       context: [("этап", "transcribing"),
+                                 ("процесс worker", "завершён по сигналу SIGTRAP — аварийное прерывание в коде worker"),
+                                 ("последнее событие протокола", "progress «Распознаём речь — часть 1 из 2»")])
+        let text = try XCTUnwrap(handler.copyCurrent())
+        XCTAssertTrue(text.contains("Технические сведения:"))
+        XCTAssertTrue(text.contains("этап: transcribing"))
+        XCTAssertTrue(text.contains("SIGTRAP"))
+        XCTAssertTrue(text.contains("«Распознаём речь — часть 1 из 2»"))
+        XCTAssertTrue(text.contains("Стек вызовов (GUI):"))
+        XCTAssertFalse(handler.reports[0].stack.isEmpty, "Стек GUI должен попадать в снимок ошибки")
+        XCTAssertTrue(handler.reports[0].stack.allSatisfy { $0.contains("LocalScribe") })
+        // Отчёт без контекста не печатает пустую секцию технических сведений.
+        handler.dismissCurrent()
+        handler.report(message: "Простая ошибка")
+        let plain = try XCTUnwrap(handler.copyCurrent())
+        XCTAssertFalse(plain.contains("Технические сведения:"))
+        XCTAssertTrue(plain.contains("Простая ошибка"))
+    }
+
     func testCopyButtonCopiesShownMessageWithoutDismissingWindow() throws {
         _ = NSApplication.shared
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))

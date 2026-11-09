@@ -2,6 +2,15 @@ import Foundation
 import LocalScribeCore
 import Darwin
 
+/// Worker process failure carrying the technical facts the error window copies
+/// to the clipboard. `userMessage` stays neutral; `context` is diagnostics only
+/// and never includes conversation text.
+struct WorkerFailureError: LocalizedError, Sendable {
+    let userMessage: String
+    let context: [(String, String)]
+    var errorDescription: String? { userMessage }
+}
+
 @MainActor final class WorkerSupervisor {
     private var process: Process?
     private var control: Pipe?
@@ -27,6 +36,7 @@ import Darwin
         p.qualityOfService = .utility
         p.executableURL = executable; p.standardInput = input; p.standardOutput = output; p.standardError = errors
         p.environment = ProcessInfo.processInfo.environment.merging(["HF_HUB_OFFLINE": "1", "HF_HUB_DISABLE_TELEMETRY": "1", "TOKENIZERS_PARALLELISM": "false"]) { _, value in value }
+        let started = Date()
         try p.run(); process = p; control = input; applyCapturePriority()
         // Foundation launches Process in its own group. Never signal a group
         // inherited from the app, or derive a new target after the leader exits.
@@ -82,8 +92,16 @@ import Darwin
                 if let cancellation { await cancellation.value }
                 if let diagnosticURL { try? diagnostic.write(to:diagnosticURL,options:.atomic) }
                 try Task.checkCancellation()
-                if let failure = events.failure { throw ScribeError.message(failure.message) }
-                guard p.terminationStatus == 0, events.last?.type == "completed" else { throw ScribeError.message("Процесс обработки прерван (код \(p.terminationStatus)). Контрольные точки сохранены.") }
+                if let failure = events.failure {
+                    throw WorkerFailureError(userMessage: failure.message,
+                                             context: Self.failureContext(command: command, process: p,
+                                                                          last: events.last, started: started))
+                }
+                guard p.terminationStatus == 0, events.last?.type == "completed" else {
+                    throw WorkerFailureError(userMessage: "Процесс обработки прерван (код \(p.terminationStatus)). Контрольные точки сохранены.",
+                                             context: Self.failureContext(command: command, process: p,
+                                                                          last: events.last, started: started))
+                }
             } catch {
                 await cancel()
                 // Detached pipe readers must finish before their descriptors close
@@ -110,6 +128,59 @@ import Darwin
             if errno != EINTR { break }
         }
         throw ScribeError.message("Канал worker закрыт с ошибкой")
+    }
+
+    /// Technical facts for the error window's clipboard: what ran, how the
+    /// process ended and which protocol event was last. Values are neutral
+    /// stage/status strings already shown in the UI, never archive content.
+    nonisolated private static func failureContext(command: WorkerCommand, process: Process,
+                                                   last: WorkerEvent?, started: Date) -> [(String, String)] {
+        var context: [(String, String)] = []
+        context.append(("вид задания", command.isDiagram ? "схема" : "запись"))
+        if let stage = command.stage {
+            context.append(("этап", command.liveCapture == true ? stage.rawValue + " (live)" : stage.rawValue))
+        } else if command.isDiagram {
+            context.append(("этап", "diagram"))
+        }
+        context.append(("задание", command.jobId))
+        context.append(("run", command.runId))
+        context.append(("процесс worker", terminationDescription(process)))
+        if let last {
+            context.append(("последнее событие протокола",
+                            last.type + (last.message.isEmpty ? "" : " «\(last.message)»")))
+        } else {
+            context.append(("последнее событие протокола", "нет (протокольный канал молчал)"))
+        }
+        context.append(("длительность этапа", String(format: "%.1f с", Date().timeIntervalSince(started))))
+        return context
+    }
+
+    nonisolated private static func terminationDescription(_ process: Process) -> String {
+        let status = process.terminationStatus
+        if process.terminationReason == .uncaughtSignal {
+            let name: String, hint: String
+            switch status {
+            case SIGILL: (name, hint) = ("SIGILL", "недопустимая инструкция")
+            case SIGTRAP: (name, hint) = ("SIGTRAP", "аварийное прерывание в коде worker (Swift runtime trap: force-unwrap, границы массива, переполнение)")
+            case SIGABRT: (name, hint) = ("SIGABRT", "аварийное завершение (abort/assert)")
+            case SIGFPE: (name, hint) = ("SIGFPE", "арифметическая ошибка")
+            case SIGKILL: (name, hint) = ("SIGKILL", "принудительное завершение системой (например, при нехватке памяти)")
+            case SIGBUS: (name, hint) = ("SIGBUS", "ошибка шины (обращение к памяти)")
+            case SIGSEGV: (name, hint) = ("SIGSEGV", "нарушение доступа к памяти")
+            case SIGTERM: (name, hint) = ("SIGTERM", "завершение по требованию")
+            default: (name, hint) = ("сигнал \(status)", "необработанный сигнал")
+            }
+            return "завершён по сигналу \(name) — \(hint)"
+        }
+        switch status {
+        case 0: return "код 0, но событие completed не получено"
+        case 1: return "код 1 (этап сообщил об ошибке)"
+        case 64: return "код 64 (нарушение формата команды)"
+        case 70: return "код 70 (не удалось запретить сеть worker)"
+        case 72: return "код 72 (отмена)"
+        case 73: return "код 73 (не удалось создать группу процессов)"
+        default: return "код \(status)"
+        }
     }
     func cancel() async {
         guard let p = process else { return }

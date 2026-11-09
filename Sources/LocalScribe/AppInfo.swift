@@ -5,6 +5,6 @@ enum AppInfo {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.9.0"
     }
     static var build: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "16"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "17"
     }
 }

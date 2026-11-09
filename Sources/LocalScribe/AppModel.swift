@@ -798,9 +798,17 @@ struct QueueJobID: Hashable, Sendable {
                     try await processDiagramJob(job.id)
                 }
             } catch {
+                let failure = error as? WorkerFailureError
                 let message = (error as? ScribeError)?.localizedDescription
+                    ?? failure?.userMessage
                     ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."
-                if activeJob == job, !(error is CancellationError) { errorHandler.report(message: message) }
+                if activeJob == job, !(error is CancellationError) {
+                    if let failure {
+                        errorHandler.report(message: failure.userMessage, context: failure.context)
+                    } else {
+                        errorHandler.report(message: message)
+                    }
+                }
                 if !(resourcesPaused && queued.contains(job)) {
                     let ownsJob = activeJob == job
                     if job.isRecording {

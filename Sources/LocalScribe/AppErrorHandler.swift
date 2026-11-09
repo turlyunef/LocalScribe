@@ -3,23 +3,32 @@ import SwiftUI
 
 /// Diagnostics snapshot taken when an error is reported; the clipboard form
 /// must give the full picture needed to fix the problem offline.
-struct AppErrorReport: Equatable {
+struct AppErrorReport {
     let message: String
     let appVersion: String
     let build: String
     let osVersion: String
     let timestamp: Date
+    /// Neutral key-value facts supplied by the reporting site (stage, worker
+    /// termination, protocol state); never archive or conversation content.
+    let context: [(String, String)]
+    /// GUI call stack leading to the report, app frames only.
+    let stack: [String]
 
     init(message: String,
          appVersion: String = AppInfo.version,
          build: String = AppInfo.build,
          osVersion: String = AppErrorReport.currentOSVersion,
-         timestamp: Date = Date()) {
+         timestamp: Date = Date(),
+         context: [(String, String)] = [],
+         stack: [String] = AppErrorReport.callStack()) {
         self.message = message
         self.appVersion = appVersion
         self.build = build
         self.osVersion = osVersion
         self.timestamp = timestamp
+        self.context = context
+        self.stack = stack
     }
 
     static var currentOSVersion: String {
@@ -27,15 +36,33 @@ struct AppErrorReport: Equatable {
         return "macOS \(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
     }
 
-    var clipboardText: String {
-        """
-        LocalScribe \(appVersion) (сборка \(build))
-        \(osVersion)
-        Время ошибки: \(Self.timestampFormatter.string(from: timestamp))
+    static func callStack(limit: Int = 24) -> [String] {
+        Thread.callStackSymbols
+            .filter { $0.contains("LocalScribe") && !$0.contains("AppErrorHandler") }
+            .prefix(limit)
+            .map { String($0) }
+    }
 
-        Ошибка:
-        \(message)
-        """
+    var clipboardText: String {
+        var lines = [
+            "LocalScribe \(appVersion) (сборка \(build))",
+            osVersion,
+            "Время ошибки: \(Self.timestampFormatter.string(from: timestamp))",
+            "",
+            "Ошибка:",
+            message
+        ]
+        if !context.isEmpty {
+            lines.append("")
+            lines.append("Технические сведения:")
+            lines += context.map { "  \($0.0): \($0.1)" }
+        }
+        if !stack.isEmpty {
+            lines.append("")
+            lines.append("Стек вызовов (GUI):")
+            lines += stack.map { "  " + $0 }
+        }
+        return lines.joined(separator: "\n")
     }
 
     private static let timestampFormatter = ISO8601DateFormatter()
@@ -56,12 +83,16 @@ struct AppErrorReport: Equatable {
 
     func report(_ error: Error) {
         guard !(error is CancellationError) else { return }
-        report(message: error.localizedDescription)
+        if let failure = error as? WorkerFailureError {
+            report(message: failure.userMessage, context: failure.context)
+        } else {
+            report(message: error.localizedDescription)
+        }
     }
 
-    func report(message: String?) {
+    func report(message: String?, context: [(String, String)] = []) {
         guard let message, !message.isEmpty else { return }
-        reports.append(AppErrorReport(message: message))
+        reports.append(AppErrorReport(message: message, context: context))
         presentIfNeeded()
     }
 
@@ -83,8 +114,9 @@ struct AppErrorReport: Equatable {
         }
     }
 
-    /// Copies the shown error with the full diagnostics (message, app version,
-    /// build, OS, report time). The window and the message queue stay as is.
+    /// Copies the shown error with the full diagnostics (message, technical
+    /// context, GUI stack, app version, build, OS, report time). The window
+    /// and the message queue stay as is.
     @discardableResult
     func copyCurrent() -> String? {
         guard let report = reports.first else { return nil }
@@ -154,7 +186,7 @@ struct AppErrorView: View {
                           systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
                 .accessibilityIdentifier("error.copy")
-                .help("Скопировать сообщение об ошибке, версию приложения и сведения о системе")
+                .help("Скопировать сообщение об ошибке, технические сведения и версию приложения")
                 Button(count > 1 ? "Далее" : "Закрыть", action: dismiss)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("error.dismiss")
