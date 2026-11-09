@@ -65,14 +65,14 @@ final class ImportQueueTests: XCTestCase {
             expected.append(contentsOf: [url.lastPathComponent, "original.wav"])
             let provider = NSItemProvider()
             provider.registerObject(ofClass: NSURL.self, visibility: .all) { completion in
-                counts.withLock { $0.enter(); $0.providers += 1 }
+                counts.withLock { $0.providers += 1 }
                 DispatchQueue.global().asyncAfter(deadline: .now() + 0.003) {
-                    counts.withLock { $0.active -= 1 }
                     completion(url as NSURL, nil)
                 }
                 return Progress(totalUnitCount: 1)
             }
-            // Separate callbacks/drop calls must not create separate consumers.
+            // Provider loads resolve eagerly in the drop callback, outside the
+            // queue slot (as for diagrams); only the import itself is serialized.
             model.importProviders([provider])
             if index == 24 {
                 let dialogURL = try source(root, "dialog")

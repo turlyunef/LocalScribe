@@ -48,10 +48,6 @@ struct LiveTranscriber {
                 emit("progress", "Фоновое распознавание: ожидаем закрытые фрагменты", nil)
                 try await Task.sleep(for: .seconds(1)); continue
             }
-            if ProcessInfo.processInfo.thermalState == .critical || ProcessInfo.processInfo.thermalState == .serious {
-                emit("progress", "Распознавание ожидает охлаждения Mac; звук сохраняется", nil)
-                try await Task.sleep(for: .seconds(2)); continue
-            }
             let readStart = max(0, offset - ASRCheckpointLayout.liveContextMs), readEnd = min(available, end + ASRCheckpointLayout.liveContextMs)
             let inputs = fragments.filter { $0.index * 10_000 < readEnd && $0.index * 10_000 + $0.durationMs > readStart }
             let path = run.appendingPathComponent("live/part-\(parts.count).json")
@@ -62,6 +58,12 @@ struct LiveTranscriber {
                 metrics?.checkpoint(milliseconds: end - offset)
                 parts.append(saved.part)
             } else {
+                // Only new inference waits for cooling; replaying finished
+                // checkpoints stays fast even on a hot Mac.
+                if ProcessInfo.processInfo.thermalState == .critical || ProcessInfo.processInfo.thermalState == .serious {
+                    emit("progress", "Распознавание ожидает охлаждения Mac; звук сохраняется", nil)
+                    try await Task.sleep(for: .seconds(2)); continue
+                }
                 emit("progress", "Фоновое распознавание · \(timecode(offset))–\(timecode(end))", nil)
                 let audio = work.appendingPathComponent("input.caf"), wave = work.appendingPathComponent("audio.wav")
                 _ = try Media.assembleCaptureParts(inputs.map { folder.appendingPathComponent($0.filename) }, destination: audio)

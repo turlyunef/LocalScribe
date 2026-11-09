@@ -26,9 +26,19 @@ final class ASREngineIntegrationTests: XCTestCase {
 
     private func fixture(_ root: URL, live: Bool) throws -> Fixture {
         let repo = try RecordingRepository(root: root.appendingPathComponent("archive"))
+        // Real per-profile files with matching sizes and SHA-256: the factory
+        // validates pinned Whisper weights before loading, like the diagram engine.
+        let bytes = Data("whisper fixture weights".utf8)
+        let file = ModelFile(path: "weights", localPath: "weights", size: Int64(bytes.count),
+                             sha256: Disk.fingerprint("whisper fixture weights"))
         let catalog = ModelCatalog(models: ModelRole.audioRoles.map {
-            ModelProfile(id: $0.rawValue, repository: "fixture/model", revision: "fixed", license: "test", files: [], role: $0)
+            ModelProfile(id: $0.rawValue, repository: "fixture/model", revision: "fixed", license: "test", files: [file], role: $0)
         })
+        for profile in catalog.models {
+            let folder = repo.models.appendingPathComponent(profile.id)
+            try Disk.directory(folder)
+            try bytes.write(to: folder.appendingPathComponent(file.localPath))
+        }
         var manifest = Manifest(sourceType: live ? "microphone" : "import", title: "ASR contract", filename: "original.caf")
         let recording = repo.folder(manifest.id), original = recording.appendingPathComponent(manifest.originalRelativePath)
         try Disk.directory(original.deletingLastPathComponent())
@@ -360,5 +370,35 @@ final class ASREngineIntegrationTests: XCTestCase {
                 XCTFail("Unsupported or changed backend accepted")
             } catch { XCTAssertTrue(error is ScribeError) }
         }
+    }
+
+    func testFactoryRejectsSubstitutedWhisperWeightsBeforeLoading() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let f = try fixture(root, live: false)
+        // Same length, one substituted byte: only the SHA-256 check can catch it.
+        try Data("whisper fixture weightT".utf8).write(to: f.repo.models.appendingPathComponent("asr/weights"))
+        let factory = ASREngineFactory(loadWhisper: { _, _, _, _ in
+            XCTFail("Substituted weights must fail validation before loading"); throw CancellationError()
+        })
+        do {
+            _ = try await factory.make(info: f.info, catalog: f.catalog, models: f.repo.models, metrics: nil, warning: { _ in })
+            XCTFail("Substituted Whisper weights accepted")
+        } catch { XCTAssertTrue(error is ScribeError) }
+    }
+
+    func testPipelineValidatesDiarizationWeightsBeforeSpeakerKit() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let f = try fixture(root, live: false)
+        try Data("whisper fixture weightT".utf8).write(to: f.repo.models.appendingPathComponent("diarization/weights"))
+        var command = f.command
+        command.stage = .diarizing
+        let pipeline = try Pipeline(command: command, hardware: hardware) { _, _, _ in }
+        // The fixture has no transcript checkpoint: validation must fail first.
+        do {
+            _ = try await pipeline.perform()
+            XCTFail("Substituted diarization weights accepted")
+        } catch { XCTAssertTrue(error is ScribeError) }
     }
 }

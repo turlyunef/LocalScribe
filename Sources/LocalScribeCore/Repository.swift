@@ -44,7 +44,7 @@ public struct RecordingRepository: Sendable {
             }) else { return nil }
             do { return try load(id) }
             catch { reportInvalid(id); return nil }
-        }.sorted { $0.createdAt > $1.createdAt }
+        }.sorted { $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt }
     }
     public func rename(_ id: String, title: String) throws {
         let title = title.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -93,7 +93,7 @@ public struct RecordingRepository: Sendable {
             throw ScribeError.message("Запись длиннее 3 часов. Автоматическое усечение отключено.")
         }
         if liveCapture {
-            guard catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments != false else {
+            guard catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {
                 throw ScribeError.message("Выбранная модель поддерживает только обработку готовой записи")
             }
             guard !summaryOnly, !manifest.sourceComplete, manifest.state == .recording, manifest.sourceType == "microphone" else {

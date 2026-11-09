@@ -51,7 +51,7 @@ actor SummaryEngine {
             container = try await LLMModelFactory.shared.loadContainer(configuration: .init(directory: modelFolder))
         }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let sourceHash = Disk.fingerprint(String(data: try encoder.encode(transcript), encoding: .utf8)! + language + "prompt-v16-question-pages1")
+        let sourceHash = Disk.fingerprint(String(decoding: try encoder.encode(transcript), as: UTF8.self) + language + "prompt-v16-question-pages1")
         let sourceStarted = ProcessInfo.processInfo.systemUptime
         let source = await SummarySourceIndex(transcript) { line in
             await container.perform { $0.tokenizer.encode(text: line).count }

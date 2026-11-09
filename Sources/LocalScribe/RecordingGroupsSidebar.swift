@@ -299,10 +299,9 @@ private struct RecordingGroupHeader: View {
             SidebarTransfer.load(provider, type: SidebarTransfer.recording) { id in
                 Task { await model.moveRecording(id, to: groupID) }
             }
-        } else {
-            model.importProviders(info.itemProviders(for: [.fileURL]), groupID: groupID)
+            return true
         }
-        return true
+        return model.importProviders(info.itemProviders(for: [.fileURL]), groupID: groupID)
     }
 }
 

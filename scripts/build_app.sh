@@ -16,6 +16,9 @@ swift package resolve --force-resolved-versions
 swift build -c release -j 4 --force-resolved-versions
 BIN="$(swift build -c release --show-bin-path)"
 APP="$ROOT/dist/LocalScribe.app"
+# Rebuild from scratch: renamed/removed SwiftPM bundles and Metal libraries must
+# not survive inside an existing .app and ship stale in the distribution.
+rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources/tools" "$APP/Contents/Resources/Licenses"
 SERVICE="$APP/Contents/XPCServices/LocalScribeModelService.xpc"
 mkdir -p "$SERVICE/Contents/MacOS" "$SERVICE/Contents/Resources"

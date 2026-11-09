@@ -277,8 +277,7 @@ public actor ModelInstaller {
                 report(f.size, .verifying)
                 try copy(source, to: output, expectedSize: f.size) { _ in }
             } else {
-                let encoded = f.path.split(separator: "/").map { String($0).addingPercentEncoding(withAllowedCharacters: .urlPathAllowed)! }.joined(separator: "/")
-                let url = URL(string: "https://huggingface.co/\(profile.repository)/resolve/\(profile.revision)/\(encoded)")!
+                let url = try ModelProfile.downloadURL(repository: profile.repository, revision: profile.revision, path: f.path)
                 let transfer = ModelFileDownload(expectedSize: f.size) { report($0, .downloading) }
                 let (temp, response) = try await transfer.download(from: url)
                 defer { try? fm.removeItem(at: temp) }

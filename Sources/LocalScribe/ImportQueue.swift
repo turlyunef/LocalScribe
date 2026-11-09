@@ -108,9 +108,4 @@ final class DroppedFileURL: Sendable {
             self.cancel()
         }
     }
-
-    @MainActor static func load(_ provider: NSItemProvider) async throws -> URL? {
-        try Task.checkCancellation()
-        return try await start(provider).value()
-    }
 }

@@ -69,9 +69,10 @@ final class QwenASREngine: ASREngine {
             guard abs(samples.count - (readEnd - readStart) * 16) <= 16 else {
                 throw ScribeError.message("Аудио Qwen короче заявленного доступного диапазона")
             }
-            metrics?.window(milliseconds: end - start, silent: !samples.contains(where: { $0 != 0 }))
+            let silent = !samples.contains(where: { $0 != 0 })
+            metrics?.window(milliseconds: end - start, silent: silent)
             // Only exact digital silence is bypassed; energy is not a speech detector.
-            if samples.contains(where: { $0 != 0 }) {
+            if !silent {
                 let hypothesis: Hypothesis
                 let aligned: [AlignedWord]
                 do {

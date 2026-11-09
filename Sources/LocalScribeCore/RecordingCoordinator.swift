@@ -85,7 +85,9 @@ public actor RecordingCoordinator {
             manifests[position] = manifest
             revision &+= 1
         } else {
-            replace((manifests + [manifest]).sorted { $0.createdAt > $1.createdAt })
+            replace((manifests + [manifest]).sorted {
+                $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt
+            })
         }
         scheduleIndex()
     }

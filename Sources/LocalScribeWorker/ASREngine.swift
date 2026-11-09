@@ -60,13 +60,28 @@ struct ASREngineFactory: Sendable {
         }
         let engine: any ASREngine
         switch profile.resolvedASRBackend {
-        case "whisper": engine = try await loadWhisper(info, models, metrics, warning)
+        case "whisper":
+            try validateWhisper(pinned, at: models)
+            engine = try await loadWhisper(info, models, metrics, warning)
         case "qwen3": engine = try await loadQwen(pinned, models, metrics, warning)
         case "vibevoice-asr": engine = try await loadVibeVoice(pinned, models, metrics, warning)
         default: throw ScribeError.message("Движок выбранной модели распознавания не поддерживается")
         }
         try Task.checkCancellation()
         return SpeechRecognizer(engine: engine)
+    }
+
+    /// WhisperKit reads folder paths directly, so verify the pinned sizes and
+    /// SHA-256 of the ASR profile and its tokenizer before any SDK load. The
+    /// Qwen and VibeVoice loaders validate their own required subsets.
+    private func validateWhisper(_ pinned: ModelCatalog, at models: URL) throws {
+        guard let profile = pinned.models.first(where: { $0.purpose == .asr }),
+              let tokenizer = pinned.models.first(where: { $0.purpose == .tokenizer }) else {
+            throw ScribeError.message("Несовместимый комплект Whisper")
+        }
+        try Task.checkCancellation()
+        try profile.validate(at: models)
+        try tokenizer.validate(at: models)
     }
 }
 

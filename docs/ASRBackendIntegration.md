@@ -4,8 +4,10 @@
 
 Интеграция Qwen3-ASR-1.7B + ForcedAligner и нативного long-form VibeVoice-ASR
 описана в [ASRModels.md](ASRModels.md): точные SDK/веса, режимы, ресурсы,
-ошибки выравнивания и результаты проверок. Новые задания используют
-`1.0.0-audio2-asr9-live1-diarization4-summary16`. Whisper-политика прежняя;
+ошибки выравнивания и результаты проверок. На срезе 26.10.2026 новые задания
+использовали `1.0.0-audio2-asr9-live1-diarization4-summary16`; после расширения
+офлайн-распознавания до трёх часов действует
+`1.0.0-audio2-asr10-live1-diarization4-summary16`. Whisper-политика прежняя;
 фоновый режим новых профилей закрыт до отдельной live-приёмки.
 
 `ASREngineFactory` выбирает `whisper`, `qwen3`, `vibevoice-asr` по закреплённому

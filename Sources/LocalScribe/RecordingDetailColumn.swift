@@ -129,7 +129,7 @@ struct RecordingDetailColumn: View {
             ActivityStatusView(indicators: model.indicators)
         }.background(Color(nsColor: .textBackgroundColor))
             .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
-                model.importProviders(providers); return true
+                model.importProviders(providers)
             }
             .sheet(isPresented: $recordingSheet) {
                 VStack(alignment: .leading, spacing: 18) {

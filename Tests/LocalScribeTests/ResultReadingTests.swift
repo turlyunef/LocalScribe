@@ -2,6 +2,10 @@ import XCTest
 @testable import LocalScribeCore
 
 final class ResultReadingTests: XCTestCase {
+    /// Live capture requires a closed-fragment (Whisper) ASR profile in the catalog.
+    private static let liveCatalog = ModelCatalog(models: [
+        ModelProfile(id: "asr", repository: "fixture/whisper", revision: "fixed", license: "test", files: [], role: .asr)
+    ])
     private func fixture(_ check: (RecordingRepository, Manifest, RunInfo, Transcript, Summary) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -230,7 +234,7 @@ final class ResultReadingTests: XCTestCase {
         let repo = try RecordingRepository(root: root)
         var manifest = Manifest(sourceType: "microphone", title: "Live", filename: "original.caf")
         manifest.state = .recording // duration/hash are not known yet
-        let info = try repo.beginRun(&manifest, catalog: ModelCatalog(models: []), liveCapture: true)
+        let info = try repo.beginRun(&manifest, catalog: Self.liveCatalog, liveCapture: true)
         let part = ASRPart(fingerprint: info.fingerprint, index: 0, startMs: 0, endMs: 1000,
                           segments: [Segment(id: "live", startMs: 0, endMs: 1000, text: "Фраза", language: "ru")])
         let saved = LiveASRPart(part: part, readStartMs: 0, readEndMs: 1000,

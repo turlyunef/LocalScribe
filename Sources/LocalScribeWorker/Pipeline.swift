@@ -32,7 +32,7 @@ actor Pipeline {
         if command.liveCapture == true {
             let capture = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
             guard stage == .transcribing, info.liveCapture == true, info.sourceHash == "capture:" + info.id,
-                  manifest.pendingRunId == info.id, capture.id == info.id, capture.fingerprint == info.fingerprint,
+                  manifest.pendingRunId == info.id, capture.schemaVersion == 1, capture.id == info.id, capture.fingerprint == info.fingerprint,
                   capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs else { throw ScribeError.message("Некорректное задание фонового распознавания") }
         } else {
             guard info.sourceHash == manifest.sha256, manifest.sourceComplete, manifest.durationMs > 0,
@@ -57,6 +57,12 @@ actor Pipeline {
         if let role {
             guard let profile = pinned.models.first(where: { $0.purpose == role }) else { throw ScribeError.message("Модель этапа отсутствует") }
             try hardware.requireCompatibility(for: profile)
+            if role == .diarization || role == .summary {
+                // SpeakerKit and the summary LLM read folder paths directly;
+                // verify the pinned sizes and SHA-256 before loading, like the
+                // ASR backends and the diagram engine already do.
+                try profile.validate(at: models)
+            }
         }
         if command.liveCapture == true {
             guard pinned.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {

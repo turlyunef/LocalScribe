@@ -482,14 +482,23 @@ struct QueueJobID: Hashable, Sendable {
         let destination = groupID ?? recordingGroups.defaultID
         for url in urls { enqueueImport(groupID: destination) { url } }
     }
-    func importProviders(_ providers: [NSItemProvider], groupID: String? = nil) {
+    @discardableResult
+    func importProviders(_ providers: [NSItemProvider], groupID: String? = nil) -> Bool {
+        guard !preparingStorage, !shuttingDown, let archive, !providers.isEmpty else { return false }
         let destination = groupID ?? recordingGroups.defaultID
-        for provider in providers { enqueueImport(groupID: destination) { try await DroppedFileURL.load(provider) } }
+        for provider in providers {
+            // Provider loading must start inside the synchronous drop callback;
+            // the queue only awaits the resulting URLs (see DroppedFileURL.start).
+            let request = DroppedFileURL.start(provider)
+            enqueueImport(groupID: destination, onDiscard: { request.cancel() }) { try await request.value() }
+        }
+        return true
     }
-    private func enqueueImport(groupID: String, _ loadURL: @escaping @MainActor () async throws -> URL?) {
-        guard !preparingStorage, !shuttingDown, let archive else { return }
+    private func enqueueImport(groupID: String, onDiscard: @escaping @MainActor () -> Void = {},
+                               _ loadURL: @escaping @MainActor () async throws -> URL?) {
+        guard !preparingStorage, !shuttingDown, let archive else { onDiscard(); return }
         do {
-            try importQueue.enqueue { [self] in
+            try importQueue.enqueue(onDiscard: onDiscard) { [self] in
                 do {
                     guard let url = try await loadURL() else { return }
                     try Task.checkCancellation()
@@ -1315,7 +1324,7 @@ struct QueueJobID: Hashable, Sendable {
             return
         }
         guard allowCancelled || m.state != .cancelled, activeJob != job,
-              generation == queueGeneration, enqueuing[job] == request else { return }
+              generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
         if shuttingDown {
             _ = try? await diagramArchive.update(id) {
                 $0.state = .interrupted; $0.lastError = "Приложение закрыто. Можно повторить распознавание."
@@ -1341,7 +1350,7 @@ struct QueueJobID: Hashable, Sendable {
                 return
             }
         }
-        guard generation == queueGeneration, enqueuing[job] == request else { return }
+        guard generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
         if !queued.contains(job) { queued.append(job) }
         _ = try? await diagramArchive.update(id) { $0.state = .queued; $0.lastError = nil }
         await reloadDiagrams()

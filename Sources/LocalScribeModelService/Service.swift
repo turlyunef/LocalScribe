@@ -27,7 +27,8 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
                 defer { self.task = nil }
                 do {
                     self.clean()
-                    let catalog = try Disk.read(ModelCatalog.self, at: Bundle.main.resourceURL!.appendingPathComponent("models.lock.json"))
+                    guard let resources = Bundle.main.resourceURL else { throw ScribeError.message("Не удалось прочитать закреплённый каталог моделей") }
+                    let catalog = try Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json"))
                     guard let profile = catalog.models.first(where: { $0.id == profileID }), profile.files.indices.contains(fileIndex) else { throw ScribeError.message("Файл не входит в закреплённый каталог") }
                     let file = profile.files[fileIndex]
                     let url = try ModelProfile.downloadURL(repository: profile.repository, revision: profile.revision, path: file.path)

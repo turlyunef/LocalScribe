@@ -3,6 +3,10 @@ import AVFoundation
 @testable import LocalScribeCore
 
 final class LiveCaptureTests: XCTestCase {
+    /// Live capture requires a closed-fragment (Whisper) ASR profile in the catalog.
+    private static let liveCatalog = ModelCatalog(models: [
+        ModelProfile(id: "asr", repository: "fixture/whisper", revision: "fixed", license: "test", files: [], role: .asr)
+    ])
     private func writeAudio(_ url: URL, seconds: Double, value: Float = 0.125, pcm16: Bool = false) throws {
         try Disk.directory(url.deletingLastPathComponent())
         let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
@@ -17,7 +21,7 @@ final class LiveCaptureTests: XCTestCase {
         let repo = try RecordingRepository(root: root)
         var m = Manifest(sourceType: "microphone", title: "Live", filename: "original.caf")
         m.state = .recording
-        let info = try repo.beginRun(&m, catalog: ModelCatalog(models: []), liveCapture: true)
+        let info = try repo.beginRun(&m, catalog: Self.liveCatalog, liveCapture: true)
         let folder = repo.folder(m.id).appendingPathComponent("capture")
         var offset = 0.0, index = 0
         while offset < seconds {
@@ -141,7 +145,7 @@ final class LiveCaptureTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let repo = try RecordingRepository(root: root)
         var m = Manifest(sourceType: "microphone", title: "Capture", filename: "original.caf"); m.state = .recording
-        let info = try repo.beginRun(&m, catalog: ModelCatalog(models: []), liveCapture: true)
+        let info = try repo.beginRun(&m, catalog: Self.liveCatalog, liveCapture: true)
         XCTAssertEqual(m.state, .recording); XCTAssertEqual(m.captureProcessing, .queued)
         XCTAssertEqual(info.sourceHash, "capture:" + info.id)
         var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(info)) as! [String: Any]

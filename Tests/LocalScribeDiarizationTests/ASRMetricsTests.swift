@@ -26,9 +26,19 @@ final class ASRMetricsTests: XCTestCase {
         try Disk.directory(original.deletingLastPathComponent())
         try Data("fixture".utf8).write(to: original)
         manifest.sha256 = try Disk.hash(original); manifest.sourceComplete = true; manifest.durationMs = 1000
+        // Real per-profile files keep catalog validation happy so the failure
+        // below still comes from the model load itself.
+        let bytes = Data("metrics fixture weights".utf8)
+        let weights = ModelFile(path: "weights", localPath: "weights", size: Int64(bytes.count),
+                                sha256: Disk.fingerprint("metrics fixture weights"))
         let catalog = ModelCatalog(models: ModelRole.audioRoles.map {
-            ModelProfile(id: $0.rawValue, repository: "fixture/model", revision: "fixture", license: "test", files: [], role: $0)
+            ModelProfile(id: $0.rawValue, repository: "fixture/model", revision: "fixture", license: "test", files: [weights], role: $0)
         })
+        for profile in catalog.models {
+            let folder = repository.models.appendingPathComponent(profile.id)
+            try Disk.directory(folder)
+            try bytes.write(to: folder.appendingPathComponent(weights.localPath))
+        }
         let info = try repository.beginRun(&manifest, catalog: catalog)
         let run = repository.run(manifest.id, info.id), resources = root.appendingPathComponent("Resources")
         try Disk.write(catalog, to: resources.appendingPathComponent("models.lock.json"))

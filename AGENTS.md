@@ -24,7 +24,7 @@ SwiftPM-пакет без Xcode-проекта с GUI на SwiftUI/AppKit. ASR �
 | Задача | Точная команда | Статус |
 | --- | --- | --- |
 | Release executable targets | `swift build -c release -j 4 --force-resolved-versions` | проверено с имеющимися артефактами |
-| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено — 589 XCTest (228 Core, 176 UI/service, 185 worker/диаризация), 0 ошибок, 17 опциональных пропусков |
+| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено — 591 XCTest (228 Core, 176 UI/service, 187 worker/диаризация), 0 ошибок, 17 опциональных пропусков |
 | Один тест | `swift test -c release -j 4 --force-resolved-versions --filter CoreTests/testAudioEngineNotificationDoesNotImplyMicrophoneChange` | проверено — 1 тест, 0 ошибок |
 | Python-проверки скриптов | `python3 -m unittest discover -s scripts/tests -v` | проверено — 63 теста, 0 ошибок, локальные фикстуры без весов и сети |
 | Проверка аудиокодеков | `python3 scripts/format_checks.py` | (не проверено) — отсутствует `Assets/probe/mixed.wav`. В прогоне 26.10.2026 прошло 8/8 вариантов, включая AAC ADTS, см. [ASRModels](docs/ASRModels.md) |

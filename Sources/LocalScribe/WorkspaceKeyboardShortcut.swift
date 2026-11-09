@@ -33,7 +33,8 @@ struct WorkspaceKeyboardShortcut: NSViewRepresentable {
                     if let text, text.isEditable || text.isFieldEditor || text.hasMarkedText() { return event }
                     return self.handle?(.closeSelection) == true ? nil : event
                 case kVK_Delete where modifiers == .command:
-                    guard text == nil else { return event }
+                    // Read-only transcript text must not swallow deletion of the selection.
+                    if let text, text.isEditable || text.isFieldEditor || text.hasMarkedText() { return event }
                     return self.handle?(.deleteSelection) == true ? nil : event
                 default:
                     return event

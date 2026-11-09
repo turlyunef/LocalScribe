@@ -80,7 +80,8 @@ import LocalScribeSpeakerKit
             let artifact = try await pipeline.perform()
             var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
             let metrics: [String: Double] = ["seconds": Date().timeIntervalSince(started), "maxResidentBytes": Double(usage.ru_maxrss)]
-            try Disk.write(metrics, to: pipeline.run.appendingPathComponent("metrics-\(pipeline.stage.rawValue).json"))
+            // Metrics are diagnostics only; a failed write must not fail a finished stage.
+            try? Disk.write(metrics, to: pipeline.run.appendingPathComponent("metrics-\(pipeline.stage.rawValue).json"))
             return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: artifact))
         } catch {
             let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
@@ -103,7 +104,8 @@ import LocalScribeSpeakerKit
             let artifact = try await engine.recognize()
             var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
             let metrics: [String: Double] = ["seconds": Date().timeIntervalSince(started), "maxResidentBytes": Double(usage.ru_maxrss)]
-            try Disk.write(metrics, to: engine.run.appendingPathComponent("metrics-diagram.json"))
+            // Metrics are diagnostics only; a failed write must not fail a finished stage.
+            try? Disk.write(metrics, to: engine.run.appendingPathComponent("metrics-diagram.json"))
             return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: artifact))
         } catch {
             let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
@@ -131,7 +133,7 @@ import LocalScribeSpeakerKit
             return 0
         } catch {
             let text = ["status": "failed", "error": "\(error)", "type": String(describing: type(of: error))]
-            try? output.write(contentsOf: (try! JSONEncoder().encode(text)) + Data([10]))
+            if let data = try? JSONEncoder().encode(text) { try? output.write(contentsOf: data + Data([10])) }
             return 1
         }
     }

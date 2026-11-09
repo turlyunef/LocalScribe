@@ -214,7 +214,7 @@ public enum Media {
             for part in parts {
                 let input = try AVAudioFile(forReading: part)
                 guard input.processingFormat == format, input.fileFormat == fileFormat else { throw ScribeError.message("Формат микрофона изменился") }
-                let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192)!
+                guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8192) else { throw ScribeError.message("Не хватает памяти для аудиобуфера") }
                 while input.framePosition < input.length { try input.read(into: buffer); try out.write(from: buffer); total += Int64(buffer.frameLength) }
             }
         }
