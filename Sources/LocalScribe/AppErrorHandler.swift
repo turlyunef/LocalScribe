@@ -1,11 +1,58 @@
 import AppKit
 import SwiftUI
 
+/// Diagnostics snapshot taken when an error is reported; the clipboard form
+/// must give the full picture needed to fix the problem offline.
+struct AppErrorReport: Equatable {
+    let message: String
+    let appVersion: String
+    let build: String
+    let osVersion: String
+    let timestamp: Date
+
+    init(message: String,
+         appVersion: String = AppInfo.version,
+         build: String = AppInfo.build,
+         osVersion: String = AppErrorReport.currentOSVersion,
+         timestamp: Date = Date()) {
+        self.message = message
+        self.appVersion = appVersion
+        self.build = build
+        self.osVersion = osVersion
+        self.timestamp = timestamp
+    }
+
+    static var currentOSVersion: String {
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        return "macOS \(version.majorVersion).\(version.minorVersion).\(version.patchVersion)"
+    }
+
+    var clipboardText: String {
+        """
+        LocalScribe \(appVersion) (сборка \(build))
+        \(osVersion)
+        Время ошибки: \(Self.timestampFormatter.string(from: timestamp))
+
+        Ошибка:
+        \(message)
+        """
+    }
+
+    private static let timestampFormatter = ISO8601DateFormatter()
+}
+
 /// One presentation path for errors from the archive, editor, models and worker.
 @MainActor final class AppErrorHandler: NSObject, NSWindowDelegate {
-    private(set) var messages: [String] = []
+    private(set) var reports: [AppErrorReport] = []
+    var messages: [String] { reports.map(\.message) }
     private(set) var window: NSPanel?
     private var presenting = false
+    private let pasteboard: NSPasteboard
+
+    init(pasteboard: NSPasteboard = .general) {
+        self.pasteboard = pasteboard
+        super.init()
+    }
 
     func report(_ error: Error) {
         guard !(error is CancellationError) else { return }
@@ -14,7 +61,7 @@ import SwiftUI
 
     func report(message: String?) {
         guard let message, !message.isEmpty else { return }
-        messages.append(message)
+        reports.append(AppErrorReport(message: message))
         presentIfNeeded()
     }
 
@@ -26,14 +73,25 @@ import SwiftUI
     }
 
     func dismissCurrent() {
-        guard !messages.isEmpty else { return }
-        messages.removeFirst()
-        if messages.isEmpty {
+        guard !reports.isEmpty else { return }
+        reports.removeFirst()
+        if reports.isEmpty {
             window?.close()
             window = nil
         } else {
             presentIfNeeded()
         }
+    }
+
+    /// Copies the shown error with the full diagnostics (message, app version,
+    /// build, OS, report time). The window and the message queue stay as is.
+    @discardableResult
+    func copyCurrent() -> String? {
+        guard let report = reports.first else { return nil }
+        let text = report.clipboardText
+        pasteboard.clearContents()
+        pasteboard.setString(text, forType: .string)
+        return text
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -42,7 +100,7 @@ import SwiftUI
     }
 
     private func presentIfNeeded() {
-        guard presenting, let message = messages.first else { return }
+        guard presenting, let report = reports.first else { return }
         let panel: NSPanel
         if let window {
             panel = window
@@ -60,30 +118,43 @@ import SwiftUI
             panel.center()
             window = panel
         }
-        panel.contentView = NSHostingView(rootView: AppErrorView(message: message, count: messages.count) { [weak self] in
+        panel.contentView = NSHostingView(rootView: AppErrorView(report: report, count: reports.count,
+                                                                 copy: { [weak self] in self?.copyCurrent() }) { [weak self] in
             self?.dismissCurrent()
         })
         panel.makeKeyAndOrderFront(nil)
     }
 }
 
-private struct AppErrorView: View {
-    let message: String
+struct AppErrorView: View {
+    let report: AppErrorReport
     let count: Int
+    let copy: () -> String?
     let dismiss: () -> Void
+    @State private var copied = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Label("Не удалось выполнить действие", systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
             ScrollView {
-                Text(message).frame(maxWidth: .infinity, alignment: .leading)
+                Text(report.message).frame(maxWidth: .infinity, alignment: .leading)
                     .textSelection(.enabled)
                     .accessibilityIdentifier("error.message")
             }
             HStack {
                 if count > 1 { Text("Ещё сообщений: \(count - 1)").font(.caption).foregroundStyle(.secondary) }
                 Spacer()
+                Button {
+                    guard copy() != nil else { return }
+                    copied = true
+                    Task { try? await Task.sleep(for: .seconds(2)); copied = false }
+                } label: {
+                    Label(copied ? "Скопировано" : "Копировать ошибку",
+                          systemImage: copied ? "checkmark" : "doc.on.doc")
+                }
+                .accessibilityIdentifier("error.copy")
+                .help("Скопировать сообщение об ошибке, версию приложения и сведения о системе")
                 Button(count > 1 ? "Далее" : "Закрыть", action: dismiss)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("error.dismiss")

@@ -62,6 +62,67 @@ final class AppErrorHandlerTests: XCTestCase {
         XCTAssertNil(handler.window)
     }
 
+    func testCopyWritesFullDiagnosticsAndKeepsWindowOpen() throws {
+        _ = NSApplication.shared
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let handler = AppErrorHandler(pasteboard: pasteboard)
+        handler.startPresenting()
+        handler.report(message: "Не удалось сохранить правки")
+        let panel = try XCTUnwrap(handler.window)
+        XCTAssertTrue(panel.isVisible)
+        let text = try XCTUnwrap(handler.copyCurrent())
+        for needle in ["LocalScribe", AppInfo.version, AppInfo.build, "macOS", "Время ошибки:",
+                       "Не удалось сохранить правки"] {
+            XCTAssertTrue(text.contains(needle), "Копия ошибки должна содержать: \(needle)")
+        }
+        XCTAssertNotNil(text.range(of: #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"#, options: .regularExpression),
+                        "Время ошибки должно быть в формате ISO 8601")
+        XCTAssertEqual(pasteboard.string(forType: .string), text)
+        // Копирование не закрывает окно и не забирает сообщение из очереди.
+        XCTAssertTrue(panel.isVisible)
+        XCTAssertEqual(handler.messages, ["Не удалось сохранить правки"])
+        XCTAssertEqual(handler.reports.count, 1)
+    }
+
+    func testCopyButtonCopiesShownMessageWithoutDismissingWindow() throws {
+        _ = NSApplication.shared
+        NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
+        let pasteboard = NSPasteboard.withUniqueName()
+        defer { pasteboard.releaseGlobally() }
+        let handler = AppErrorHandler(pasteboard: pasteboard)
+        handler.startPresenting()
+        handler.report(message: "Ошибка архива")
+        handler.report(message: "Вторая")
+        let panel = try XCTUnwrap(handler.window)
+        let hosting = try XCTUnwrap(panel.contentView)
+        let deadline = Date().addingTimeInterval(1)
+        var copyButton: AnyObject?
+        while Date() < deadline {
+            copyButton = descendants(of: hosting).first { $0.accessibilityIdentifier?() == "error.copy" }
+            if copyButton != nil { break }
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+        let button = try XCTUnwrap(copyButton, "Кнопка копирования должна быть в окне ошибки")
+        XCTAssertEqual(button.accessibilityLabel?(), "Копировать ошибку")
+        XCTAssertTrue(button.accessibilityPerformPress?() ?? false)
+        XCTAssertEqual(pasteboard.string(forType: .string), handler.reports.first?.clipboardText)
+        XCTAssertTrue(pasteboard.string(forType: .string)?.contains("Ошибка архива") == true)
+        // Копирование не подтверждает сообщение: окно и очередь без изменений.
+        XCTAssertEqual(handler.messages, ["Ошибка архива", "Вторая"])
+        XCTAssertTrue(panel.isVisible)
+        handler.dismissCurrent()
+        XCTAssertEqual(handler.messages, ["Вторая"])
+        XCTAssertTrue(panel.isVisible)
+    }
+
+    // SwiftUI nodes implement the Objective-C accessibility methods without
+    // declaring NSAccessibilityProtocol conformance, so use dynamic dispatch.
+    private func descendants(of element: AnyObject) -> [AnyObject] {
+        let children = (element.accessibilityChildren?() ?? []).map { $0 as AnyObject }
+        return children + children.flatMap { descendants(of: $0) }
+    }
+
     func testErrorsCanBeAcknowledgedWhileEditorSheetStaysOpen() async throws {
         _ = NSApplication.shared
         let parent = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
