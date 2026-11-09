@@ -23,38 +23,65 @@ struct DiagramDetailColumn: View {
                     Button("Загрузить изображение", action: workspace.presentImportPanel)
                         .accessibilityIdentifier("diagrams.emptyImport")
                 }
+                .padding(20)
             }
         }
-        .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
         .onDrop(of: [.fileURL], isTargeted: nil) { workspace.importProviders($0) }
     }
 
     @ViewBuilder private func diagramDetail(_ diagram: DiagramManifest) -> some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    RecordingTitleView(title: diagram.displayTitle, itemName: "схемы") { title in
-                        Task { await model.renameDiagram(diagram.id, title: title) }
-                    }
-                    .id(diagram.id)
-                    Button("Удалить схему", systemImage: "trash", role: .destructive) {
-                        requestDeletion(diagram.id)
-                    }
-                    .labelStyle(.iconOnly)
-                    .disabled(model.deletingDiagramJobs)
-                    .help("Удалить открытую схему")
-                    .accessibilityIdentifier("diagrams.detail.delete")
-                }
-                Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(ByteCountFormatter.string(fromByteCount: diagram.byteSize, countStyle: .file)) · \(diagram.createdAt.formatted(date: .abbreviated, time: .shortened))")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
+        VStack(spacing: 0) {
             HStack {
-                statusActions(diagram)
+                RecordingTitleView(title: diagram.displayTitle, itemName: "схемы") { title in
+                    Task { await model.renameDiagram(diagram.id, title: title) }
+                }
+                .id(diagram.id)
+                Spacer()
+                diagramActions(diagram)
+            }
+            .padding(20)
+            HStack {
+                Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(ByteCountFormatter.string(fromByteCount: diagram.byteSize, countStyle: .file)) · \(diagram.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 if workspace.result != nil { resultActions }
             }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 12)
+            Divider()
+            diagramContent(diagram)
+                .padding(20)
+        }
+        .background(Color(nsColor: .textBackgroundColor))
+    }
+
+    private func diagramActions(_ diagram: DiagramManifest) -> some View {
+        HStack(spacing: 8) {
+            Button("Показать изображение в Finder") {
+                workspace.showImageInFinder(diagram)
+            }
+            .accessibilityIdentifier("diagrams.showImageInFinder")
+            statusActions(diagram)
+            Button(role: .destructive) {
+                requestDeletion(diagram.id)
+            } label: {
+                Image(systemName: "trash").foregroundStyle(.red)
+            }
+            .buttonStyle(.borderless)
+            .disabled(model.deletingDiagramJobs)
+            .help("Удалить открытую схему")
+            .accessibilityLabel("Удалить схему")
+            .accessibilityIdentifier("diagrams.detail.delete")
+        }
+        .controlSize(.small)
+        .fixedSize()
+    }
+
+    private func diagramContent(_ diagram: DiagramManifest) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
             if workspace.showsPreviousVersion {
                 Label("Идёт повторное распознавание: показана предыдущая проверенная версия", systemImage: "clock.arrow.circlepath")
                     .font(.caption).foregroundStyle(.secondary)
@@ -73,7 +100,7 @@ struct DiagramDetailColumn: View {
     }
 
     @ViewBuilder private func statusActions(_ diagram: DiagramManifest) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if model.diagramQueuePosition(for: diagram.id) != nil {
                 Button("Поднять на верх очереди") { model.moveToFrontOfQueue(.diagram(diagram.id)) }
                     .help("Распознать эту схему следующей после текущего задания")
@@ -117,7 +144,7 @@ struct DiagramDetailColumn: View {
             }
             .accessibilityIdentifier("diagrams.copy")
             .help("Скопировать открытую вкладку")
-            Menu("Сохранить", systemImage: "square.and.arrow.down") {
+            Menu {
                 ForEach(parts, id: \.self) { part in
                     Menu(part.rawValue) {
                         Button("Markdown (.md)") { workspace.presentExportPanel(part: part, format: .markdown) }
@@ -125,10 +152,12 @@ struct DiagramDetailColumn: View {
                     }
                 }
                 Button("PlantUML (.puml)") { workspace.presentExportPanel(part: .all, format: .plantuml) }
+            } label: {
+                Label("Сохранить", systemImage: "square.and.arrow.up")
             }
             .accessibilityIdentifier("diagrams.save")
         }
-        .controlSize(.small)
+        .fixedSize()
     }
 
     @ViewBuilder private func previewSection(_ diagram: DiagramManifest) -> some View {
@@ -148,11 +177,6 @@ struct DiagramDetailColumn: View {
             } else {
                 ProgressView().frame(maxWidth: .infinity, minHeight: 120)
             }
-            Button("Показать изображение в Finder", systemImage: "folder") {
-                workspace.showImageInFinder(diagram)
-            }
-            .controlSize(.small)
-            .accessibilityIdentifier("diagrams.showImageInFinder")
             Spacer(minLength: 0)
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
