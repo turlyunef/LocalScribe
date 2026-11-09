@@ -44,7 +44,9 @@ struct ContentView: View {
             if mode == .recordings {
                 RecordingDetailColumn(model: model, recordingSheet: $recordingSheet)
             } else {
-                DiagramDetailColumn(model: model, workspace: diagramWorkspace)
+                DiagramDetailColumn(model: model, workspace: diagramWorkspace) { id in
+                    SidebarDiagramDeletion.request([id], model: model, presentation: $deletingDiagrams)
+                }
             }
         }
         .toolbar(removing: .title)
@@ -57,6 +59,9 @@ struct ContentView: View {
                 .help("Открыть настройки")
                 .accessibilityIdentifier("workspace.settings")
             }
+        }
+        .sheet(item: $deletingDiagrams) { deletion in
+            DeleteDiagramsView(workspace: diagramWorkspace, ids: deletion.ids) { deletingDiagrams = nil }
         }
         .background(WorkspaceKeyboardShortcut(handle: handleShortcut))
         .disabled(blocked)

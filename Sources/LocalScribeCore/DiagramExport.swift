@@ -1,36 +1,56 @@
 import Foundation
 
+public enum DiagramExportPart: String, CaseIterable, Sendable {
+    case nodes = "Узлы", edges = "Связи", warnings = "Предупреждения", all = "Всё"
+
+    public static func sections(includingWarnings: Bool) -> [Self] {
+        includingWarnings ? [.nodes, .edges, .warnings] : [.nodes, .edges]
+    }
+}
+
 /// Deterministic UTF-8 serializers for a verified DiagramResult. The code owns
 /// the syntax: the recognition model never generates markup, node and edge
 /// labels are untrusted text and are neutralized before reaching the output.
 public enum DiagramExport {
-    // MARK: - Markdown
+    // MARK: - Markdown and plain text
 
-    public static func markdown(_ result: DiagramResult, title: String, warnings: [String] = []) -> String {
-        var lines: [String] = []
-        lines.append("# " + escapeMarkdown(title))
-        lines.append("")
-        lines.append("## Узлы")
-        lines.append("")
-        for node in result.nodes {
-            lines.append("- " + escapeMarkdown(node.label) + (node.uncertain ? " (подпись нечитаема)" : ""))
-        }
-        lines.append("")
-        lines.append("## Связи")
-        lines.append("")
-        for edge in result.edges {
-            guard let from = label(of: edge.from, in: result), let to = label(of: edge.to, in: result) else { continue }
-            var line = "- " + escapeMarkdown(from) + " " + edge.symbol + " " + escapeMarkdown(to)
-            if let edgeLabel = edge.label { line += " (" + escapeMarkdown(edgeLabel) + ")" }
-            if let kind = edge.kind { line += " · " + kind.title }
-            if edge.uncertain { line += " ⚠ не подтверждена" }
-            lines.append(line)
-        }
-        if !warnings.isEmpty {
-            lines.append("")
-            lines.append("## Предупреждения")
-            lines.append("")
-            for warning in warnings { lines.append("- " + escapeMarkdown(warning)) }
+    public static func markdown(_ result: DiagramResult, title: String, warnings: [String] = [],
+                                part: DiagramExportPart = .all) -> String {
+        text(result, title: title, warnings: warnings, part: part, markdown: true)
+    }
+
+    public static func plainText(_ result: DiagramResult, title: String, warnings: [String] = [],
+                                 part: DiagramExportPart = .all) -> String {
+        text(result, title: title, warnings: warnings, part: part, markdown: false)
+    }
+
+    private static func text(_ result: DiagramResult, title: String, warnings: [String],
+                             part: DiagramExportPart, markdown: Bool) -> String {
+        let sections = DiagramExportPart.sections(includingWarnings: !warnings.isEmpty)
+        let escape = markdown ? escapeMarkdown : singleLine
+        var lines = [(markdown ? "# " : "") + escape(title)]
+        for section in sections where part == .all || part == section {
+            lines += ["", (markdown ? "## " : "") + section.rawValue, ""]
+            switch section {
+            case .nodes:
+                for node in result.nodes {
+                    lines.append("- " + escape(node.label) + (node.uncertain ? " (подпись нечитаема)" : ""))
+                }
+            case .edges:
+                let labels = Dictionary(result.nodes.map { ($0.id, escape($0.label)) }, uniquingKeysWith: { first, _ in first })
+                for edge in result.edges {
+                    guard let from = labels[edge.from], let to = labels[edge.to] else { continue }
+                    var line = "- " + from + " " + edge.symbol + " " + to
+                    if let edgeLabel = edge.label { line += " (" + escape(edgeLabel) + ")" }
+                    if let kind = edge.kind { line += " · " + kind.title }
+                    if edge.uncertain { line += " ⚠ не подтверждена" }
+                    lines.append(line)
+                }
+            case .warnings:
+                for warning in warnings { lines.append("- " + escape(warning)) }
+            case .all:
+                break
+            }
         }
         return lines.joined(separator: "\n") + "\n"
     }
@@ -38,11 +58,7 @@ public enum DiagramExport {
     /// Control characters and line breaks never create new markdown lines;
     /// markdown-active punctuation is backslash-escaped.
     static func escapeMarkdown(_ text: String) -> String {
-        var neutral = String.UnicodeScalarView()
-        for scalar in text.unicodeScalars {
-            neutral.append(isControl(scalar) ? " " : scalar)
-        }
-        var escaped = String(neutral)
+        var escaped = singleLine(text)
         for (raw, replacement) in [("\\", "\\\\"), ("`", "\\`"), ("*", "\\*"), ("_", "\\_"),
                                    ("[", "\\["), ("]", "\\]"), ("<", "\\<"), (">", "\\>"), ("#", "\\#")] {
             escaped = escaped.replacingOccurrences(of: raw, with: replacement)
@@ -174,8 +190,12 @@ public enum DiagramExport {
 
     // MARK: - Shared
 
-    private static func label(of id: String, in result: DiagramResult) -> String? {
-        result.nodes.first { $0.id == id }?.label
+    private static func singleLine(_ text: String) -> String {
+        var neutral = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            neutral.append(isControl(scalar) ? " " : scalar)
+        }
+        return String(neutral)
     }
 
     /// C0/C1 control characters and Unicode line separators never continue to

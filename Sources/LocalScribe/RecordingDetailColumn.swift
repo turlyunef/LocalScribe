@@ -203,6 +203,7 @@ private struct PresentedResultView: View {
 
 struct RecordingTitleView: View {
     var title: String
+    var itemName = "записи"
     var save: (String) -> Void
     @State private var draft = ""
     @State private var editing = false
@@ -211,7 +212,7 @@ struct RecordingTitleView: View {
     var body: some View {
         Group {
             if editing {
-                TextField("Название записи", text: $draft)
+                TextField("Название \(itemName)", text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .focused($focused)
                     .onSubmit(commit)
@@ -223,7 +224,7 @@ struct RecordingTitleView: View {
                         if !value { commit() }
                     }
                     .onAppear { focused = true }
-                    .accessibilityLabel("Название записи")
+                    .accessibilityLabel("Название \(itemName)")
             } else {
                 Button {
                     draft = title
@@ -233,7 +234,7 @@ struct RecordingTitleView: View {
                 }
                 .buttonStyle(.plain)
                 .help("Нажмите, чтобы изменить название")
-                .accessibilityLabel("Изменить название записи: \(title)")
+                .accessibilityLabel("Изменить название \(itemName): \(title)")
             }
         }
         .font(.title2).fontWeight(.semibold)

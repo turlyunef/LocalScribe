@@ -151,7 +151,9 @@ struct QueueJobID: Hashable, Sendable {
     private var warningTasks: [UUID: Task<Void, Never>] = [:]
     let importQueue = ImportQueue()
     enum DuplicateImportAction { case openExisting, importAgain, cancel }
-    var resolveDuplicateImport: (DuplicateRecording) -> DuplicateImportAction = { _ in
+    var resolveDuplicateImport: (DuplicateRecording) -> DuplicateImportAction = { _ in AppModel.presentDuplicateImportAlert() }
+
+    static func presentDuplicateImportAlert() -> DuplicateImportAction {
         let alert = NSAlert(); alert.messageText = "Такой файл уже есть в архиве"
         alert.addButton(withTitle: "Открыть существующую"); alert.addButton(withTitle: "Импортировать ещё раз"); alert.addButton(withTitle: "Отмена")
         switch alert.runModal() {
@@ -697,11 +699,14 @@ struct QueueJobID: Hashable, Sendable {
         queued.firstIndex(of: .recording(id)).map { $0 + 1 }
     }
     func moveToFrontOfQueue(_ id: String) {
-        guard !preparingStorage, !shuttingDown, activeJob != .recording(id),
-              let index = queued.firstIndex(of: .recording(id)), index > 0 else { return }
+        moveToFrontOfQueue(.recording(id))
+    }
+    func moveToFrontOfQueue(_ job: QueueJobID) {
+        guard !preparingStorage, !shuttingDown, activeJob != job,
+              let index = queued.firstIndex(of: job), index > 0 else { return }
         var reordered = queued
         reordered.remove(at: index)
-        reordered.insert(.recording(id), at: 0)
+        reordered.insert(job, at: 0)
         queued = reordered
     }
     func enqueueCapture(_ id: String) async {
@@ -921,27 +926,21 @@ struct QueueJobID: Hashable, Sendable {
         await reloadDiagrams()
         guard activeJob == job else { throw CancellationError() }
         let command = WorkerCommand(diagramJobId: id, runId: info.id, diagramPath: diagramRepository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
-        try await runWorker(command)
+        // The manifest still describes the previous validated result during a retry.
+        var warnings: [String] = []
+        try await supervisor.run(command, executable: worker) { event in
+            if event.type == "progress" { self.status = event.message }
+            if event.type == "warning", !warnings.contains(event.message) { warnings.append(event.message) }
+        }
         guard activeJob == job else { throw CancellationError() }
         m = try await diagramArchive.load(id)
         guard activeJob == job, m.state != .cancelled else { throw CancellationError() }
-        _ = try await diagramArchive.completeRun(id, runId: info.id, warnings: m.warnings)
+        _ = try await diagramArchive.completeRun(id, runId: info.id, warnings: warnings)
         await reloadDiagrams()
     }
     private func runWorker(_ command: WorkerCommand) async throws {
         try await supervisor.run(command, executable: worker) { event in
             if event.type == "progress" { self.status = event.message }
-            if command.isDiagram {
-                // Diagram recognition has no checkpoints or result drafts; only
-                // warnings touch the diagram manifest.
-                if event.type == "warning", let diagramArchive = self.diagramArchive {
-                    _ = try? await diagramArchive.update(command.jobId) { current in
-                        if !current.warnings.contains(event.message) { current.warnings.append(event.message) }
-                    }
-                    await self.reloadDiagrams()
-                }
-                return
-            }
             if event.type == "checkpoint" {
                 self.resultSignature = ""; self.loadResult()
             }
@@ -1263,23 +1262,18 @@ struct QueueJobID: Hashable, Sendable {
     }
     /// Import publishes the manifest first; auto-queueing happens only when the
     /// diagram model is ready, otherwise the item waits with an explicit start.
-    func importDiagramImage(at url: URL, groupID: String) async -> DiagramManifest? {
-        guard !shuttingDown, let diagramArchive else { errorHandler.report(message: "Хранилище схем недоступно"); return nil }
-        do {
-            let manifest = try await diagramArchive.importImage(url, groupID: groupID)
-            await reloadDiagrams()
-            let job = QueueJobID.diagram(manifest.id)
-            if let profile = diagramProfile, jobAdmission[job] == nil {
-                _ = try await diagramArchive.beginRun(manifest.id, profile: profile)
-                await reloadDiagrams()
-                if jobAdmission[job] == nil { await enqueueDiagram(manifest.id) }
-            }
-            return manifest
-        } catch {
-            errorHandler.report(error)
-            await reloadDiagrams()
-            return nil
+    func importDiagramImage(at url: URL, groupID: String, allowDuplicate: Bool = false) async throws -> DiagramManifest {
+        try Task.checkCancellation()
+        guard !shuttingDown else { throw CancellationError() }
+        guard let diagramArchive else { throw ScribeError.message("Хранилище схем недоступно") }
+        let manifest = try await diagramArchive.importImage(url, groupID: groupID, allowDuplicate: allowDuplicate)
+        if !Task.isCancelled, !shuttingDown, diagramModelsReady, jobAdmission[.diagram(manifest.id)] == nil {
+            await enqueueDiagram(manifest.id)
         }
+        // Enqueue publishes its own snapshot. Also publish the archived image
+        // if there was no model or preparing a run failed.
+        if diagram(manifest.id) == nil { await reloadDiagrams() }
+        return manifest
     }
     /// Explicit start or retry: a new run is always created; diagram runs never
     /// promise token-level continuation.
@@ -1446,10 +1440,13 @@ struct QueueJobID: Hashable, Sendable {
         return try await resultPresentation.render(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part, markdown: markdown)
     }
     func copy(_ part: ExportPart) {
+        copyResult { try await self.rendered(part) }
+    }
+    func copyResult(_ render: @escaping @MainActor () async throws -> String) {
         copyTask?.cancel()
         copyTask = Task {
             do {
-                let text = try await rendered(part)
+                let text = try await render()
                 try Task.checkCancellation()
                 guard !shuttingDown else { return }
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
@@ -1461,15 +1458,24 @@ struct QueueJobID: Hashable, Sendable {
         guard let selected else { return }
         let panel = NSSavePanel(); panel.nameFieldStringValue = selected.displayTitle.replacingOccurrences(of: "/", with: "-") + (markdown ? ".md" : ".txt")
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        saveResultExport(to: url) { try await self.rendered(part, markdown: markdown) }
+    }
+    @discardableResult
+    func saveResultExport(to url: URL, render: @escaping @MainActor () async throws -> String) -> Task<Void, Never> {
         let request = UUID()
-        exportTasks[request] = Task {
+        let task = Task {
             defer { exportTasks.removeValue(forKey: request) }
-            await export(to: url, markdown: markdown, part: part)
+            await writeResultExport(to: url, render: render)
         }
+        exportTasks[request] = task
+        return task
     }
     func export(to url: URL, markdown: Bool, part: ExportPart) async {
+        await writeResultExport(to: url) { try await self.rendered(part, markdown: markdown) }
+    }
+    private func writeResultExport(to url: URL, render: @MainActor () async throws -> String) async {
         do {
-            let text = try await rendered(part, markdown: markdown)
+            let text = try await render()
             try await Task.detached(priority: .userInitiated) {
                 try text.write(to: url, atomically: true, encoding: .utf8)
             }.value

@@ -1,5 +1,6 @@
 import XCTest
 import AppKit
+import Synchronization
 import UniformTypeIdentifiers
 @testable import LocalScribeCore
 @testable import LocalScribe
@@ -29,6 +30,10 @@ final class DiagramWorkspaceTests: XCTestCase {
             emit('progress', 'diagram-ready-' + c['jobId'])
             while not (root / 'release').exists() or (root / ('hold-' + c['jobId'])).exists():
                 time.sleep(0.02)
+            if (root / 'diagram-warning').exists():
+                warning = (root / 'diagram-warning').read_text()
+                emit('warning', warning)
+                emit('warning', warning)
             info = json.loads((run / 'run.json').read_text())
             fingerprint = hashlib.sha256((info['sourceHash'] + info['profileHash'] + info['pipelineVersion'] + info['promptVersion'] + info['preprocessingVersion']).encode()).hexdigest()
             label = (root / 'diagram-label').read_text() if (root / 'diagram-label').exists() else 'Проверка'
@@ -93,13 +98,13 @@ final class DiagramWorkspaceTests: XCTestCase {
         while !predicate() && Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
         XCTAssertTrue(predicate())
     }
-    private func pngData(width: Int = 4, height: Int = 4) throws -> Data {
+    private func imageData(width: Int = 4, height: Int = 4, type: UTType = .png) throws -> Data {
         let output = NSMutableData()
         guard let context = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: width * 4,
                                       space: CGColorSpaceCreateDeviceRGB(), bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue),
               let image = context.makeImage(),
-              let destination = CGImageDestinationCreateWithData(output, UTType.png.identifier as CFString, 1, nil) else {
-            throw ScribeError.message("Не удалось создать тестовый PNG")
+              let destination = CGImageDestinationCreateWithData(output, type.identifier as CFString, 1, nil) else {
+            throw ScribeError.message("Не удалось создать тестовое изображение")
         }
         CGImageDestinationAddImage(destination, image, nil)
         guard CGImageDestinationFinalize(destination) else { throw ScribeError.message("Не удалось записать тестовое изображение") }
@@ -107,10 +112,9 @@ final class DiagramWorkspaceTests: XCTestCase {
     }
     private func importPNG(_ model: AppModel, groupID: String = RecordingGroup.ungroupedID) async throws -> DiagramManifest {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("diagram-\(UUID().uuidString).png")
-        try pngData().write(to: url)
+        try imageData().write(to: url)
         defer { try? FileManager.default.removeItem(at: url) }
-        let imported = await model.importDiagramImage(at: url, groupID: groupID)
-        return try XCTUnwrap(imported)
+        return try await model.importDiagramImage(at: url, groupID: groupID, allowDuplicate: true)
     }
     private func events(_ root: URL) throws -> [WorkerCommand] {
         try String(contentsOf: root.appendingPathComponent("events.jsonl"), encoding: .utf8)
@@ -122,14 +126,133 @@ final class DiagramWorkspaceTests: XCTestCase {
         try repo.save(m); return m
     }
 
+    func testBatchContinuesAfterInvalidImageAndResolvesDuplicatesAcrossGroupsInImportOrder() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (_, model, release) = try fixture(root)
+        let workspace = DiagramWorkspaceModel(model: model)
+        await model.changeDiagramGroups { try $0.create(name: "Исходные") }
+        let originalGroup = model.diagramGroups.defaultID
+        let first = root.appendingPathComponent("first.png")
+        try imageData().write(to: first)
+        workspace.importURLs([first])
+        await model.importQueue.waitUntilIdle()
+        let original = try XCTUnwrap(model.diagrams.first)
+        try await waitUntil { model.diagram(original.id)?.state == .recognizing }
+
+        await model.changeDiagramGroups { try $0.create(name: "Партия") }
+        let batchGroup = model.diagramGroups.defaultID
+        let second = root.appendingPathComponent("second.png")
+        let invalid = root.appendingPathComponent("invalid.png")
+        let duplicate = root.appendingPathComponent("same-bytes.png")
+        let third = root.appendingPathComponent("third.jpeg")
+        let data = try imageData(width: 5)
+        try data.write(to: second)
+        try Data("invalid".utf8).write(to: invalid)
+        try data.write(to: duplicate)
+        try imageData(type: .jpeg).write(to: third)
+
+        var duplicateIDs: [String] = []
+        workspace.resolveDuplicateImport = { item in duplicateIDs.append(item.id); return .cancel }
+        workspace.importURLs([second, invalid, duplicate, third])
+        await model.importQueue.waitUntilIdle()
+        let importedSecond = try XCTUnwrap(model.diagrams.first { $0.originalFilename == "second.png" })
+        let importedThird = try XCTUnwrap(model.diagrams.first { $0.originalFilename == "third.jpeg" })
+        XCTAssertEqual(duplicateIDs, [importedSecond.id])
+        XCTAssertEqual(model.diagrams.count, 3)
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
+        XCTAssertEqual(model.diagramQueuePosition(for: importedSecond.id), 1)
+        XCTAssertEqual(model.diagramQueuePosition(for: importedThird.id), 2)
+        XCTAssertEqual(model.diagramGroups.groupID(for: importedSecond.id), batchGroup)
+        XCTAssertEqual(model.diagramGroups.groupID(for: importedThird.id), batchGroup)
+
+        await model.changeDiagramGroups { try $0.setExpanded(originalGroup, false) }
+        workspace.search.query = "third"
+        await workspace.search.waitUntilIdle()
+        workspace.resolveDuplicateImport = { item in duplicateIDs.append(item.id); return .openExisting }
+        workspace.importURLs([first])
+        await model.importQueue.waitUntilIdle()
+        XCTAssertEqual(workspace.selection, original.id)
+        XCTAssertEqual(workspace.sidebarRevealID, original.id)
+        XCTAssertTrue(workspace.sidebarDiagramOrder.contains(original.id))
+        XCTAssertEqual(model.diagramGroups.groupID(for: original.id), originalGroup)
+        XCTAssertEqual(model.diagrams.count, 3)
+        XCTAssertNil(model.diagramQueuePosition(for: original.id))
+
+        workspace.resolveDuplicateImport = { item in duplicateIDs.append(item.id); return .importAgain }
+        workspace.importURLs([first])
+        await model.importQueue.waitUntilIdle()
+        let retry = try XCTUnwrap(model.diagrams.first { $0.originalFilename == "first.png" && $0.id != original.id })
+        XCTAssertEqual(duplicateIDs, [importedSecond.id, original.id, original.id])
+        XCTAssertEqual(model.diagramGroups.groupID(for: retry.id), batchGroup)
+        XCTAssertEqual(retry.sha256, original.sha256)
+        XCTAssertEqual(model.diagramQueuePosition(for: retry.id), 3)
+        let archive = try XCTUnwrap(model.diagramRepository)
+        for item in model.diagrams {
+            XCTAssertEqual(try Disk.hash(archive.originalURL(item)), item.sha256)
+        }
+
+        try Data().write(to: release)
+        try await waitUntil { model.diagrams.allSatisfy { $0.state == .completed } }
+        XCTAssertEqual(try events(root).map(\.jobId), [original.id, importedSecond.id, importedThird.id, retry.id])
+        await model.shutdown()
+    }
+
+    func testDroppedBatchKeepsDeletedDestinationThroughDelayedProvidersAndDuplicateRetry() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (_, model, _) = try fixture(root, installDiagram: false)
+        let workspace = DiagramWorkspaceModel(model: model)
+        await model.changeDiagramGroups { try $0.create(name: "Удаляемая") }
+        let destination = model.diagramGroups.defaultID
+        let first = root.appendingPathComponent("first.png")
+        let duplicate = root.appendingPathComponent("duplicate.png")
+        let data = try imageData()
+        try data.write(to: first)
+        try data.write(to: duplicate)
+        let callbacks = Mutex<[Int: @Sendable (URL) -> Void]>([:])
+        let providers = [0, 1].map { index in
+            let provider = NSItemProvider()
+            provider.registerObject(ofClass: NSURL.self, visibility: .all) { completion in
+                callbacks.withLock { $0[index] = { completion($0 as NSURL, nil) } }
+                return Progress(totalUnitCount: 1)
+            }
+            return provider
+        }
+        var duplicateID: String?
+        workspace.resolveDuplicateImport = { duplicateID = $0.id; return .importAgain }
+
+        XCTAssertTrue(workspace.importProviders(providers))
+        try await waitUntil { callbacks.withLock { $0.count == 2 } }
+        // Even if Finder's second provider responds first, the first file owns
+        // the queue slot and the duplicate is checked only after it publishes.
+        callbacks.withLock { $0.removeValue(forKey: 1) }?(duplicate)
+        await model.deleteDiagramGroup(destination, deleteDiagrams: false)
+        await model.changeDiagramGroups { try $0.create(name: "Новая по умолчанию") }
+        XCTAssertNotEqual(model.diagramGroups.defaultID, destination)
+        XCTAssertTrue(model.diagrams.isEmpty)
+        callbacks.withLock { $0.removeValue(forKey: 0) }?(first)
+        await model.importQueue.waitUntilIdle()
+
+        let importedFirst = try XCTUnwrap(model.diagrams.first { $0.originalFilename == "first.png" })
+        XCTAssertEqual(duplicateID, importedFirst.id)
+        XCTAssertEqual(model.diagrams.count, 2)
+        for item in model.diagrams {
+            XCTAssertEqual(model.diagramGroups.groupID(for: item.id), RecordingGroup.ungroupedID)
+            XCTAssertEqual(item.state, .waitingForModels)
+            XCTAssertNil(model.diagramQueuePosition(for: item.id))
+        }
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
+    }
+
     func testImportQueuesAndCompletesDiagramWithValidatedResult() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (repo, model, release) = try fixture(root)
         let workspace = DiagramWorkspaceModel(model: model)
         let diagram = try await importPNG(model)
-        try await waitUntil { model.diagram(diagram.id)?.state == .queued }
-        XCTAssertEqual(model.diagramQueuePosition(for: diagram.id), 1)
+        try await waitUntil { model.diagram(diagram.id)?.state == .recognizing }
         // Keep the diagram open while recognition completes, as in the UI.
         workspace.selection = diagram.id
         XCTAssertNil(workspace.result)
@@ -177,18 +300,25 @@ final class DiagramWorkspaceTests: XCTestCase {
         await model.shutdown()
     }
 
-    func testSameUUIDInBothArchivesAndMixedFIFOOrder() async throws {
+    func testPromotingDiagramPreservesMixedFIFOWithMatchingUUIDAndActiveWorker() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let (repo, model, release) = try fixture(root)
         // A recording whose UUID matches a manually created diagram item.
-        var recording = try completedRecording(repo, title: "Recording X")
+        let recording = try completedRecording(repo, title: "Recording X")
+        let otherRecording = try completedRecording(repo, title: "Recording Y")
+        let active = try await importPNG(model)
+        try await waitUntil { model.status == "diagram-ready-" + active.id }
+        await model.reload()
+        await model.enqueue(recording.id)
+        let otherDiagram = try await importPNG(model)
+        await model.enqueue(otherRecording.id)
         let diagramRepository = try XCTUnwrap(model.diagramRepository)
         var diagram = DiagramManifest(title: "Diagram X", filename: "x.png", ext: "png", uti: "public.png")
         diagram.id = recording.id
         let folder = diagramRepository.folder(diagram.id)
         try Disk.directory(folder)
-        let data = try pngData()
+        let data = try imageData()
         try data.write(to: folder.appendingPathComponent("original.png"))
         diagram.byteSize = Int64(data.count)
         diagram.pixelWidth = 4; diagram.pixelHeight = 4
@@ -197,20 +327,95 @@ final class DiagramWorkspaceTests: XCTestCase {
         let profile = try XCTUnwrap(model.diagramProfile)
         _ = try await model.diagramArchive?.beginRun(diagram.id, profile: profile)
         await model.reloadDiagrams()
-        // The diagram is enqueued first; the recording follows in the same FIFO.
         await model.enqueueDiagram(diagram.id)
-        let loaded = try await model.archive?.load(recording.id)
-        recording = try XCTUnwrap(loaded)
-        await model.enqueue(recording.id)
+        XCTAssertEqual(model.queuePosition(for: recording.id), 1)
+        XCTAssertEqual(model.diagramQueuePosition(for: otherDiagram.id), 2)
+        XCTAssertEqual(model.queuePosition(for: otherRecording.id), 3)
+        XCTAssertEqual(model.diagramQueuePosition(for: diagram.id), 4)
+
+        model.moveToFrontOfQueue(.diagram(diagram.id))
+        model.moveToFrontOfQueue(.diagram(active.id))
+        XCTAssertEqual(model.diagramQueuePosition(for: diagram.id), 1)
+        XCTAssertEqual(model.queuePosition(for: recording.id), 2)
+        XCTAssertEqual(model.diagramQueuePosition(for: otherDiagram.id), 3)
+        XCTAssertEqual(model.queuePosition(for: otherRecording.id), 4)
+        XCTAssertNil(model.diagramQueuePosition(for: active.id))
+        XCTAssertEqual(model.diagram(active.id)?.state, .recognizing)
+        XCTAssertEqual(try events(root).map(\.jobId), [active.id])
+
         try Data().write(to: release)
         try await waitUntil { model.diagram(diagram.id)?.state == .completed }
-        try await waitUntil { (try? repo.load(recording.id).state) == .completed }
+        try await waitUntil { (try? repo.load(otherRecording.id).state) == .completed }
         let commands = try events(root)
-        XCTAssertEqual(commands.map { $0.isDiagram ? "diagram" : "recording" }, ["diagram", "recording", "recording"])
-        XCTAssertEqual(commands.filter { !$0.isDiagram }.map { $0.stage }, [.preparingAudio, .summarizing])
+        XCTAssertEqual(commands.map { $0.isDiagram ? QueueJobID.diagram($0.jobId) : .recording($0.jobId) }, [
+            .diagram(active.id), .diagram(diagram.id), .recording(recording.id), .recording(recording.id),
+            .diagram(otherDiagram.id), .recording(otherRecording.id), .recording(otherRecording.id),
+        ])
+        XCTAssertEqual(model.diagram(active.id)?.state, .completed)
         // Cancelling the recording UUID never touches the diagram and vice versa.
         await model.cancel(recording.id)
         XCTAssertEqual(model.diagram(diagram.id)?.state, .completed)
+        await model.shutdown()
+    }
+
+    func testWarningsTabFallsBackAndFrozenExportSurvivesSelectionAndRerun() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (_, model, release) = try fixture(root)
+        let archive = try XCTUnwrap(model.diagramArchive)
+        let workspace = DiagramWorkspaceModel(model: model)
+        let warningFile = root.appendingPathComponent("diagram-warning")
+        try "Первое предупреждение".write(to: warningFile, atomically: true, encoding: .utf8)
+        try Data().write(to: release)
+        let first = try await importPNG(model)
+        try await waitUntil { model.diagram(first.id)?.state == .completedWithWarnings }
+        let firstRun = try XCTUnwrap(model.diagram(first.id)?.activeRunId)
+        XCTAssertEqual(model.diagram(first.id)?.warnings, ["Первое предупреждение"])
+        try FileManager.default.removeItem(at: warningFile)
+        let second = try await importPNG(model)
+        try await waitUntil { model.diagram(second.id)?.state == .completed }
+        try await archive.rename(first.id, title: "Первая/схема")
+        await model.reloadDiagrams()
+        workspace.selection = first.id
+        try await waitUntil { workspace.result != nil }
+        workspace.selectResultTab(.warnings)
+        XCTAssertEqual(workspace.resultTabs, [.nodes, .edges, .warnings])
+        XCTAssertEqual(workspace.resultTab, .warnings)
+        let frozen = try XCTUnwrap(workspace.exportRequest(part: workspace.resultTab, format: .markdown))
+        let frozenAll = try XCTUnwrap(workspace.exportRequest(part: .all, format: .plainText))
+
+        workspace.selection = second.id
+        XCTAssertEqual(workspace.resultTab, .nodes)
+        try await waitUntil { workspace.result != nil }
+        workspace.selectResultTab(.edges)
+        workspace.selection = first.id
+        XCTAssertEqual(workspace.resultTab, .edges)
+        workspace.selectResultTab(.warnings)
+
+        let hold = root.appendingPathComponent("hold-" + first.id)
+        try Data().write(to: hold)
+        try "Обновлённый узел".write(to: root.appendingPathComponent("diagram-label"), atomically: true, encoding: .utf8)
+        await model.recognizeDiagram(first.id)
+        try await waitUntil { model.status == "diagram-ready-" + first.id }
+        XCTAssertEqual(model.diagram(first.id)?.activeRunId, firstRun)
+        XCTAssertEqual(model.diagram(first.id)?.warnings, ["Первое предупреждение"])
+        XCTAssertEqual(workspace.resultTab, .warnings)
+        try FileManager.default.removeItem(at: hold)
+        try await waitUntil { model.diagram(first.id)?.state == .completed && model.diagram(first.id)?.activeRunId != firstRun }
+        try await waitUntil { workspace.result?.nodes.last?.label == "Обновлённый узел" }
+        XCTAssertEqual(workspace.resultTab, .nodes)
+        XCTAssertNil(workspace.exportRequest(part: .warnings, format: .markdown))
+
+        XCTAssertEqual(frozen.diagram.id, first.id)
+        XCTAssertEqual(frozen.filename, "Первая-схема.md")
+        let output = root.appendingPathComponent(frozen.filename)
+        await workspace.saveExport(frozen, to: output).value
+        let exported = try String(contentsOf: output, encoding: .utf8)
+        XCTAssertEqual(exported, "# Первая/схема\n\n## Предупреждения\n\n- Первое предупреждение\n")
+        let allText = await frozenAll.render()
+        XCTAssertTrue(allText.contains("Проверка"))
+        XCTAssertTrue(allText.contains("Первое предупреждение"))
+        XCTAssertFalse(allText.contains("Обновлённый узел"))
         await model.shutdown()
     }
 

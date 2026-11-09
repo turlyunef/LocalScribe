@@ -183,6 +183,40 @@ final class ImportQueueTests: XCTestCase {
         XCTAssertTrue(model.errorHandler.messages.isEmpty)
     }
 
+    func testCancellingDiagramDropCancelsStartedProvidersWaitingForQueueSlot() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults())
+        let workspace = DiagramWorkspaceModel(model: model)
+        let callback = Mutex<(@Sendable (URL) -> Void)?>(nil)
+        let progress = Progress(totalUnitCount: 1)
+        let cancelled = Mutex(false)
+        progress.cancellationHandler = { cancelled.withLock { $0 = true } }
+        let provider = NSItemProvider()
+        provider.registerObject(ofClass: NSURL.self, visibility: .all) { completion in
+            callback.withLock { $0 = { completion($0 as NSURL, nil) } }
+            return progress
+        }
+        var release: CheckedContinuation<Void, Never>?
+        try model.importQueue.enqueue {
+            await withCheckedContinuation { release = $0 }
+        }
+        try await waitUntil { release != nil }
+        XCTAssertTrue(workspace.importProviders([provider]))
+        try await waitUntil { callback.withLock { $0 != nil } }
+
+        model.importQueue.cancel()
+        release?.resume()
+        await model.importQueue.waitUntilIdle()
+        try await waitUntil { cancelled.withLock { $0 } }
+        callback.withLock { $0 }?(root.appendingPathComponent("late.png"))
+        await model.importQueue.waitUntilIdle()
+        XCTAssertTrue(model.diagrams.isEmpty)
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
+    }
+
     func testCancelAndShutdownReapActiveProbeAndDiscardPendingImports() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

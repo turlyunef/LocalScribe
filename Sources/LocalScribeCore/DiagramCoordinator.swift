@@ -86,13 +86,11 @@ public actor DiagramCoordinator {
     /// Import transaction: verified copy, then the group reservation hook
     /// (a vanished destination resolves to «Без темы», never to a new default),
     /// then the manifest publication.
-    @discardableResult public func importImage(_ source: URL, groupID: String = RecordingGroup.ungroupedID) throws -> DiagramManifest {
+    @discardableResult public func importImage(_ source: URL, groupID: String = RecordingGroup.ungroupedID,
+                                               allowDuplicate: Bool = false) throws -> DiagramManifest {
         try Task.checkCancellation()
-        guard groupDeletion?.id != groupID else {
-            throw ScribeError.message("Группа схем удаляется. Повторите импорт после удаления.")
-        }
-        initialize()
-        let manifest = try repository.importImage(at: source) { manifest in
+        try requireGroups()
+        let manifest = try repository.importImage(at: source, existingDiagrams: allowDuplicate ? nil : manifests) { manifest in
             try reserveDestination(manifest.id, groupID: groupID)
         }
         publish(manifest)
@@ -295,7 +293,8 @@ public actor DiagramCoordinator {
     /// provider was loading resolves to the system group, never to a new default.
     private func reserveDestination(_ diagramID: String, groupID: String) throws {
         try requireGroups()
-        let target = groups.groups.contains { $0.id == groupID } ? groupID : RecordingGroup.ungroupedID
+        let available = groupDeletion?.id != groupID && groups.groups.contains { $0.id == groupID }
+        let target = available ? groupID : RecordingGroup.ungroupedID
         var next = groups
         try next.assign(diagramID, to: target)
         if next != groups { try commitGroups(next) }

@@ -53,7 +53,7 @@ struct DiagramGroupsSidebar: View {
                     if !search.active {
                         DiagramGroupInsertionLine(workspace: workspace, before: group.id, draggedGroup: $draggedGroup)
                     }
-                    SidebarDropArea(of: [DiagramTransferTypes.diagram]) { targeted in
+                    SidebarDropArea(of: [DiagramTransferTypes.diagram, .fileURL]) { targeted in
                         DiagramGroupDrop(workspace: workspace, groupID: group.id, draggedDiagram: draggedDiagram, targeted: targeted)
                     } content: { targeted in
                         if let draft = editor, draft.groupID == group.id {
@@ -119,9 +119,6 @@ struct DiagramGroupsSidebar: View {
         }
         .sheet(item: $deletingGroup) { group in
             DeleteDiagramGroupView(workspace: workspace, model: model, group: group) { deletingGroup = nil }
-        }
-        .sheet(item: $deletingDiagrams) { deletion in
-            DeleteDiagramsView(workspace: workspace, ids: deletion.ids) { deletingDiagrams = nil }
         }
         .sheet(item: $renaming) { diagram in
             RenameDiagramView(workspace: workspace, diagram: diagram) { renaming = nil }
@@ -266,22 +263,27 @@ private struct DiagramGroupHeader: View {
     let draggedDiagram: String?
     @Binding var targeted: Bool
     func validateDrop(info: DropInfo) -> Bool {
-        guard info.hasItemsConforming(to: [DiagramTransferTypes.diagram]) else { return false }
-        return draggedDiagram.map { workspace.model.diagramGroups.groupID(for: $0) != groupID } ?? true
+        if info.hasItemsConforming(to: [DiagramTransferTypes.diagram]) {
+            return draggedDiagram.map { workspace.model.diagramGroups.groupID(for: $0) != groupID } ?? true
+        }
+        return info.hasItemsConforming(to: [.fileURL])
     }
     func dropEntered(info: DropInfo) { targeted = validateDrop(info: info) }
     func dropExited(info: DropInfo) { targeted = false }
     func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: validateDrop(info: info) ? .move : .forbidden)
+        guard validateDrop(info: info) else { return DropProposal(operation: .forbidden) }
+        return DropProposal(operation: info.hasItemsConforming(to: [DiagramTransferTypes.diagram]) ? .move : .copy)
     }
     func performDrop(info: DropInfo) -> Bool {
         targeted = false
-        guard validateDrop(info: info),
-              let provider = info.itemProviders(for: [DiagramTransferTypes.diagram]).first else { return false }
-        SidebarItemTransfer.load(provider, type: DiagramTransferTypes.diagram) { id in
-            Task { await workspace.model.moveDiagrams([id], to: groupID) }
+        guard validateDrop(info: info) else { return false }
+        if let provider = info.itemProviders(for: [DiagramTransferTypes.diagram]).first {
+            SidebarItemTransfer.load(provider, type: DiagramTransferTypes.diagram) { id in
+                Task { await workspace.model.moveDiagrams([id], to: groupID) }
+            }
+            return true
         }
-        return true
+        return workspace.importProviders(info.itemProviders(for: [.fileURL]), groupID: groupID)
     }
 }
 

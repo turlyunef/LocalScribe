@@ -4,6 +4,10 @@ import Foundation
 import ImageIO
 import UniformTypeIdentifiers
 
+public struct DuplicateDiagram: Error {
+    public let id: String
+}
+
 /// File storage of the diagram archive — a sibling branch next to the audio
 /// archive with its own root, items and groups catalog. Transactions, snapshots
 /// and revisions belong to DiagramCoordinator; this structure only reads and
@@ -124,6 +128,7 @@ public struct DiagramRepository: Sendable {
     }
 
     public func importImage(at source: URL,
+                            existingDiagrams: [DiagramManifest]? = nil,
                             beforePublish: (DiagramManifest) throws -> Void = { _ in }) throws -> DiagramManifest {
         try Task.checkCancellation()
         let fm = FileManager.default
@@ -133,10 +138,13 @@ public struct DiagramRepository: Sendable {
         guard input.size <= Self.maxBytes else {
             throw ScribeError.message("Изображение больше 30 МБ. Уменьшите файл и повторите импорт.")
         }
-        try Disk.requireSpace(input.size * 2 + 50_000_000, at: root)
         // Hash the pinned bytes before any copying; a later path change cannot alter them.
         let digest = try input.hash()
         try Task.checkCancellation()
+        if let duplicate = existingDiagrams?.first(where: { $0.sha256 == digest }) {
+            throw DuplicateDiagram(id: duplicate.id)
+        }
+        try Disk.requireSpace(input.size * 2 + 50_000_000, at: root)
         let id = UUID().uuidString
         let itemFolder = folder(id)
         var published = false

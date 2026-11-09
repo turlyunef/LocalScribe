@@ -403,6 +403,54 @@ final class WorkspaceKeyboardTests: XCTestCase {
         await model.shutdown()
     }
 
+    func testDiagramCardDeletionWithMultipleSelectedDeletesOnlyOpenDiagram() async throws {
+        let (model, _) = try await fixture()
+        let archive = try XCTUnwrap(model.diagramArchive)
+        let diagrams = ["Architecture", "Flow"].map { title in
+            DiagramManifest(title: title, filename: "\(title).png", ext: "png", uti: "public.png")
+        }
+        for diagram in diagrams { try await archive.save(diagram) }
+        await model.reloadDiagrams()
+        let window = host(model)
+        defer { window.close() }
+        try await settle(window)
+        try mode("Схемы", in: window)
+        try await settle(window)
+        try clickDiagram(diagrams[0], in: window)
+        try await settle(window)
+        try clickDiagram(diagrams[1], modifiers: .command, in: window)
+        try await settle(window)
+
+        // The keyboard opens the bulk confirmation for the same selection.
+        try commandDelete(window)
+        try await settle(window)
+        let bulkSheet = try XCTUnwrap(window.attachedSheet)
+        let bulkContent = try XCTUnwrap(bulkSheet.contentView)
+        XCTAssertTrue(descendants(bulkContent).contains { element in
+            guard let object = element as? NSObject else { return false }
+            return ["accessibilityLabel", "accessibilityTitle", "accessibilityValue"].contains { name in
+                let selector = NSSelectorFromString(name)
+                guard object.responds(to: selector) else { return false }
+                let value = object.perform(selector)?.takeUnretainedValue()
+                let string = (value as? String) ?? (value as? NSAttributedString)?.string
+                return string == "Удалить выбранные схемы (2)?"
+            }
+        })
+        try escape(bulkSheet)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        try press("diagrams.detail.delete", in: window)
+        try await settle(window)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        XCTAssertNotNil(element("diagrams.sidebar.confirmDelete", in: sheet.contentView))
+        try enter(sheet)
+        for _ in 0..<20 where model.diagram(diagrams[1].id) != nil {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        XCTAssertEqual(model.diagrams.map(\.id), [diagrams[0].id])
+        await model.shutdown()
+    }
+
     func testBothNewRecordingButtonsShowSameSheetAndShareAvailability() async throws {
         let (model, rows) = try await fixture()
         let window = host(model)

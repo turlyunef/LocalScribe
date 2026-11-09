@@ -62,6 +62,33 @@ final class DiagramExportTests: XCTestCase {
         XCTAssertTrue(text.contains("- Один"))
     }
 
+    func testMarkdownAndPlainTextExportEachSectionAndAllWithWarnings() {
+        let diagram = result(
+            nodes: [DiagramNode(id: "a", label: "Узел *A*"), DiagramNode(id: "b", label: "Узел B")],
+            edges: [DiagramEdge(from: "a", to: "b", direction: .forward, label: "Обмен", uncertain: true)]
+        )
+        let sections = DiagramExportPart.sections(includingWarnings: true)
+        let warnings = ["Сверьте [стрелку]\nс оригиналом"]
+        for markdown in [false, true] {
+            func render(_ part: DiagramExportPart, warnings: [String]) -> String {
+                if markdown { return DiagramExport.markdown(diagram, title: "Схема", warnings: warnings, part: part) }
+                return DiagramExport.plainText(diagram, title: "Схема", warnings: warnings, part: part)
+            }
+            for part in sections + [.all] {
+                let rendered = render(part, warnings: warnings)
+                let included = sections.filter { part == .all || $0 == part }
+                XCTAssertEqual(rendered.split(separator: "\n").map(String.init).filter { line in
+                    sections.contains { line == (markdown ? "## " : "") + $0.rawValue }
+                }, included.map { (markdown ? "## " : "") + $0.rawValue })
+                XCTAssertEqual(rendered.contains(markdown ? "- Узел \\*A\\*\n" : "- Узел *A*\n"), included.contains(.nodes))
+                XCTAssertEqual(rendered.contains("(Обмен) ⚠ не подтверждена"), included.contains(.edges))
+                let warning = markdown ? "- Сверьте \\[стрелку\\] с оригиналом" : "- Сверьте [стрелку] с оригиналом"
+                XCTAssertEqual(rendered.components(separatedBy: warning).count - 1, included.contains(.warnings) ? 1 : 0)
+            }
+            XCTAssertFalse(render(.all, warnings: []).contains("Предупреждения"))
+        }
+    }
+
     func testMarkdownEscapesUntrustedTextWithoutNewLines() {
         let nasty = "звёздочка * решётка # [скобки] <угол> `код` _подчёрк_ \nвторая строка"
         let text = DiagramExport.markdown(result(nodes: [DiagramNode(id: "a", label: nasty)], edges: []),

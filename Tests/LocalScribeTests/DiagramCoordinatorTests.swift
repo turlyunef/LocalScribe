@@ -77,7 +77,7 @@ final class DiagramCoordinatorTests: XCTestCase {
         XCTAssertEqual(catalog.groupID(for: manifest.id), RecordingGroup.ungroupedID)
         XCTAssertTrue(FileManager.default.fileExists(atPath: repo.originalURL(manifest).path))
         // A destination that no longer exists resolves to the system group.
-        let second = try await archive.importImage(try pngSource(), groupID: group.id)
+        let second = try await archive.importImage(source, groupID: group.id, allowDuplicate: true)
         XCTAssertEqual(try RecordingGroups.loadCatalog(at: repo.groupsURL).groupID(for: second.id), RecordingGroup.ungroupedID)
     }
 
@@ -114,11 +114,12 @@ final class DiagramCoordinatorTests: XCTestCase {
         XCTAssertEqual(prepared, Set(members))
         do { try await archive.moveDiagrams([outside.id], to: group.id); XCTFail("Move into frozen group") } catch {}
         do { try await archive.moveDiagrams([members[0]], to: RecordingGroup.ungroupedID); XCTFail("Move out of frozen group") } catch {}
-        do { _ = try await archive.importImage(source, groupID: group.id); XCTFail("Import into frozen group") } catch {}
+        let imported = try await archive.importImage(source, groupID: group.id)
         do { try await archive.finishGroupDeletion(group.id); XCTFail("Expected deletion failure") } catch {}
 
         let partial = await archive.snapshot()
-        XCTAssertEqual(Set(partial.manifests.map(\.id)), [members[1], outside.id])
+        XCTAssertEqual(Set(partial.manifests.map(\.id)), [members[1], outside.id, imported.id])
+        XCTAssertEqual(partial.groups.groupID(for: imported.id), RecordingGroup.ungroupedID)
         XCTAssertEqual(partial.groups.groupID(for: members[1]), group.id)
         XCTAssertEqual(partial.groups.defaultID, group.id)
         XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(members[0]).path))
@@ -127,7 +128,7 @@ final class DiagramCoordinatorTests: XCTestCase {
         _ = try await archive.prepareGroupDeletion(group.id)
         try await archive.finishGroupDeletion(group.id)
         let final = await archive.snapshot()
-        XCTAssertEqual(final.manifests.map(\.id), [outside.id])
+        XCTAssertEqual(Set(final.manifests.map(\.id)), [outside.id, imported.id])
         XCTAssertEqual(final.groups.groups.map(\.id), [RecordingGroup.ungroupedID])
         XCTAssertTrue(final.groups.membership.isEmpty)
         XCTAssertEqual(try RecordingGroups.loadCatalog(at: repo.groupsURL), final.groups)
@@ -140,7 +141,7 @@ final class DiagramCoordinatorTests: XCTestCase {
         let group = try await create(archive, "Проекты")
         let source = try pngSource()
         let healthy = try await archive.importImage(source, groupID: group.id)
-        let damaged = try await archive.importImage(source, groupID: group.id)
+        let damaged = try await archive.importImage(source, groupID: group.id, allowDuplicate: true)
         try FileManager.default.removeItem(at: repo.folder(damaged.id).appendingPathComponent("manifest.json"))
 
         _ = try await archive.prepareGroupDeletion(group.id)
