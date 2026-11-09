@@ -2023,14 +2023,13 @@
       "license": "MIT",
       "name": "VibeVoice-ASR · 4-bit · экспериментальный",
       "asrBackend": "vibevoice-asr",
-      "asrPolicy": "vibevoice-longform-300s-greedy8192-speakerkit-v1",
+      "asrPolicy": "vibevoice-core60s-context5s-greedy8192-speakerkit-v2",
       "tokenizerID": "tokenizer-vibevoice",
       "recommendedMemoryGB": 32,
       "workingMemoryGB": 20,
-      "maximumRecordingMs": 300000,
       "experimental": true,
       "recommendationRank": 0,
-      "profileDescription": "Готовые записи до 5 минут на Mac от 32 ГБ RAM. Только таймкоды сегментов; участники определяются SpeakerKit. Качество на встречах ещё не принято."
+      "profileDescription": "Готовые записи до 3 часов на совместимом Mac от 32 ГБ RAM. Только таймкоды сегментов; участники определяются SpeakerKit. Качество на встречах ещё не принято."
     },
     {
       "id": "diagram-qwen3-vl-4b",

@@ -72,11 +72,13 @@ struct ASREngineFactory: Sendable {
 
 /// Both native adapters consume only the normalized pipeline audio contract.
 enum ASRAudioInput {
-    static func requireFormat(_ url: URL) throws {
+    @discardableResult
+    static func requireFormat(_ url: URL) throws -> AVAudioFramePosition {
         let audio = try AVAudioFile(forReading: url)
         guard audio.processingFormat.sampleRate == 16000, audio.processingFormat.channelCount == 1 else {
             throw ScribeError.message("Распознавание требует нормализованный mono PCM 16 кГц")
         }
+        return audio.length
     }
 }
 

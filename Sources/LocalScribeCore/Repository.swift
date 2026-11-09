@@ -59,6 +59,7 @@ public struct RecordingRepository: Sendable {
                            verifyAudio: ((URL) throws -> AudioInfo)? = nil,
                            beforePublish: (Manifest) throws -> Void = { _ in }) throws -> Manifest {
         try Task.checkCancellation()
+        try Media.requireSupportedDuration(info.duration)
         let fm = FileManager.default
         let input = try ImportSource(source)
         defer { input.close() }
@@ -79,6 +80,7 @@ public struct RecordingRepository: Sendable {
         // Only metadata measured from our verified independent copy is authoritative.
         let info = try verifyAudio?(original) ?? info
         try Task.checkCancellation()
+        try Media.requireSupportedDuration(info.duration)
         try Disk.requireSpace(Int64(info.duration * 32_000) + 500_000_000, at: root)
         manifest.sha256 = digest; manifest.durationMs = Int((info.duration * 1000).rounded()); manifest.sampleRate = info.sampleRate; manifest.channels = info.channels; manifest.sourceComplete = true; manifest.state = .queued
         try beforePublish(manifest)
@@ -87,10 +89,8 @@ public struct RecordingRepository: Sendable {
         return manifest
     }
     public func beginRun(_ manifest: inout Manifest, catalog: ModelCatalog, summaryLanguage: String? = nil, summaryOnly: Bool = false, liveCapture: Bool = false) throws -> RunInfo {
-        if !summaryOnly, manifest.sourceComplete,
-           let maximum = catalog.models.first(where: { $0.purpose == .asr })?.maximumRecordingMs,
-           manifest.durationMs > maximum {
-            throw ScribeError.message("Выбранный профиль поддерживает записи до \(maximum / 60_000) минут. Запись не обрезана; выберите другой профиль.")
+        if manifest.sourceComplete, manifest.durationMs > Manifest.maximumDurationMs {
+            throw ScribeError.message("Запись длиннее 3 часов. Автоматическое усечение отключено.")
         }
         if liveCapture {
             guard catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments != false else {
@@ -157,11 +157,12 @@ public struct RecordingRepository: Sendable {
             do { info = try Disk.read(RunInfo.self, at: run(id, pending).appendingPathComponent("run.json")) }
             catch { throw ScribeError.message("Не удалось прочитать незавершённое задание") }
             guard info.schemaVersion == 1, info.id == pending else { throw ScribeError.message("Некорректное незавершённое задание") }
-            guard info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else {
+            guard info.pipelineVersion == RunInfo.currentPipelineVersion else {
                 throw ScribeError.message("Версия обработки изменилась; контрольные точки этого задания несовместимы")
             }
             let livePending = info.liveCapture == true && info.sourceHash == "capture:" + info.id
-            guard livePending || manifest.sourceComplete && info.sourceHash == manifest.sha256 else {
+            guard livePending || manifest.sourceComplete && info.sourceHash == manifest.sha256
+                    && (1...Manifest.maximumDurationMs).contains(manifest.durationMs) else {
                 throw ScribeError.message("Исходник не совпадает с незавершённым заданием")
             }
             try catalog.pinned(to: info).validate(at: models)

@@ -13,7 +13,7 @@ extension RecordingRepository {
 
     private func validatedResults(_ manifest: Manifest) throws -> (Transcript?, Summary?) {
         guard manifest.schemaVersion == 1, UUID(uuidString: manifest.id) != nil,
-              (0...10_800_000).contains(manifest.durationMs) else { throw invalidResult() }
+              (0...Manifest.maximumDurationMs).contains(manifest.durationMs) else { throw invalidResult() }
         guard let selected = manifest.activeRunId ?? manifest.pendingRunId else { return (nil, nil) }
         // Check before constructing a path from the persisted identifier.
         guard UUID(uuidString: selected) != nil else { throw invalidResult() }
@@ -46,12 +46,13 @@ extension RecordingRepository {
         } else if live {
             transcript = try livePreview(path: path, info: info)
         } else {
+            let partMs = ASRCheckpointLayout.offlinePartMs
             let parts = try checkpointURLs(path.appendingPathComponent("asr")).map { url in
                 let part = try Disk.read(ASRPart.self, at: url)
                 // Bound the index and duration before either multiplication/addition.
                 guard part.schemaVersion == 1, part.fingerprint == info.fingerprint,
-                      part.index >= 0, part.index <= (manifest.durationMs - 1) / 300_000 else { throw invalidResult() }
-                let start = part.index * 300_000, end = min(manifest.durationMs, start + 300_000)
+                      part.index >= 0, part.index <= (manifest.durationMs - 1) / partMs else { throw invalidResult() }
+                let start = part.index * partMs, end = min(manifest.durationMs, start + partMs)
                 guard part.startMs == start, part.endMs == end else { throw invalidResult() }
                 try Transcript(fingerprint: info.fingerprint, diarized: false, segments: part.segments).validate(durationMs: manifest.durationMs)
                 return part

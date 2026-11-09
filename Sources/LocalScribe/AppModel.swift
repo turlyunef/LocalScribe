@@ -1011,7 +1011,10 @@ struct QueueJobID: Hashable, Sendable {
         case .preparingAudio:
             guard let checkpoint = try? Disk.read([String:String].self, at: run.appendingPathComponent("prepared.json")), checkpoint["fingerprint"] == info.fingerprint,
                   let file = try? AVAudioFile(forReading: run.appendingPathComponent("work/audio.wav")) else { return false }
-            return file.processingFormat.sampleRate == 16000 && file.processingFormat.channelCount == 1 && abs(Double(file.length)/16 - Double(manifest.durationMs)) < 150
+            let frames = file.length
+            return file.processingFormat.sampleRate == 16000 && file.processingFormat.channelCount == 1 && frames > 0
+                && abs(Double(frames) / 16 - Double(manifest.durationMs)) < 150
+                && (checkpoint["pcmFrames"].map { Int64($0) == frames } ?? true)
         case .transcribing, .diarizing:
             let name = stage == .transcribing ? "asr-transcript.json" : "transcript.json"
             guard let t = try? Disk.read(Transcript.self, at: run.appendingPathComponent(name)), t.fingerprint == info.fingerprint else { return false }

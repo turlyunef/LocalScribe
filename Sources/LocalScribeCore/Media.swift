@@ -6,6 +6,15 @@ public struct AudioInfo: Codable, Sendable {
     public var duration: Double; public var sampleRate: Double; public var channels: Int; public var codec: String
 }
 public enum Media {
+    static func requireSupportedDuration(_ duration: Double) throws {
+        let maximum = Double(Manifest.maximumDurationMs) / 1000
+        guard duration.isFinite, duration > 0, duration <= maximum else {
+            throw ScribeError.message(duration > maximum
+                ? "Запись длиннее 3 часов. Автоматическое усечение отключено."
+                : "Не удалось определить ненулевую длительность")
+        }
+    }
+
     public static func execute(_ executable: URL, _ arguments: [String], cancellable: Bool = false) throws -> Data {
         if cancellable { try Task.checkCancellation() }
         // Foundation Process creates a separate process group on macOS. By
@@ -120,7 +129,7 @@ public enum Media {
         } else {
             duration = Double((format?["duration"] as? String) ?? (audio["duration"] as? String) ?? "") ?? 0
         }
-        guard duration.isFinite, duration > 0, duration <= 10_800.0005 else { throw ScribeError.message(duration > 10_800 ? "Запись длиннее 3 часов. Автоматическое усечение отключено." : "Не удалось определить ненулевую длительность") }
+        try requireSupportedDuration(duration)
         return AudioInfo(duration: duration, sampleRate: Double(audio["sample_rate"] as? String ?? "") ?? 0, channels: audio["channels"] as? Int ?? 0, codec: codec)
     }
     private static func adtsDuration(_ source: URL, tools: URL, timeBase: String?, cancellable: Bool) throws -> Double {

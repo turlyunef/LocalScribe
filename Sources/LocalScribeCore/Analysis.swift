@@ -48,7 +48,9 @@ public enum Analysis {
                 let overlap = candidates.count > 1
                 let speaker = overlap ? nil : candidates.first.flatMap { remap[$0.key] }
                 let language = language(word.text, fallback: original.language)
-                if let last = output.last, last.speakerId == speaker, last.overlap == overlap,
+                // Segment-only ASR has no word times to extend a word-level group.
+                if let last = output.last, !original.words.isEmpty, !last.words.isEmpty,
+                   last.speakerId == speaker, last.overlap == overlap,
                    last.uncertain == original.uncertain, word.startMs - last.endMs < 1500, word.endMs - last.startMs < 20_000 {
                     output[output.count-1].text += word.text
                     output[output.count-1].endMs = max(last.endMs, word.endMs)

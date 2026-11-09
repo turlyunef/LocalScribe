@@ -197,6 +197,22 @@ final class CoreTests: XCTestCase {
         let mapped = Analysis.assignSpeakers(t, intervals: [VoiceInterval(startMs: 0, endMs: 1000, speakerId: "x"), VoiceInterval(startMs: 1000, endMs: 3000, speakerId: "y"), VoiceInterval(startMs: 2000, endMs: 3000, speakerId: "x")])
         XCTAssertEqual(mapped.segments.map(\.speakerId), ["speaker-1", "speaker-2", nil]); XCTAssertTrue(mapped.segments[2].overlap)
     }
+
+    func testSpeakerAssignmentPreservesAdjacentSegmentsWithoutWordTimings() {
+        let segments = [
+            Segment(id: "a", startMs: 299_000, endMs: 300_000, text: "Первая реплика.", language: "ru"),
+            Segment(id: "b", startMs: 300_000, endMs: 301_000, text: "Вторая реплика.", language: "ru")
+        ]
+        let transcript = Transcript(fingerprint: "f", diarized: false, segments: segments)
+        let interval = VoiceInterval(startMs: 299_000, endMs: 301_000, speakerId: "same")
+        let mapped = Analysis.assignSpeakers(transcript, intervals: [interval])
+        XCTAssertEqual(mapped.segments.map(\.speakerId), ["speaker-1", "speaker-1"])
+        XCTAssertEqual(mapped.segments.map(\.text), segments.map(\.text))
+        XCTAssertEqual(mapped.segments.map(\.startMs), segments.map(\.startMs))
+        XCTAssertEqual(mapped.segments.map(\.endMs), segments.map(\.endMs))
+        XCTAssertTrue(mapped.segments.allSatisfy { $0.words.isEmpty })
+    }
+
     func testRejectsInventedEvidenceAndOwner() throws {
         let t = Transcript(fingerprint: "f", diarized: true, segments: [Segment(id: "a", startMs: 0, endMs: 1000, speakerId: "speaker-1", text: "Я проверю завтра", language: "ru")])
         let f = Finding(id: "t", text: "Проверить", evidenceSegmentIds: ["missing"])

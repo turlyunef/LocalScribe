@@ -33,7 +33,6 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     public var asrPolicy: String?
     public var profileDescription: String?
     public var experimental: Bool?
-    public var maximumRecordingMs: Int?
     public var supportsClosedFragments: Bool { purpose == .asr && resolvedASRBackend == "whisper" }
     public var recommendationRank: Int?
     public var purpose: ModelRole? { role ?? ModelRole(rawValue: id) }

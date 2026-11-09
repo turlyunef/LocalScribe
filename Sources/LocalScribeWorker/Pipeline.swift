@@ -21,16 +21,19 @@ actor Pipeline {
         models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: toolsPath)
         manifest = try Disk.read(Manifest.self, at: recording.appendingPathComponent("manifest.json"))
         info = try Disk.read(RunInfo.self, at: run.appendingPathComponent("run.json"))
-        guard manifest.schemaVersion == 1, (0...10_800_000).contains(manifest.durationMs),
+        guard manifest.schemaVersion == 1, (0...Manifest.maximumDurationMs).contains(manifest.durationMs),
               info.schemaVersion == 1, UUID(uuidString: command.jobId) != nil,
               recording.lastPathComponent == command.jobId, command.jobId == manifest.id, command.runId == info.id else {
             throw ScribeError.message("Некорректное задание обработки")
+        }
+        if stage == .transcribing, info.pipelineVersion != RunInfo.currentPipelineVersion {
+            throw ScribeError.message("Версия обработки изменилась; контрольные точки этого задания несовместимы")
         }
         if command.liveCapture == true {
             let capture = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
             guard stage == .transcribing, info.liveCapture == true, info.sourceHash == "capture:" + info.id,
                   manifest.pendingRunId == info.id, capture.id == info.id, capture.fingerprint == info.fingerprint,
-                  capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs, info.pipelineVersion == RunInfo(sourceHash: "", profileHash: "").pipelineVersion else { throw ScribeError.message("Некорректное задание фонового распознавания") }
+                  capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs else { throw ScribeError.message("Некорректное задание фонового распознавания") }
         } else {
             guard info.sourceHash == manifest.sha256, manifest.sourceComplete, manifest.durationMs > 0,
                   try Disk.hash(recording.appendingPathComponent(manifest.originalRelativePath)) == info.sourceHash else { throw ScribeError.message("Исходник изменился или не завершён") }
@@ -48,31 +51,27 @@ actor Pipeline {
         }
     }
     private func performStage(asrMetrics: ASRMetricsRecorder?) async throws -> String {
+        let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
+        let pinned = try catalog.pinned(to: info)
         let role: ModelRole? = stage == .transcribing ? .asr : stage == .diarizing ? .diarization : stage == .summarizing ? .summary : nil
         if let role {
-            let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
-            let pinned = try catalog.pinned(to: info)
             guard let profile = pinned.models.first(where: { $0.purpose == role }) else { throw ScribeError.message("Модель этапа отсутствует") }
             try hardware.requireCompatibility(for: profile)
         }
-        if stage == .preparingAudio || stage == .transcribing {
-            let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
-            let pinned = try catalog.pinned(to: info)
-            if pinned.models.first(where: { $0.purpose == .asr })?.resolvedASRBackend == "vibevoice-asr" {
-                guard command.liveCapture != true else { throw ScribeError.message("VibeVoice поддерживает только готовые записи") }
-                try VibeVoiceASREngine.requireDuration(manifest.durationMs)
-            }
-        }
         if command.liveCapture == true {
+            guard pinned.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {
+                throw ScribeError.message("Выбранная модель поддерживает только обработку готовой записи")
+            }
             return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit, metrics: asrMetrics, engineFactory: engineFactory).perform()
         }
         switch stage {
         case .preparingAudio:
             try Disk.requireSpace(Int64(manifest.durationMs) * 32 + 500_000_000, at: run)
             if let warning = try Media.prepare(recording.appendingPathComponent(manifest.originalRelativePath), to: wave, tools: tools) { emit("warning", warning, nil) }
-            try Disk.write(["fingerprint": info.fingerprint], to: run.appendingPathComponent("prepared.json"))
+            let frames = try ASRAudioInput.requireFormat(wave)
+            try Disk.write(["fingerprint": info.fingerprint, "pcmFrames": String(frames)], to: run.appendingPathComponent("prepared.json"))
             return "prepared.json"
-        case .transcribing: return try await transcribe(metrics: asrMetrics)
+        case .transcribing: return try await transcribe(catalog: catalog, metrics: asrMetrics)
         case .diarizing: return try await diarize()
         case .summarizing:
             let transcript = try summaryTranscript()
@@ -91,31 +90,55 @@ actor Pipeline {
         try transcript.validate(durationMs: manifest.durationMs)
         return transcript
     }
-    func transcribe(metrics: ASRMetricsRecorder? = nil) async throws -> String {
-        let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
+    private func transcribe(catalog: ModelCatalog, metrics: ASRMetricsRecorder?) async throws -> String {
+        let availableEndMs = try preparedAudioEndMs()
         let recognizer = try await engineFactory.make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
         let partMs = ASRCheckpointLayout.offlinePartMs
-        let count = max(1, Int(ceil(Double(manifest.durationMs) / Double(partMs))))
+        let count = (manifest.durationMs - 1) / partMs + 1
         var parts: [ASRPart] = []
         for index in 0..<count {
+            try Task.checkCancellation()
             let coreStart = index * partMs, coreEnd = min(manifest.durationMs, (index + 1) * partMs)
             let path = run.appendingPathComponent("asr/part-\(index).json")
-            if let saved = try? Disk.read(ASRPart.self, at: path), saved.fingerprint == info.fingerprint, saved.index == index, saved.startMs == coreStart, saved.endMs == coreEnd {
+            if let saved = try? Disk.read(ASRPart.self, at: path), saved.schemaVersion == 1,
+               saved.fingerprint == info.fingerprint, saved.index == index, saved.startMs == coreStart, saved.endMs == coreEnd {
                 try Transcript(fingerprint: info.fingerprint, diarized: false, segments: saved.segments).validate(durationMs: manifest.durationMs)
                 metrics?.checkpoint(milliseconds: coreEnd - coreStart)
                 parts.append(saved); continue
             }
             emit("progress", "Распознаём речь — часть \(index + 1) из \(count)", nil)
-            var segments = try await recognizer.recognize(ASRRequest(audioURL: wave, availableEndMs: manifest.durationMs,
-                coreRange: coreStart..<coreEnd, mode: .offline)).segments
+            var segments: [Segment] = []
+            let audioEnd = min(coreEnd, availableEndMs)
+            if coreStart < audioEnd {
+                segments = try await recognizer.recognize(ASRRequest(audioURL: wave, availableEndMs: availableEndMs,
+                    coreRange: coreStart..<audioEnd, mode: .offline)).segments
+            }
             for i in segments.indices { segments[i].id = "part-\(index)-seg-\(i)" }
+            try Transcript(fingerprint: info.fingerprint, diarized: false, segments: segments).validate(durationMs: manifest.durationMs)
             let part = ASRPart(fingerprint: info.fingerprint, index: index, startMs: coreStart, endMs: coreEnd, segments: segments)
+            try Task.checkCancellation()
             try Disk.write(part, to: path); parts.append(part); emit("checkpoint", "", "asr/part-\(index).json")
         }
         let transcript = Analysis.mergeParts(parts, fingerprint: info.fingerprint)
         try transcript.validate(durationMs: manifest.durationMs)
+        try Task.checkCancellation()
         try Disk.write(transcript, to: run.appendingPathComponent("asr-transcript.json"))
         return "asr-transcript.json"
+    }
+
+    private func preparedAudioEndMs() throws -> Int {
+        let marker = run.appendingPathComponent("prepared.json")
+        guard let prepared = try? Disk.read([String: String].self, at: marker),
+              prepared["fingerprint"] == info.fingerprint else { return manifest.durationMs }
+        let frames = try ASRAudioInput.requireFormat(wave)
+        guard frames > 0, abs(Double(frames) / 16 - Double(manifest.durationMs)) < 150,
+              prepared["pcmFrames"].map({ Int64($0) == frames }) ?? true else {
+            throw ScribeError.message("Длительность подготовленного аудио не совпала с заданием")
+        }
+        // Container timestamps can include a small trailing interval with no
+        // decoded PCM. Preserve the recording/checkpoint timeline and read only
+        // the available frames, rounding up to retain a fractional millisecond.
+        return min(manifest.durationMs, Int((frames + 15) / 16))
     }
     func diarize(
         infer: @Sendable (URL, URL, Int) async throws -> [VoiceInterval] = { folder, wave, duration in

@@ -64,6 +64,7 @@ public enum JobState: String, Codable, Sendable {
     public var processing: Bool { [.preparingAudio, .transcribing, .diarizing, .summarizing].contains(self) }
 }
 public struct Manifest: Codable, Identifiable, Sendable {
+    public static let maximumDurationMs = 10_800_000
     public var schemaVersion = 1
     public var id: String
     public var sourceType: String
@@ -94,7 +95,8 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public var pipelineVersion = "1.0.0-audio2-asr9-live1-diarization4-summary16"
+    public static let currentPipelineVersion = "1.0.0-audio2-asr10-live1-diarization4-summary16"
+    public var pipelineVersion = RunInfo.currentPipelineVersion
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
     public var auxiliaryModelIDs: [String: String]?
@@ -133,7 +135,7 @@ public struct Transcript: Codable, Sendable, Equatable {
     public var diarized: Bool; public var segments: [Segment]
     public init(fingerprint: String, diarized: Bool, segments: [Segment]) { self.fingerprint = fingerprint; self.diarized = diarized; self.segments = segments }
     public func validate(durationMs: Int) throws {
-        guard (0...10_800_000).contains(durationMs), schemaVersion == 1, Set(segments.map(\.id)).count == segments.count,
+        guard (0...Manifest.maximumDurationMs).contains(durationMs), schemaVersion == 1, Set(segments.map(\.id)).count == segments.count,
               segments.allSatisfy({ !$0.id.isEmpty && !$0.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && $0.startMs >= 0 && $0.endMs >= $0.startMs && $0.endMs <= durationMs && $0.words.allSatisfy { $0.startMs >= 0 && $0.endMs >= $0.startMs && $0.endMs <= durationMs } }) else {
             throw ScribeError.message("Некорректные таймкоды или идентификаторы расшифровки")
         }

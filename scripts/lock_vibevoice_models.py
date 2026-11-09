@@ -32,10 +32,10 @@ def main():
         make_profile(MODEL_REPO, MODEL_REVISION, 'asr-vibevoice-4bit',
                      {'config.json', 'model-00001-of-00002.safetensors', 'model-00002-of-00002.safetensors', 'model.safetensors.index.json'},
                      role='asr', license='MIT', name='VibeVoice-ASR · 4-bit · экспериментальный',
-                     asrBackend='vibevoice-asr', asrPolicy='vibevoice-longform-300s-greedy8192-speakerkit-v1',
+                     asrBackend='vibevoice-asr', asrPolicy='vibevoice-core60s-context5s-greedy8192-speakerkit-v2',
                      tokenizerID='tokenizer-vibevoice', recommendedMemoryGB=32, workingMemoryGB=20,
-                     maximumRecordingMs=300000, experimental=True, recommendationRank=0,
-                     profileDescription='Готовые записи до 5 минут на Mac от 32 ГБ RAM. Только таймкоды сегментов; участники определяются SpeakerKit. Качество на встречах ещё не принято.')
+                     experimental=True, recommendationRank=0,
+                     profileDescription='Готовые записи до 3 часов на совместимом Mac от 32 ГБ RAM. Только таймкоды сегментов; участники определяются SpeakerKit. Качество на встречах ещё не принято.')
     ]
     catalog = json.loads(args.output.read_text())
     existing = {m['id']: m for m in catalog['models']}

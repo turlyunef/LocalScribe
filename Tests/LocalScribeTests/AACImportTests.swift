@@ -61,7 +61,7 @@ final class AACImportTests: XCTestCase {
         let source = root.appendingPathComponent("original.aac")
         let tools = try fixture(root, timeBase: "1/16000", packets: "172800000\n")
         XCTAssertEqual(try Media.probe(source, tools: tools).duration, 10800)
-        _ = try fixture(root, timeBase: "1/16000", packets: "172801024\n")
+        _ = try fixture(root, timeBase: "1/16000", packets: "172800016\n")
         XCTAssertThrowsError(try Media.probe(source, tools: tools)) {
             XCTAssertEqual(($0 as? ScribeError)?.localizedDescription, "Запись длиннее 3 часов. Автоматическое усечение отключено.")
         }

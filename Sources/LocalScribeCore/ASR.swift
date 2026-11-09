@@ -25,7 +25,7 @@ public struct ASRRequest: Sendable {
 
     public init(audioURL: URL, originMs: Int = 0, availableEndMs: Int,
                 coreRange: Range<Int>, mode: ASRInputMode) throws {
-        guard audioURL.isFileURL, originMs >= 0, availableEndMs <= 10_800_000,
+        guard audioURL.isFileURL, originMs >= 0, availableEndMs <= Manifest.maximumDurationMs,
               originMs <= coreRange.lowerBound, !coreRange.isEmpty,
               coreRange.upperBound <= availableEndMs else {
             throw ScribeError.message("Некорректные границы входа распознавания")

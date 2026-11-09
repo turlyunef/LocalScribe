@@ -101,22 +101,6 @@ final class QwenModelContractTests: XCTestCase {
         try library.remove(aligner, at: root, catalog: catalog)
         XCTAssertNil(library.activeCatalog(from: catalog))
     }
-    func testLimitedProfileRejectsLongRecordingBeforeCreatingRun() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
-        defer { try? FileManager.default.removeItem(at: root) }
-        let repository = try RecordingRepository(root: root)
-        var catalog = catalog(); catalog.models[0].maximumRecordingMs = 300_000
-        var manifest = Manifest(sourceType: "import", title: "long", filename: "a.wav")
-        manifest.sourceComplete = true; manifest.durationMs = 300_001
-        try repository.save(manifest)
-        let path = repository.folder(manifest.id).appendingPathComponent("manifest.json")
-        let before = try Data(contentsOf: path)
-        XCTAssertThrowsError(try repository.beginRun(&manifest, catalog: catalog))
-        XCTAssertNil(manifest.pendingRunId)
-        XCTAssertEqual(try Data(contentsOf: path), before)
-        XCTAssertFalse(FileManager.default.fileExists(atPath: repository.folder(manifest.id).appendingPathComponent("runs").path))
-    }
-
     func testNewRunFreezesDependencyAndOfflineMode() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
