@@ -150,6 +150,34 @@ final class ResultEditingModelTests: XCTestCase {
         XCTAssertFalse(model.canEditResult)
     }
 
+    func testOpenResultEditorBlocksStartingRecording() async throws {
+        let (root, repo, manifest) = try fixture()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        model.selection = manifest.id
+        try await waitForResult(model)
+        XCTAssertFalse(model.modelsReady)
+        XCTAssertTrue(model.canStartRecording)
+
+        model.beginResultEditing()
+        model.resultEdit?.transcript.segments[0].text = "Несохранённый черновик"
+        XCTAssertFalse(model.canStartRecording)
+        await model.startRecording(groupID: model.defaultGroup.id)
+        XCTAssertNil(model.recordingID)
+        XCTAssertFalse(model.startingRecording)
+        XCTAssertEqual(model.selection, manifest.id)
+        XCTAssertEqual(model.resultEdit?.transcript.segments[0].text, "Несохранённый черновик")
+        XCTAssertEqual(repo.list().map(\.id), [manifest.id])
+        XCTAssertEqual(try repo.load(manifest.id).activeRunId, manifest.activeRunId)
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+
+        model.resultEdit = nil
+        XCTAssertTrue(model.canStartRecording)
+    }
+
     func testSummaryRegenerationAfterEditingSkipsAllAudioStages() async throws {
         let (root, repo, manifest) = try fixture()
         defer { try? FileManager.default.removeItem(at: root) }

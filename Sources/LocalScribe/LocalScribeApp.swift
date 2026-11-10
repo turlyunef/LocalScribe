@@ -44,11 +44,25 @@ import LocalScribeCore
             if model.recordingID != nil {
                 RecordingStatusText(indicators: model.indicators, finalizing: model.finalizingRecording, prefix: "Идёт запись")
                 Button("Остановить и сохранить") { Task { await model.stopRecording() } }.disabled(model.finalizingRecording).help("Остановить запись и сохранить аудио")
-            } else { Text("LocalScribe · локальный архив") }
+            } else {
+                Text("LocalScribe · локальный архив")
+                Button("Начать запись") {
+                    guard model.canStartRecording else { return }
+                    let destination = model.defaultGroup.id
+                    delegate.model = model
+                    model.errorHandler.startPresenting()
+                    Task { await model.startRecording(groupID: destination) }
+                }
+                .disabled(!model.canStartRecording)
+            }
             Button("Открыть окно") {
                 NSApp.activate(ignoringOtherApps: true)
                 NSApp.windows.first { $0.canBecomeMain && $0 !== model.settingsWindow.window }?.makeKeyAndOrderFront(nil)
             }.help("Показать главное окно LocalScribe")
+            Button("Закрыть") {
+                delegate.model = model
+                NSApp.terminate(nil)
+            }
         }
     }
 }

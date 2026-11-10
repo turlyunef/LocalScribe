@@ -78,7 +78,9 @@ struct QueueJobID: Hashable, Sendable {
     private(set) var downloadingModels = false
     @Published var verifyingModels = false
     var canStartRecording: Bool {
-        recordingID == nil && !startingRecording && !finalizingRecording && !installing && !preparingStorage && !shuttingDown
+        repository != nil && archive != nil && resultEdit == nil && !savingResult
+            && recordingID == nil && !startingRecording && !stopping && !finalizingRecording
+            && !installing && !preparingStorage && !shuttingDown
     }
     @Published var modelLibrary = ModelLibrary()
     @Published var downloadProgress: ModelInstallProgress?
@@ -529,7 +531,7 @@ struct QueueJobID: Hashable, Sendable {
         await reload(); await enqueue(manifest.id)
     }
     func startRecording(groupID: String? = nil) async {
-        guard resultEdit == nil, !savingResult, recordingID == nil, let repository, let archive, !preparingStorage, !stopping, !shuttingDown, !startingRecording, !finalizingRecording, !installing else { return }
+        guard canStartRecording, let repository, let archive else { return }
         let destination = groupID ?? recordingGroups.defaultID
         startingGroupID = destination
         startingRecording = true
