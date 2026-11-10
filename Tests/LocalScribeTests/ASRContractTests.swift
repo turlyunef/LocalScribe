@@ -45,7 +45,7 @@ final class ASRContractTests: XCTestCase {
             annotated.models[0].asrBackend = "future-engine"
             XCTAssertNotEqual(annotated.fingerprint, expected)
             XCTAssertThrowsError(try annotated.pinned(to: info))
-            XCTAssertEqual(info.pipelineVersion, "1.0.0-audio2-asr10-live1-diarization4-summary16")
+            XCTAssertEqual(info.pipelineVersion, "1.0.0-audio2-asr11-live1-diarization4-summary16")
         }
         let legacyProfile = Data(#"{"id":"asr","repository":"fixture","revision":"r","license":"test","files":[]}"#.utf8)
         let profile = try JSONDecoder().decode(ModelProfile.self, from: legacyProfile)

@@ -2023,7 +2023,7 @@
       "license": "MIT",
       "name": "VibeVoice-ASR · 4-bit · экспериментальный",
       "asrBackend": "vibevoice-asr",
-      "asrPolicy": "vibevoice-core60s-context5s-greedy8192-speakerkit-v2",
+      "asrPolicy": "vibevoice-core60s-context5s-greedy8192-speakerkit-v3",
       "tokenizerID": "tokenizer-vibevoice",
       "recommendedMemoryGB": 32,
       "workingMemoryGB": 20,

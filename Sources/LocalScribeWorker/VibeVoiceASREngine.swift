@@ -6,10 +6,12 @@ import MLX
 
 /// Finite calls to the long-form checkpoint. SpeakerKit supplies global speakers.
 final class VibeVoiceASREngine: ASREngine {
-    static let policyID = "vibevoice-core60s-context5s-greedy8192-speakerkit-v2"
+    static let policyID = "vibevoice-core60s-context5s-greedy8192-speakerkit-v3"
     private static let maximumCoreMs = 60_000
+    private static let splitThresholdMs = 15_000
     private static let contextMs = 5_000
     private static let maximumInputFrames = 300 * 16_000
+    private static let maximumTokens = 8192
     let capabilities = ASRCapabilities(inputModes: [.offline], wordTimings: .unavailable)
     private let generate: ([Float]) throws -> String
 
@@ -20,7 +22,7 @@ final class VibeVoiceASREngine: ASREngine {
         try Task.checkCancellation()
         let runtime = try VibeVoiceASRModel.fromModelDirectory(model, tokenizerDirectory: tokenizer, weightFiles: weightFiles)
         try Task.checkCancellation()
-        generate = { samples in try runtime.generate(audio: MLXArray(samples), maxTokens: 8192) }
+        generate = { samples in try runtime.generate(audio: MLXArray(samples), maxTokens: Self.maximumTokens) }
     }
     init(generate: @escaping ([Float]) throws -> String) { self.generate = generate }
 
@@ -33,31 +35,49 @@ final class VibeVoiceASREngine: ASREngine {
         var segments: [Segment] = []
         var start = request.coreRange.lowerBound
         while start < request.coreRange.upperBound {
-            try Task.checkCancellation()
             let end = min(start + Self.maximumCoreMs, request.coreRange.upperBound)
-            let readStart = max(request.originMs, start - Self.contextMs)
-            let readEnd = min(request.availableEndMs, end + Self.contextMs)
-            let samples = try Media.samples(request.audioURL, start: Double(readStart - request.originMs) / 1000,
-                                            duration: Double(readEnd - readStart) / 1000)
-            // Allow up to one millisecond of PCM rounding, with real audio in
-            // the owned range even when that range is itself one millisecond.
-            guard samples.count >= (readEnd - readStart) * 16 - 16, samples.count > (start - readStart) * 16 else {
-                throw ScribeError.message("Аудио VibeVoice короче заявленного диапазона")
-            }
-            let audio = try Self.resample(samples)
-            try Task.checkCancellation()
-            let output: String
-            do { output = try generate(audio) }
-            catch is CancellationError { throw CancellationError() }
-            catch { throw ScribeError.message("VibeVoice не завершил распознавание. Частичный текст не сохранён.") }
-            try Task.checkCancellation()
-            segments.append(contentsOf: try Self.parse(output, durationMs: Double(samples.count) / 16,
-                                                       readStartMs: readStart, core: start..<end))
+            segments.append(contentsOf: try recognizeWindow(start..<end, in: request))
             start = end
         }
         try Task.checkCancellation()
         for index in segments.indices { segments[index].id = "vibe-\(index)" }
         return ASRResult(segments: segments)
+    }
+
+    private func recognizeWindow(_ core: Range<Int>, in request: ASRRequest) throws -> [Segment] {
+        try Task.checkCancellation()
+        let readStart = max(request.originMs, core.lowerBound - Self.contextMs)
+        let readEnd = min(request.availableEndMs, core.upperBound + Self.contextMs)
+        let samples = try Media.samples(request.audioURL, start: Double(readStart - request.originMs) / 1000,
+                                        duration: Double(readEnd - readStart) / 1000)
+        // Allow up to one millisecond of PCM rounding, with real audio in
+        // the owned range even when that range is itself one millisecond.
+        guard samples.count >= (readEnd - readStart) * 16 - 16, samples.count > (core.lowerBound - readStart) * 16 else {
+            throw ScribeError.message("Аудио VibeVoice короче заявленного диапазона")
+        }
+        let audio = try Self.resample(samples)
+        try Task.checkCancellation()
+        let output: String
+        do {
+            output = try generate(audio)
+        } catch VibeVoiceError.incompleteGeneration {
+            try Task.checkCancellation()
+            guard core.count > Self.splitThresholdMs else {
+                let range = [core.lowerBound, core.upperBound]
+                    .map { timecode($0) + String(format: ".%03d", $0 % 1000) }.joined(separator: "–")
+                throw ScribeError.message("VibeVoice исчерпал лимит генерации на участке \(range) (\(Self.maximumTokens) токена). Расшифровка этой части не сохранена.")
+            }
+            let midpoint = core.lowerBound + core.count / 2
+            let first = try recognizeWindow(core.lowerBound..<midpoint, in: request)
+            let second = try recognizeWindow(midpoint..<core.upperBound, in: request)
+            return first + second
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            throw ScribeError.message("VibeVoice не завершил распознавание. Частичный текст не сохранён.")
+        }
+        try Task.checkCancellation()
+        return try Self.parse(output, durationMs: Double(samples.count) / 16, readStartMs: readStart, core: core)
     }
 
     private struct Row: Decodable {

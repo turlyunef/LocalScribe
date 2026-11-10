@@ -59,6 +59,73 @@ final class VibeVoiceASREngineTests: XCTestCase {
         } catch { XCTAssertTrue(error.localizedDescription.contains("только готовые записи")) }
     }
 
+    func testTokenLimitSplitsOnlyFailedWindowsAndKeepsSeamOwnership() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let request = try retryRequest(in: root)
+        let responses: [String?] = [
+            nil,
+            nil,
+            #"[{"Start":19.5,"End":20.5,"Content":"Inner seam"}]"#,
+            #"[{"Start":4.5,"End":5.5,"Content":"Inner seam"},{"Start":19.5,"End":20.5,"Content":"Outer seam"}]"#,
+            #"[{"Start":4.5,"End":5.5,"Content":"Outer seam"}]"#
+        ]
+        var inputFrames: [Int] = []
+        let engine = VibeVoiceASREngine { audio in
+            let call = inputFrames.count
+            inputFrames.append(audio.count)
+            guard responses.indices.contains(call) else {
+                XCTFail("Unexpected model call")
+                return "[]"
+            }
+            guard let response = responses[call] else { throw VibeVoiceError.incompleteGeneration }
+            return response
+        }
+
+        let result = try await engine.recognize(request)
+        XCTAssertEqual(inputFrames, [70, 40, 25, 25, 40].map { $0 * 24_000 })
+        XCTAssertEqual(result.segments.map(\.text), ["Inner seam", "Outer seam"])
+        XCTAssertEqual(result.segments.map(\.startMs), [119_500, 134_500])
+        XCTAssertEqual(result.segments.map(\.endMs), [120_500, 135_500])
+        XCTAssertEqual(result.segments.map(\.id), ["vibe-0", "vibe-1"])
+    }
+
+    func testPersistentTokenLimitReportsSmallestFailedRangeWithoutReturningPartialResult() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let request = try retryRequest(in: root)
+        var inputFrames: [Int] = []
+        let engine = VibeVoiceASREngine { audio in
+            inputFrames.append(audio.count)
+            if inputFrames.count == 2 { return #"[{"Start":6,"End":7,"Content":"Recognized first half"}]"# }
+            throw VibeVoiceError.incompleteGeneration
+        }
+
+        do {
+            _ = try await engine.recognize(request)
+            XCTFail("Incomplete recognition returned a result")
+        } catch {
+            XCTAssertEqual(error.localizedDescription,
+                "VibeVoice исчерпал лимит генерации на участке 00:02:15.000–00:02:30.000 (8192 токена). Расшифровка этой части не сохранена.")
+        }
+        XCTAssertEqual(inputFrames, [70, 40, 40, 25].map { $0 * 24_000 })
+    }
+
+    private func retryRequest(in root: URL) throws -> ASRRequest {
+        try Disk.directory(root)
+        let wave = root.appendingPathComponent("retry.wav")
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 70 * 16_000))
+        buffer.frameLength = buffer.frameCapacity
+        try XCTUnwrap(buffer.floatChannelData)[0].initialize(repeating: 0, count: Int(buffer.frameLength))
+        do {
+            let file = try AVAudioFile(forWriting: wave, settings: format.settings)
+            try file.write(from: buffer)
+        }
+        return try ASRRequest(audioURL: wave, originMs: 100_000, availableEndMs: 170_000,
+            coreRange: 105_000..<165_000, mode: .offline)
+    }
+
     func testSpeechAtBothSeamsAndOneMillisecondTailUsesBoundedAudio() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try Disk.directory(root)
