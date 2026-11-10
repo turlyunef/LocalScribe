@@ -95,7 +95,7 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public static let currentPipelineVersion = "1.0.0-audio2-asr11-live1-diarization4-summary16"
+    public static let currentPipelineVersion = "1.0.0-audio2-asr12-live1-diarization4-summary16"
     public var pipelineVersion = RunInfo.currentPipelineVersion
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?

@@ -8,8 +8,10 @@
 использовали `1.0.0-audio2-asr9-live1-diarization4-summary16`; после расширения
 офлайн-распознавания до трёх часов использовалась версия
 `1.0.0-audio2-asr10-live1-diarization4-summary16`. Повтор VibeVoice на коротких
-окнах при исчерпании лимита токенов использует
-`1.0.0-audio2-asr11-live1-diarization4-summary16`. Whisper-политика прежняя.
+окнах при исчерпании лимита токенов использовал
+`1.0.0-audio2-asr11-live1-diarization4-summary16`. Повторы с уменьшенным
+контекстом для интервалов до 15 с используют
+`1.0.0-audio2-asr12-live1-diarization4-summary16`. Whisper-политика прежняя.
 Фоновый режим новых профилей закрыт до отдельной live-приёмки.
 
 `ASREngineFactory` выбирает `whisper`, `qwen3`, `vibevoice-asr` по закреплённому

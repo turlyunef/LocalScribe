@@ -90,6 +90,32 @@ final class VibeVoiceASREngineTests: XCTestCase {
         XCTAssertEqual(result.segments.map(\.id), ["vibe-0", "vibe-1"])
     }
 
+    func testFifteenSecondWindowRetriesWithLessContext() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try retryRequest(in: root)
+        let request = try ASRRequest(audioURL: fixture.audioURL, originMs: fixture.originMs,
+            availableEndMs: fixture.availableEndMs, coreRange: 105_000..<120_000, mode: .offline)
+        var inputFrames: [Int] = []
+        let engine = VibeVoiceASREngine { audio in
+            inputFrames.append(audio.count)
+            switch inputFrames.count {
+            case 1: throw VibeVoiceError.incompleteGeneration
+            case 2: return #"[{"Start":8,"End":9,"Content":"Seam"}]"#
+            case 3: return #"[{"Start":0.5,"End":1.5,"Content":"Seam"}]"#
+            default:
+                XCTFail("Unexpected model call")
+                return "[]"
+            }
+        }
+
+        let result = try await engine.recognize(request)
+        XCTAssertEqual(inputFrames, [600_000, 228_000, 228_000])
+        XCTAssertEqual(result.segments.map(\.text), ["Seam"])
+        XCTAssertEqual(result.segments.map(\.startMs), [112_000])
+        XCTAssertEqual(result.segments.map(\.endMs), [113_000])
+    }
+
     func testPersistentTokenLimitReportsSmallestFailedRangeWithoutReturningPartialResult() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -106,9 +132,9 @@ final class VibeVoiceASREngineTests: XCTestCase {
             XCTFail("Incomplete recognition returned a result")
         } catch {
             XCTAssertEqual(error.localizedDescription,
-                "VibeVoice исчерпал лимит генерации на участке 00:02:15.000–00:02:30.000 (8192 токена). Расшифровка этой части не сохранена.")
+                "VibeVoice исчерпал лимит генерации на участке 00:02:15.000–00:02:18.750 (8192 токена). Расшифровка этой части не сохранена.")
         }
-        XCTAssertEqual(inputFrames, [70, 40, 40, 25].map { $0 * 24_000 })
+        XCTAssertEqual(inputFrames, [1_680_000, 960_000, 960_000, 600_000, 228_000, 138_000])
     }
 
     private func retryRequest(in root: URL) throws -> ASRRequest {

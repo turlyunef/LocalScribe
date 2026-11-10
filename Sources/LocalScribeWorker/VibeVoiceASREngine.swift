@@ -6,10 +6,12 @@ import MLX
 
 /// Finite calls to the long-form checkpoint. SpeakerKit supplies global speakers.
 final class VibeVoiceASREngine: ASREngine {
-    static let policyID = "vibevoice-core60s-context5s-greedy8192-speakerkit-v3"
+    static let policyID = "vibevoice-core60s-context5s-greedy8192-speakerkit-v4"
     private static let maximumCoreMs = 60_000
-    private static let splitThresholdMs = 15_000
+    private static let shortRetryThresholdMs = 15_000
+    private static let splitThresholdMs = 3_750
     private static let contextMs = 5_000
+    private static let shortRetryContextMs = 1_000
     private static let maximumInputFrames = 300 * 16_000
     private static let maximumTokens = 8192
     let capabilities = ASRCapabilities(inputModes: [.offline], wordTimings: .unavailable)
@@ -36,7 +38,7 @@ final class VibeVoiceASREngine: ASREngine {
         var start = request.coreRange.lowerBound
         while start < request.coreRange.upperBound {
             let end = min(start + Self.maximumCoreMs, request.coreRange.upperBound)
-            segments.append(contentsOf: try recognizeWindow(start..<end, in: request))
+            segments.append(contentsOf: try recognizeWindow(start..<end, in: request, contextMs: Self.contextMs))
             start = end
         }
         try Task.checkCancellation()
@@ -44,10 +46,10 @@ final class VibeVoiceASREngine: ASREngine {
         return ASRResult(segments: segments)
     }
 
-    private func recognizeWindow(_ core: Range<Int>, in request: ASRRequest) throws -> [Segment] {
+    private func recognizeWindow(_ core: Range<Int>, in request: ASRRequest, contextMs: Int) throws -> [Segment] {
         try Task.checkCancellation()
-        let readStart = max(request.originMs, core.lowerBound - Self.contextMs)
-        let readEnd = min(request.availableEndMs, core.upperBound + Self.contextMs)
+        let readStart = max(request.originMs, core.lowerBound - contextMs)
+        let readEnd = min(request.availableEndMs, core.upperBound + contextMs)
         let samples = try Media.samples(request.audioURL, start: Double(readStart - request.originMs) / 1000,
                                         duration: Double(readEnd - readStart) / 1000)
         // Allow up to one millisecond of PCM rounding, with real audio in
@@ -68,8 +70,9 @@ final class VibeVoiceASREngine: ASREngine {
                 throw ScribeError.message("VibeVoice исчерпал лимит генерации на участке \(range) (\(Self.maximumTokens) токена). Расшифровка этой части не сохранена.")
             }
             let midpoint = core.lowerBound + core.count / 2
-            let first = try recognizeWindow(core.lowerBound..<midpoint, in: request)
-            let second = try recognizeWindow(midpoint..<core.upperBound, in: request)
+            let retryContext = core.count <= Self.shortRetryThresholdMs ? Self.shortRetryContextMs : contextMs
+            let first = try recognizeWindow(core.lowerBound..<midpoint, in: request, contextMs: retryContext)
+            let second = try recognizeWindow(midpoint..<core.upperBound, in: request, contextMs: retryContext)
             return first + second
         } catch is CancellationError {
             throw CancellationError()
