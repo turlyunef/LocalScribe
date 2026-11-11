@@ -13,8 +13,9 @@ struct ModelMenuOption {
         id = profile.id
         reason = hardware.warning(for: profile)
         self.recommended = recommended && reason == nil
-        let size = ByteCountFormatter.string(fromByteCount: profile.bytes, countStyle: .file)
-        title = "\(profile.displayName) · \(size)" + (self.recommended ? " · Максимально рекомендуется" : "")
+        let size = profile.bytes.formatted(.byteCount(style: .file).locale(L10n.locale))
+        let details = "\(profile.displayName) · \(size)"
+        title = self.recommended ? L10n.text("%1$@ · Максимально рекомендуется", details) : details
     }
 
     func menuItem(target: AnyObject?, action: Selector?) -> NSMenuItem {
@@ -26,7 +27,7 @@ struct ModelMenuOption {
             .foregroundColor: enabled ? NSColor.labelColor : NSColor.disabledControlTextColor
         ])
         item.setAccessibilityLabel(title)
-        item.setAccessibilityHelp(reason ?? "Модель совместима с этим Mac")
+        item.setAccessibilityHelp(reason ?? L10n.text("Модель совместима с этим Mac"))
         return item
     }
 }
@@ -35,7 +36,7 @@ struct ModelMenuOption {
 struct ModelPopup: NSViewRepresentable {
     let options: [ModelMenuOption]
     @Binding var selection: String
-    var prompt = "Нет совместимой модели"
+    var prompt = L10n.text("Нет совместимой модели")
     var imports = false
     var onChoose: ((String) -> Void)?
     @Environment(\.isEnabled) private var isEnabled

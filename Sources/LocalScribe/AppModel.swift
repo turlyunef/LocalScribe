@@ -72,7 +72,7 @@ struct QueueJobID: Hashable, Sendable {
     var status: String { get { indicators.status } set { indicators.status = newValue } }
     @Published var settingsTab: SettingsTab = .recordings
     lazy var settingsWindow = SettingsWindow(model: self, defaults: userDefaults)
-    @Published var modelsStatus = "Проверяем модели…"
+    @Published var modelsStatus = L10n.text("Проверяем модели…")
     @Published var modelsReady = false
     @Published var installing = false
     private(set) var downloadingModels = false
@@ -80,7 +80,7 @@ struct QueueJobID: Hashable, Sendable {
     var canStartRecording: Bool {
         repository != nil && archive != nil && resultEdit == nil && !savingResult
             && recordingID == nil && !startingRecording && !stopping && !finalizingRecording
-            && !installing && !preparingStorage && !shuttingDown
+            && !installing && !preparingStorage && !shuttingDown && !suspendingCaptureForSleep
     }
     @Published var modelLibrary = ModelLibrary()
     @Published var downloadProgress: ModelInstallProgress?
@@ -108,6 +108,9 @@ struct QueueJobID: Hashable, Sendable {
     @Published var automaticSummaries: Bool {
         didSet { userDefaults.set(automaticSummaries, forKey: "automaticSummaries") }
     }
+    @Published private(set) var recordingSources: RecordingSourcePreferences
+    let microphoneDevices: MicrophoneDevices
+    var applicationLanguage: ApplicationLanguage { ApplicationLanguage.selection(in: userDefaults) }
     private let userDefaults: UserDefaults
     @Published var recordingID: String?
     @Published var startingRecording = false
@@ -129,7 +132,17 @@ struct QueueJobID: Hashable, Sendable {
     let supervisor = WorkerSupervisor()
     private let installer = ModelInstaller()
     private let downloader = ModelDownloadClient()
-    private var recorder: MicrophoneRecorder?
+    private var recorder: (any RecordingCapture)?
+    private var startingRecordingID: String?
+    private var recordingStartTask: Task<Void, Never>?
+    private var openingCapture = false
+    @Published private var suspendingCaptureForSleep = false
+    private var startInterruption: String?
+    private var startupStopReason: String?
+    private var pendingCaptureWarnings: [String] = []
+    private var liveCaptureStart: Task<Void, Never>?
+    private let requestMicrophoneAccess: @MainActor () async -> Bool
+    private let makeRecordingCapture: @MainActor (MicrophoneDevices) -> any RecordingCapture
     @Published private var queued: [QueueJobID] = []
     private var enqueuing: [QueueJobID: UUID] = [:]
     private var queueGeneration: UInt64 = 0
@@ -156,8 +169,8 @@ struct QueueJobID: Hashable, Sendable {
     var resolveDuplicateImport: (DuplicateRecording) -> DuplicateImportAction = { _ in AppModel.presentDuplicateImportAlert() }
 
     static func presentDuplicateImportAlert() -> DuplicateImportAction {
-        let alert = NSAlert(); alert.messageText = "Такой файл уже есть в архиве"
-        alert.addButton(withTitle: "Открыть существующую"); alert.addButton(withTitle: "Импортировать ещё раз"); alert.addButton(withTitle: "Отмена")
+        let alert = NSAlert(); alert.messageText = L10n.text("Такой файл уже есть в архиве")
+        alert.addButton(withTitle: L10n.text("Открыть существующую")); alert.addButton(withTitle: L10n.text("Импортировать ещё раз")); alert.addButton(withTitle: L10n.text("Отмена"))
         switch alert.runModal() {
         case .alertFirstButtonReturn: return .openExisting
         case .alertSecondButtonReturn: return .importAgain
@@ -173,17 +186,24 @@ struct QueueJobID: Hashable, Sendable {
     var worker: URL { workerOverride ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
     init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
          userDefaults: UserDefaults = .standard, catalog providedCatalog: ModelCatalog? = nil, hardware: ModelHardware = .current,
+         microphoneDevices suppliedMicrophoneDevices: MicrophoneDevices? = nil,
+         requestMicrophoneAccess: @escaping @MainActor () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) },
+         makeRecordingCapture: @escaping @MainActor (MicrophoneDevices) -> any RecordingCapture = { MicrophoneRecorder(devices: $0) },
          importProbe: @escaping @Sendable (URL, URL) throws -> AudioInfo = { try Media.probe($0, tools: $1, cancellable: true) }) {
         self.userDefaults = userDefaults
+        self.requestMicrophoneAccess = requestMicrophoneAccess
+        self.makeRecordingCapture = makeRecordingCapture
         self.hardware = hardware
         backgroundRecognition = userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true
         automaticSummaries = userDefaults.object(forKey: "automaticSummaries") as? Bool ?? true
+        recordingSources = RecordingSourcePreferences(defaults: userDefaults)
+        microphoneDevices = suppliedMicrophoneDevices ?? MicrophoneDevices(observeChanges: startServices)
         workerOverride = workerExecutable
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
         catalog = providedCatalog ?? (try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json")))
         do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; archive = RecordingCoordinator(repository: repo, importProbe: importProbe) }
-        catch { repository = nil; archive = nil; errorHandler.report(message: "Не удалось открыть локальное хранилище: \(error.localizedDescription)") }
+        catch { repository = nil; archive = nil; errorHandler.report(message: L10n.text("Не удалось открыть локальное хранилище: %1$@", L10n.message(error.localizedDescription))) }
         // The diagram archive is a sibling branch of the same Application Support
         // root; its failure never blocks the recording workspace.
         if let repository {
@@ -192,7 +212,7 @@ struct QueueJobID: Hashable, Sendable {
                 diagramRepository = repo; diagramArchive = DiagramCoordinator(repository: repo)
             } catch {
                 diagramRepository = nil; diagramArchive = nil
-                errorHandler.report(message: "Хранилище схем недоступно: \(error.localizedDescription). Записи продолжают работать.")
+                errorHandler.report(message: L10n.text("Хранилище схем недоступно: %1$@. Записи продолжают работать.", L10n.message(error.localizedDescription)))
             }
         } else { diagramRepository = nil; diagramArchive = nil }
         recordingSearch.onVisibilityChange = { [weak self] in self?.retainSearchSelection() }
@@ -209,8 +229,7 @@ struct QueueJobID: Hashable, Sendable {
         memorySource?.resume()
         sleepObserver = NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
             Task { @MainActor in
-                if self?.recordingID != nil { await self?.stopRecording(warning: "Сон системы прервал запись.") }
-                await self?.pause(reason: "Обработка прервана перед сном. Нажмите «Продолжить» после пробуждения.")
+                await self?.prepareForSleep()
             }
         }
         Task {
@@ -218,7 +237,7 @@ struct QueueJobID: Hashable, Sendable {
             if let archive {
                 do { applySnapshot(try await archive.recover()) }
                 catch {
-                    errorHandler.report(message: "Не удалось восстановить локальное хранилище: \(error.localizedDescription)")
+                    errorHandler.report(message: L10n.text("Не удалось восстановить локальное хранилище: %1$@", L10n.message(error.localizedDescription)))
                     await reload()
                 }
             }
@@ -227,7 +246,7 @@ struct QueueJobID: Hashable, Sendable {
                 // recording archive recovery above is independent.
                 do { applyDiagramSnapshot(try await diagramArchive.recover()) }
                 catch {
-                    errorHandler.report(message: "Не удалось восстановить хранилище схем: \(error.localizedDescription). Записи продолжают работать.")
+                    errorHandler.report(message: L10n.text("Не удалось восстановить хранилище схем: %1$@. Записи продолжают работать.", L10n.message(error.localizedDescription)))
                     await reloadDiagrams()
                 }
             }
@@ -326,21 +345,21 @@ struct QueueJobID: Hashable, Sendable {
     }
     func verifyModels() async {
         guard let catalog, let repository, canManageModels else { return }
-        verifyingModels = true; modelsStatus = "Проверяем целостность моделей…"
+        verifyingModels = true; modelsStatus = L10n.text("Проверяем целостность моделей…")
         defer { verifyingModels = false; if !queued.isEmpty { Task { await processQueue() } } }
         do {
             let hardware = hardware
             modelLibrary = try await Task.detached(priority: .utility) { try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware) }.value
             updateModelsStatus()
-        } catch { modelsReady = false; modelsStatus = "Не удалось проверить модели"; errorHandler.report(error) }
+        } catch { modelsReady = false; modelsStatus = L10n.text("Не удалось проверить модели"); errorHandler.report(error) }
     }
     private func updateModelsStatus() {
         modelsReady = activeCatalog != nil
         let incompatible = catalog?.models.filter {
             $0.purpose != .diagram && modelLibrary.isSelected($0)
         }.compactMap { hardware.warning(for: $0) } ?? []
-        modelsStatus = !incompatible.isEmpty ? "Выберите совместимую модель. " + incompatible.joined(separator: " ") :
-            (modelsReady ? "Модели готовы · обработка без интернета" : "Загрузите модели для всех этапов обработки")
+        modelsStatus = !incompatible.isEmpty ? L10n.text("Выберите совместимую модель. ") + incompatible.joined(separator: " ") :
+            (modelsReady ? L10n.text("Модели готовы · обработка без интернета") : L10n.text("Загрузите модели для всех этапов обработки"))
     }
     func profilesToInstall(asrID: String, summaryID: String) -> [ModelProfile] {
         guard let catalog,
@@ -380,7 +399,7 @@ struct QueueJobID: Hashable, Sendable {
             do {
                 for (index, profile) in profiles.enumerated() {
                     try Task.checkCancellation()
-                    downloadBatch = "Модель \(index + 1) из \(profiles.count) · \(profile.displayName)"
+                    downloadBatch = L10n.text("Модель %1$@ из %2$@ · %3$@", String(index + 1), String(profiles.count), profile.displayName)
                     downloadProgress = ModelInstallProgress(profile: profile)
                     try await installer.install(profile, root: repository.models, fetch: { index, progress in
                         try await self.downloader.fetch(profileID: profile.id, index: index, progress: progress)
@@ -394,8 +413,8 @@ struct QueueJobID: Hashable, Sendable {
                 updateModelsStatus()
             } catch {
                 updateModelsStatus()
-                if Task.isCancelled { modelsStatus += " · загрузка отменена" }
-                else { errorHandler.report(error); modelsStatus += " · загрузка не завершена" }
+                if Task.isCancelled { modelsStatus += L10n.text(" · загрузка отменена") }
+                else { errorHandler.report(error); modelsStatus += L10n.text(" · загрузка не завершена") }
             }
         }
     }
@@ -408,17 +427,17 @@ struct QueueJobID: Hashable, Sendable {
         }
         downloadProgress = progress
         switch progress.phase {
-        case .checking: modelsStatus = "Проверяем файлы модели…"
-        case .downloading: modelsStatus = "Загружаем файлы модели…"
-        case .verifying: modelsStatus = "Проверяем размер и SHA-256…"
-        case .complete: modelsStatus = "Модель загружена и проверена"
+        case .checking: modelsStatus = L10n.text("Проверяем файлы модели…")
+        case .downloading: modelsStatus = L10n.text("Загружаем файлы модели…")
+        case .verifying: modelsStatus = L10n.text("Проверяем размер и SHA-256…")
+        case .complete: modelsStatus = L10n.text("Модель загружена и проверена")
         }
     }
     func cancelInstall() { installTask?.cancel(); downloader.cancel() }
     func importModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels, let profile = compatibleProfiles([profile])?.first else { return }
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
-        panel.message = "Выберите папку модели \(profile.displayName) из закреплённого каталога"
+        panel.message = L10n.text("Выберите папку модели %1$@ из закреплённого каталога", profile.displayName)
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let access = url.startAccessingSecurityScopedResource()
         installing = true; downloadProgress = ModelInstallProgress(profile: profile); downloadBatch = profile.displayName
@@ -435,7 +454,7 @@ struct QueueJobID: Hashable, Sendable {
             } catch {
                 updateModelsStatus()
                 if !Task.isCancelled { errorHandler.report(error) }
-                else { modelsStatus += " · импорт отменён" }
+                else { modelsStatus += L10n.text(" · импорт отменён") }
             }
         }
     }
@@ -450,6 +469,13 @@ struct QueueJobID: Hashable, Sendable {
         if !changes.isEmpty { try selectModels(Array(changes.values)) }
         if backgroundRecognition != draft.backgroundRecognition { backgroundRecognition = draft.backgroundRecognition }
         if automaticSummaries != draft.automaticSummaries { automaticSummaries = draft.automaticSummaries }
+        if recordingSources != draft.recordingSources {
+            draft.recordingSources.save(to: userDefaults)
+            recordingSources = draft.recordingSources
+        }
+        if applicationLanguage != draft.applicationLanguage {
+            userDefaults.set(draft.applicationLanguage.rawValue, forKey: ApplicationLanguage.defaultsKey)
+        }
     }
     private func selectModels(_ ids: [String]) throws {
         guard let repository, let catalog, canManageModels else {
@@ -468,16 +494,16 @@ struct QueueJobID: Hashable, Sendable {
     }
     func removeModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels else { return }
-        let alert = NSAlert(); alert.messageText = "Удалить \(profile.displayName)?"
-        alert.informativeText = "Будут удалены только файлы этой модели. Аудио, расшифровки и итоги сохранятся. Если модель выбрана, будет использована последняя установленная из оставшихся совместимых моделей того же назначения."
-        alert.addButton(withTitle: "Удалить модель"); alert.addButton(withTitle: "Отмена")
+        let alert = NSAlert(); alert.messageText = L10n.text("Удалить %1$@?", profile.displayName)
+        alert.informativeText = L10n.text("Будут удалены только файлы этой модели. Аудио, расшифровки и итоги сохранятся. Если модель выбрана, будет использована последняя установленная из оставшихся совместимых моделей того же назначения.")
+        alert.addButton(withTitle: L10n.text("Удалить модель")); alert.addButton(withTitle: L10n.text("Отмена"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         do { try modelLibrary.remove(profile, at: repository.models, catalog: catalog, hardware: hardware); updateModelsStatus() }
         catch { errorHandler.report(error); Task { await verifyModels() } }
     }
     func chooseImport() {
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
-        panel.message = "MP3, M4A, WAV, FLAC, OGG, OPUS — до 3 часов"
+        panel.message = L10n.text("MP3, M4A, WAV, FLAC, OGG, OPUS — до 3 часов")
         guard panel.runModal() == .OK else { return }; importURLs(panel.urls)
     }
     func importURLs(_ urls: [URL], groupID: String? = nil) {
@@ -530,66 +556,236 @@ struct QueueJobID: Hashable, Sendable {
         if resultEdit == nil && !savingResult { selection = manifest.id }
         await reload(); await enqueue(manifest.id)
     }
-    func startRecording(groupID: String? = nil) async {
-        guard canStartRecording, let repository, let archive else { return }
+    /// Both buttons reserve the destination and actual HAL input on this turn
+    /// of MainActor, before a permission dialog or any other suspension.
+    @discardableResult func requestRecording(groupID: String? = nil) -> Task<Void, Never>? {
+        guard canStartRecording else { return nil }
         let destination = groupID ?? recordingGroups.defaultID
-        startingGroupID = destination
-        startingRecording = true
-        defer { startingGroupID = nil; startingRecording = false; Task { await processQueue() } }
-        guard await AVCaptureDevice.requestAccess(for: .audio) else { errorHandler.report(message: "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS."); return }
-        guard !shuttingDown else { return }
-        var m = Manifest(sourceType: "microphone", title: "Запись \(Date().formatted(date: .abbreviated, time: .shortened))", filename: "original.caf")
-        m.state = .recording
+        let preferences = recordingSources
         do {
-            try await archive.createRecording(m, groupID: destination)
-            guard !shuttingDown else {
-                try await archive.update(m.id) { $0.state = .interrupted }
-                return
+            guard preferences.hasEnabledSource else {
+                throw ScribeError.message("Включите хотя бы один источник записи.")
             }
-            let capture = MicrophoneRecorder()
-            capture.onMeter = { [weak self] level, elapsed, notice in Task { @MainActor in self?.level = level; self?.elapsed = elapsed; self?.soundNotice = notice } }
-            capture.onStopNeeded = { [weak self] reason in Task { @MainActor in await self?.stopRecording(warning: reason) } }
-            capture.onWarning = { [weak self] warning in
-                guard let self, let id = self.recordingID else { return }
-                let taskID = UUID()
-                self.warningTasks[taskID] = Task {
-                    defer { self.warningTasks.removeValue(forKey: taskID) }
-                    _ = try? await archive.update(id) { m in
-                        if !m.warnings.contains(warning) { m.warnings.append(warning) }
-                    }
-                    await self.reload()
+            let microphone: MicrophoneCaptureRequest?
+            if preferences.microphoneEnabled {
+                let initial = microphoneDevices.candidates(for: preferences.microphone).first
+                if initial == nil, !preferences.systemAudioEnabled {
+                    throw ScribeError.message(preferences.microphone.unavailableMessage)
                 }
+                microphone = MicrophoneCaptureRequest(selection: preferences.microphone, initial: initial)
+            } else {
+                microphone = nil
             }
-            try capture.start(folder: repository.folder(m.id).appendingPathComponent("capture"))
-            capture.onResourcePressure = { [weak self] in Task { @MainActor in self?.pauseForCaptureResources() } }
-            recorder = capture; recordingID = m.id; selection = m.id; elapsed = 0; soundNotice = nil
-            supervisor.recordingActive = true
-            // Model selection is frozen now, even if this job waits behind older work.
-            if backgroundRecognition, modelsReady, let catalog = activeCatalog,
-               catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true {
-                do {
-                    m = try await archive.beginRun(m.id, catalog: catalog, liveCapture: true)
-                    await enqueueCapture(m.id)
-                } catch {
-                    _ = try? await archive.update(m.id) { m in
-                        m.captureProcessing = .failed
-                        m.lastError = "Фоновое распознавание не запущено. Звук продолжает сохраняться."
-                    }
-                }
+            let manifest = Manifest(sourceType: "microphone", title: L10n.text("Запись %1$@", Date().formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale))), filename: "original.caf")
+            startingGroupID = destination
+            startingRecordingID = manifest.id
+            startingRecording = true
+            let task = Task {
+                await performRecordingStart(manifest, groupID: destination, microphone: microphone, systemAudio: preferences.systemAudioEnabled)
             }
-            await revealRecording(m.id)
+            recordingStartTask = task
+            return task
         } catch {
-            let message = error.localizedDescription
-            _ = try? await archive.update(m.id) { $0.state = .failed; $0.lastError = message }
-            errorHandler.report(error); await reload()
+            errorHandler.report(error)
+            return nil
         }
     }
+
+    func startRecording(groupID: String? = nil) async {
+        await requestRecording(groupID: groupID)?.value
+    }
+
+    private func clearRecordingStart(_ id: String) {
+        guard startingRecordingID == id else { return }
+        startingRecordingID = nil
+        startingGroupID = nil
+        openingCapture = false
+        startInterruption = nil
+        startupStopReason = nil
+        pendingCaptureWarnings.removeAll()
+        recordingStartTask = nil
+        startingRecording = false
+        Task { await processQueue() }
+    }
+
+    private func interruptRecordingStart(warning: String) async {
+        guard let id = startingRecordingID else { return }
+        startInterruption = warning
+        recordingStartTask?.cancel()
+        if openingCapture {
+            // Join a start that can own hardware or publish an archive item.
+            await recordingStartTask?.value
+        } else {
+            // A pending microphone permission dialog may outlive this attempt.
+            clearRecordingStart(id)
+        }
+    }
+
+    func prepareForSleep() async {
+        guard !suspendingCaptureForSleep else { return }
+        suspendingCaptureForSleep = true
+        let warning = "Сон системы прервал запись."
+        let reason = "Обработка прервана перед сном. Нажмите «Продолжить» после пробуждения."
+        let pauseID = UUID()
+        queuePauses[pauseID] = reason
+        defer {
+            queuePauses.removeValue(forKey: pauseID)
+            suspendingCaptureForSleep = false
+        }
+        await interruptRecordingStart(warning: warning)
+        if recordingID != nil { await stopRecording(warning: warning) }
+        await pause(reason: reason)
+    }
+
+    private func performRecordingStart(_ manifest: Manifest, groupID: String, microphone: MicrophoneCaptureRequest?, systemAudio: Bool) async {
+        let id = manifest.id
+        guard startingRecordingID == id, let repository, let archive else { return }
+        defer { clearRecordingStart(id) }
+        if microphone != nil {
+            let granted = await requestMicrophoneAccess()
+            guard startingRecordingID == id, !Task.isCancelled else { return }
+            guard granted else {
+                errorHandler.report(message: "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS.")
+                return
+            }
+        }
+        guard !shuttingDown, !suspendingCaptureForSleep, !Task.isCancelled else { return }
+
+        openingCapture = true
+        let capture = makeRecordingCapture(microphoneDevices)
+        var startupMicrophoneStatus: CaptureMicrophoneStatus?
+        capture.onMicrophoneStatus = { [weak self] status in
+            guard let self, !self.stopping else { return }
+            if self.recordingID == id {
+                self.indicators.microphoneStatus = status
+            } else if self.startingRecordingID == id {
+                startupMicrophoneStatus = status
+            }
+        }
+        capture.onMeter = { [weak self] reading in
+            guard let self, self.recordingID == id, !self.stopping else { return }
+            self.level = reading.level
+            self.elapsed = reading.elapsed
+            self.soundNotice = reading.soundNotice
+            self.indicators.waitingForSystemAudio = reading.waitingForSystemAudio
+        }
+        capture.onStopNeeded = { [weak self] reason in
+            guard let self else { return }
+            if self.recordingID == id {
+                self.recordCaptureWarning(reason, id: id)
+                Task { [weak self] in
+                    guard let self, self.recordingID == id else { return }
+                    await self.stopRecording(warning: reason)
+                }
+            } else if self.startingRecordingID == id {
+                self.startupStopReason = self.startupStopReason ?? reason
+            }
+        }
+        capture.onWarning = { [weak self] warning in
+            guard let self else { return }
+            if self.recordingID == id { self.recordCaptureWarning(warning, id: id) }
+            else if self.startingRecordingID == id { self.pendingCaptureWarnings.append(warning) }
+        }
+        capture.onResourcePressure = { [weak self] in
+            guard let self, self.recordingID == id, !self.stopping else { return }
+            self.pauseForCaptureResources()
+        }
+
+        let folder = repository.folder(id)
+        do {
+            try await capture.start(folder: folder.appendingPathComponent("capture"), microphone: microphone, systemAudio: systemAudio)
+            try Task.checkCancellation()
+            if let startupStopReason { throw ScribeError.message(startupStopReason) }
+            var published = manifest
+            published.state = .recording
+            published.recordedAt = Date()
+            published.warnings = pendingCaptureWarnings
+            try await archive.createRecording(published, groupID: groupID)
+
+            recorder = capture
+            selection = id
+            elapsed = 0
+            level = 0
+            soundNotice = nil
+            indicators.microphoneStatus = startupMicrophoneStatus
+            indicators.waitingForSystemAudio = systemAudio
+            indicators.captureWarnings = []
+            supervisor.recordingActive = true
+            recordingID = id
+            for warning in pendingCaptureWarnings { recordCaptureWarning(warning, id: id) }
+
+            let interruption = startInterruption ?? startupStopReason
+            clearRecordingStart(id)
+            if let interruption {
+                await stopRecording(warning: interruption)
+                return
+            }
+            startLiveCapture(id, archive: archive)
+            await revealRecording(id, whileCapturing: true)
+        } catch {
+            _ = try? await capture.stop()
+            await archive.perform { _ in try? FileManager.default.removeItem(at: folder) }
+            if !Task.isCancelled { errorHandler.report(error) }
+        }
+    }
+
+    func enableFallbackMicrophone() {
+        guard recordingID != nil, !stopping, indicators.microphoneStatus == .mutedFallback else { return }
+        recorder?.enableFallbackMicrophone()
+    }
+
+    private func recordCaptureWarning(_ warning: String, id: String) {
+        guard recordingID == id, !indicators.captureWarnings.contains(warning), let archive else { return }
+        indicators.captureWarnings.append(warning)
+        let taskID = UUID()
+        warningTasks[taskID] = Task {
+            defer { warningTasks.removeValue(forKey: taskID) }
+            do {
+                try await archive.update(id) { m in
+                    if !m.warnings.contains(warning) { m.warnings.append(warning) }
+                }
+                await reload()
+            } catch { errorHandler.report(error) }
+        }
+    }
+
+    private func startLiveCapture(_ id: String, archive: RecordingCoordinator) {
+        // Freeze the catalog now. Stop joins this task before reading the run
+        // to build its seal, even if beginRun is already on the archive actor.
+        guard backgroundRecognition, modelsReady, let catalog = activeCatalog,
+              catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else { return }
+        let admission = jobAdmission[.recording(id), default: 0]
+        let generation = queueGeneration
+        liveCaptureStart = Task {
+            guard recordingID == id, !stopping, !shuttingDown, queuePauses.isEmpty,
+                  generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0] else { return }
+            do {
+                _ = try await archive.beginRun(id, catalog: catalog, liveCapture: true)
+                guard recordingID == id, !stopping, generation == queueGeneration,
+                      admission == jobAdmission[.recording(id), default: 0] else { return }
+                await enqueueCapture(id)
+            } catch {
+                guard recordingID == id, !stopping else { return }
+                _ = try? await archive.update(id) { m in
+                    guard m.captureProcessing != .cancelled else { return }
+                    m.captureProcessing = .failed
+                    m.lastError = "Фоновое распознавание не запущено. Звук продолжает сохраняться."
+                }
+            }
+        }
+    }
+
     func stopRecording(warning: String? = nil) async {
         guard let id = recordingID, let archive, !stopping else { return }
         finalizingRecordingID = id
         stopping = true; finalizingRecording = true; status = "Сохраняем аудио…"
+        if let warning { recordCaptureWarning(warning, id: id) }
         defer {
             finalizingRecordingID = nil
+            indicators.microphoneStatus = nil
+            indicators.captureWarnings = []
+            indicators.waitingForSystemAudio = false
+            liveCaptureStart = nil
             stopping = false; finalizingRecording = false; supervisor.recordingActive = false
             captureLimited = false; resourcesPaused = memoryLimited
             updateResourcePausePresentation()
@@ -598,21 +794,25 @@ struct QueueJobID: Hashable, Sendable {
         }
         do {
             let frames = try await recorder?.stop() ?? 0; recorder = nil
+            await liveCaptureStart?.value
+            for task in Array(warningTasks.values) { await task.value }
+            let warnings = indicators.captureWarnings
             if frames == 0 {
                 let m = try await archive.update(id) { m in
-                    m.state = .failed; m.lastError = warning ?? "Микрофон ещё не передал звук. Начните новую запись."
+                    for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
+                    m.state = .failed; m.lastError = warning ?? "Источники ещё не передали звук. Начните новую запись."
                 }
                 recordingID = nil
                 queued.removeAll { $0 == .recording(id) }
                 if activeJob == .recording(id) { activeJob = nil; await supervisor.cancel() }
                 errorHandler.report(message: m.lastError); await reload(); return
             }
-            if let warning {
-                try await archive.update(id) { $0.warnings.append(warning) }
-                errorHandler.report(message: warning)
-            }
-            try await finalizeCapture(id, expectedFrames: frames); recordingID = nil; await enqueue(id)
+            if let warning { errorHandler.report(message: warning) }
+            try await finalizeCapture(id, expectedFrames: frames, warnings: warnings); recordingID = nil; await enqueue(id)
         } catch {
+            await liveCaptureStart?.value
+            for task in Array(warningTasks.values) { await task.value }
+            let warnings = indicators.captureWarnings
             recordingID = nil; recorder = nil; errorHandler.report(error)
             queued.removeAll { $0 == .recording(id) }
             if activeJob == .recording(id) { activeJob = nil; await supervisor.cancel() }
@@ -621,13 +821,14 @@ struct QueueJobID: Hashable, Sendable {
                 return parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }
             }
             _ = try? await archive.update(id) { m in
+                for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
                 m.state = recoverable ? .interrupted : .failed
                 m.lastError = recoverable ? "Фрагменты сохранены. Нажмите «Продолжить» для сборки." : "Нет сохранённого звука. Начните новую запись."
             }
         }
         await reload()
     }
-    func finalizeCapture(_ id: String, expectedFrames: Int64? = nil) async throws {
+    func finalizeCapture(_ id: String, expectedFrames: Int64? = nil, warnings: [String] = []) async throws {
         guard let repository, let archive else { return }
         let manifest = try await archive.load(id)
         let folder = repository.folder(id), destination = folder.appendingPathComponent(manifest.originalRelativePath)
@@ -636,10 +837,11 @@ struct QueueJobID: Hashable, Sendable {
             let result = try Media.assembleCapture(folder.appendingPathComponent("capture"), destination: destination)
             return (result.0, result.1, try Disk.hash(destination))
         }
-        if let expectedFrames, frames != expectedFrames { throw ScribeError.message("Сохранены не все сэмплы микрофона. Фрагменты оставлены для восстановления.") }
+        if let expectedFrames, frames != expectedFrames { throw ScribeError.message("Сохранены не все сэмплы записи. Фрагменты оставлены для восстановления.") }
         let state: JobState = activeJob == .recording(id) ? .transcribing : .recorded
         // Apply only capture fields to the latest manifest, preserving renames/warnings.
         let m = try await archive.update(id) { m in
+            for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
             m.durationMs = Int(Double(frames)/rate*1000); m.sampleRate = rate; m.channels = 1; m.sha256 = hash; m.sourceComplete = true
             if m.state == .cancelled || m.captureProcessing == .cancelled {
                 m.state = .cancelled; m.captureProcessing = nil
@@ -729,7 +931,8 @@ struct QueueJobID: Hashable, Sendable {
                   let info = try? Disk.read(RunInfo.self, at: repository.run(id, pending).appendingPathComponent("run.json")) else { return false }
             return info.liveCapture == true
         }
-        guard valid, generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0], !deletingJobIDs.contains(.recording(id)), activeJob != .recording(id), !shuttingDown else { return }
+        guard valid, finalizingRecordingID != id, generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0],
+              !deletingJobIDs.contains(.recording(id)), activeJob != .recording(id), !shuttingDown else { return }
         if let reason = queuePauses.values.first ?? pauseReason {
             await interruptEnqueue(id, reason: reason); return
         }
@@ -1011,7 +1214,7 @@ struct QueueJobID: Hashable, Sendable {
             resourcePauseMessage = "Обработка приостановлена из-за нехватки памяти. Она продолжится автоматически, когда macOS сообщит, что память освободилась. Аудио и контрольные точки сохранены."
         } else if captureLimited {
             resourcePauseTitle = "Очередь приостановлена: сохраняем звук"
-            resourcePauseMessage = "Фоновая обработка приостановлена, чтобы микрофон продолжил сохранять звук без потерь. Она продолжится автоматически после остановки записи."
+            resourcePauseMessage = "Фоновая обработка приостановлена, чтобы сохранить звук без потерь. Она продолжится автоматически после остановки записи."
         } else {
             resourcePauseTitle = nil
             resourcePauseMessage = nil
@@ -1093,8 +1296,8 @@ struct QueueJobID: Hashable, Sendable {
     }
     func deleteSelected() async {
         guard deletingGroupID == nil, !deletingSidebarRecordings, let selected, let archive, selected.id != recordingID, !finalizingRecording else { return }
-        let alert = NSAlert(); alert.messageText = "Удалить запись и результаты?"; alert.informativeText = "Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся."
-        alert.addButton(withTitle: "Удалить запись"); alert.addButton(withTitle: "Отмена")
+        let alert = NSAlert(); alert.messageText = L10n.text("Удалить запись и результаты?"); alert.informativeText = L10n.text("Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся.")
+        alert.addButton(withTitle: L10n.text("Удалить запись")); alert.addButton(withTitle: L10n.text("Отмена"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         await cancelSelected()
         do { try await archive.delete(selected); selection = nil; await reload() } catch { errorHandler.report(error) }
@@ -1199,13 +1402,15 @@ struct QueueJobID: Hashable, Sendable {
     func moveRecording(_ id: String, to groupID: String) async {
         await moveRecordings([id], to: groupID)
     }
-    func revealRecording(_ id: String) async {
+    func revealRecording(_ id: String, whileCapturing: Bool = false) async {
         guard let archive else { return }
         await reload()
+        guard !whileCapturing || recordingID == id else { return }
         let groupID = recordingGroups.groupID(for: id)
         do { try await archive.editGroups { try $0.setExpanded(groupID, true) } }
         catch { errorHandler.report(error) }
         await reload()
+        guard !whileCapturing || recordingID == id else { return }
         selection = id; sidebarRevealID = id
     }
     func canDeleteRecordings(in groupID: String) -> Bool {
@@ -1502,7 +1707,7 @@ struct QueueJobID: Hashable, Sendable {
                 try text.write(to: url, atomically: true, encoding: .utf8)
             }.value
         } catch is CancellationError { }
-        catch { errorHandler.report(message: "Не удалось экспортировать: \(error.localizedDescription)") }
+        catch { errorHandler.report(message: L10n.text("Не удалось экспортировать: %1$@", L10n.message(error.localizedDescription))) }
     }
     func shutdown() async {
         shuttingDown = true
@@ -1514,7 +1719,7 @@ struct QueueJobID: Hashable, Sendable {
         memorySource?.cancel(); memorySource = nil
         if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }; sleepObserver = nil
         installTask?.cancel(); downloader.close()
-        while startingRecording { try? await Task.sleep(for: .milliseconds(50)) }
+        await interruptRecordingStart(warning: "Приложение закрыто.")
         if recordingID != nil { await stopRecording() }
         while savingResult { try? await Task.sleep(for: .milliseconds(50)) }
         while finalizingRecording { try? await Task.sleep(for:.milliseconds(50)) }
@@ -1534,14 +1739,17 @@ struct QueueJobID: Hashable, Sendable {
         defer { try? FileManager.default.removeItem(at:temporary) }
         var report = ["status":"running","phase":"permission","version":AppInfo.version]
         try? Disk.write(report,to:reportURL)
-        let capture = MicrophoneRecorder()
+        let capture = MicrophoneRecorder(devices: microphoneDevices)
         var reason: String?, lastElapsed = 0.0
-        capture.onStopNeeded = { value in Task { @MainActor in reason = value } }
-        capture.onMeter = { _, elapsed, _ in Task { @MainActor in lastElapsed = elapsed } }
+        capture.onStopNeeded = { reason = $0 }
+        capture.onMeter = { lastElapsed = $0.elapsed }
         do {
             guard await AVCaptureDevice.requestAccess(for:.audio) else { throw ScribeError.message("Доступ к микрофону не разрешён") }
             status = "Техническая проверка микрофона: 12 секунд, звук будет удалён"
-            try capture.start(folder:captureFolder)
+            let microphone = try microphoneDevices.resolve(.builtIn)
+            try await capture.start(folder: captureFolder,
+                                    microphone: MicrophoneCaptureRequest(selection: .builtIn, initial: microphone),
+                                    systemAudio: false)
             report["phase"] = "capturing"; try Disk.write(report,to:reportURL)
             let started = Date()
             let inject = CommandLine.arguments.contains("--self-check-microphone-events")

@@ -7,11 +7,11 @@ public enum ModelRole: String, Codable, CaseIterable, Sendable {
     public static let audioRoles: [ModelRole] = [.asr, .diarization, .summary, .tokenizer]
     public var title: String {
         switch self {
-        case .asr: return "Распознавание речи"
-        case .diarization: return "Определение участников"
-        case .summary: return "Итоги"
-        case .tokenizer: return "Токенизатор речи"
-        case .diagram: return "Распознавание схем"
+        case .asr: return L10n.text("Распознавание речи")
+        case .diarization: return L10n.text("Определение участников")
+        case .summary: return L10n.text("Итоги")
+        case .tokenizer: return L10n.text("Токенизатор речи")
+        case .diagram: return L10n.text("Распознавание схем")
         }
     }
 }
@@ -36,7 +36,9 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     public var supportsClosedFragments: Bool { purpose == .asr && resolvedASRBackend == "whisper" }
     public var recommendationRank: Int?
     public var purpose: ModelRole? { role ?? ModelRole(rawValue: id) }
-    public var displayName: String { name ?? repository.components(separatedBy: "/").last ?? id }
+    var catalogName: String { name ?? repository.components(separatedBy: "/").last ?? id }
+    public var displayName: String { L10n.text(catalogName) }
+    public var displayDescription: String? { profileDescription.map { L10n.text($0) } }
     public var bytes: Int64 { files.reduce(0) { $0 + $1.size } }
     public static func downloadURL(repository: String, revision: String, path: String) throws -> URL {
         guard !repository.isEmpty, !revision.isEmpty, !path.isEmpty,
@@ -60,7 +62,7 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
         for f in files {
             let url = root.appendingPathComponent(id).appendingPathComponent(f.localPath)
             guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, Int64(size) == f.size,
-                  try Disk.hash(url) == f.sha256 else { throw ScribeError.message("Модель \(displayName): отсутствует или повреждён \(f.localPath)") }
+                  try Disk.hash(url) == f.sha256 else { throw ScribeError.message("Модель \(catalogName): отсутствует или повреждён \(f.localPath)") }
         }
     }
 }

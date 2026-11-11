@@ -111,7 +111,7 @@ struct DiagramExportRequest: Sendable {
             let image = NSImage(contentsOf: url)
             await MainActor.run {
                 guard self.previewLoadID == loadID, self.selection == id else { return }
-                if let image { self.preview = image } else { self.previewError = "Не удалось открыть оригинальное изображение" }
+                if let image { self.preview = image } else { self.previewError = L10n.text("Не удалось открыть оригинальное изображение") }
             }
         }
     }
@@ -158,7 +158,7 @@ struct DiagramExportRequest: Sendable {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = true
         panel.allowedContentTypes = [.png, .jpeg]
-        panel.message = "Выберите изображения PNG или JPEG. Распознавание выполняется на этом Mac."
+        panel.message = L10n.text("Выберите изображения PNG или JPEG. Распознавание выполняется на этом Mac.")
         let destination = model.diagramGroups.defaultID
         panel.beginSheetModal(for: window) { [weak self] response in
             guard response == .OK else { return }

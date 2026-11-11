@@ -1,0 +1,3 @@
+"NSHumanReadableCopyright" = "Разработано Евгением Турлюном, 2026.";
+"NSMicrophoneUsageDescription" = "LocalScribe записывает звук с выбранного микрофона и сохраняет его на вашем Mac.";
+"NSAudioCaptureUsageDescription" = "LocalScribe записывает звук, который воспроизводят приложения на вашем Mac, и сохраняет его локально.";

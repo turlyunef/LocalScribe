@@ -1,0 +1,7 @@
+"NSHumanReadableCopyright" = "Developed by Eugene Turlyun, 2026.";
+"NSMicrophoneUsageDescription" = "LocalScribe records audio from the selected microphone and saves it on your Mac.";
+"Запись LocalScribe" = "LocalScribe Recording";
+"Группа LocalScribe" = "LocalScribe Group";
+"Схема LocalScribe" = "LocalScribe Diagram";
+"Группа схем LocalScribe" = "LocalScribe Diagram Group";
+"NSAudioCaptureUsageDescription" = "LocalScribe records audio played by apps on your Mac and saves it locally.";

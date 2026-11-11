@@ -1,4 +1,5 @@
 import AppKit
+import CoreAudio
 import SwiftUI
 import UniformTypeIdentifiers
 import XCTest
@@ -218,6 +219,107 @@ final class ContentLayoutTests: XCTestCase {
         await model.shutdown()
     }
 
+    func testRecordingSourceSettingsKeepSelectedMicrophoneVisibleWhenDetached() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let builtIn = MicrophoneInputDevice(deviceID: 1, uid: "built-in", name: "MacBook", isBuiltIn: true)
+        let usb = MicrophoneInputDevice(deviceID: 2, uid: "usb", name: "USB Mic", isBuiltIn: false)
+        var inventory = MicrophoneDevicesSnapshot(devices: [builtIn, usb], defaultDeviceID: 2)
+        let builtInRoute = HALInputRoute(uid: builtIn.uid, nominalRate: 48_000, channels: 1, streams: [], controls: [])
+        let usbRoute = HALInputRoute(uid: usb.uid, nominalRate: 48_000, channels: 1, streams: [], controls: [])
+        var routes = [builtIn.deviceID: builtInRoute, usb.deviceID: usbRoute]
+        let devices = MicrophoneDevices(observeChanges: false, loadSnapshot: { inventory }, loadRoute: { routes[$0] })
+        let model = AppModel(repository: try RecordingRepository(root: root), startServices: false,
+                             userDefaults: defaults, microphoneDevices: devices)
+        let draft = SettingsDraft(model: model)
+        draft.recordingSources.microphone = usb.selection
+        let (hosting, window) = host(ModelSettings(model: model, draft: draft), width: 760, height: 1300)
+        defer { window.close() }
+
+        try await settle(hosting)
+        XCTAssertNil(findElement("settings.recordingMicrophone.unavailable", in: hosting))
+        XCTAssertNil(findElement("settings.recordingMicrophone.fallback", in: hosting))
+        XCTAssertEqual(devices.snapshot.device(for: .builtIn), builtIn)
+        XCTAssertEqual(devices.snapshot.device(for: .systemDefault), usb)
+        let pinned = try devices.resolve(.systemDefault)
+        XCTAssertEqual(pinned.uid, usb.uid)
+
+        inventory.defaultDeviceID = 1
+        devices.refresh()
+        XCTAssertEqual(try devices.resolve(.systemDefault).uid, builtIn.uid)
+        XCTAssertNoThrow(try devices.validate(pinned))
+
+        inventory.devices = [builtIn]
+        routes.removeValue(forKey: usb.deviceID)
+        devices.refresh()
+        try await settle(hosting)
+        XCTAssertNotNil(findElement("settings.recordingMicrophone.unavailable", in: hosting))
+        XCTAssertEqual(text(try element("settings.recordingMicrophone.fallback", in: hosting)),
+                       L10n.text("Резервный микрофон: %1$@", L10n.text("Встроенный микрофон")))
+        XCTAssertEqual(draft.recordingSources.microphone, usb.selection)
+        XCTAssertEqual(devices.snapshot.device(for: .systemDefault), builtIn)
+        XCTAssertNil(devices.snapshot.device(for: usb.selection))
+        XCTAssertThrowsError(try devices.resolve(usb.selection))
+        XCTAssertThrowsError(try devices.validate(pinned))
+
+        let reattached = MicrophoneInputDevice(deviceID: 3, uid: usb.uid, name: usb.name, isBuiltIn: false)
+        inventory.devices.append(reattached)
+        routes[reattached.deviceID] = usbRoute
+        devices.refresh()
+        try await settle(hosting)
+        XCTAssertNil(findElement("settings.recordingMicrophone.unavailable", in: hosting))
+        XCTAssertNil(findElement("settings.recordingMicrophone.fallback", in: hosting))
+        XCTAssertEqual(devices.snapshot.device(for: usb.selection), reattached)
+        let replacement = try devices.resolve(usb.selection)
+        XCTAssertEqual(replacement.deviceID, reattached.deviceID)
+        XCTAssertThrowsError(try devices.validate(pinned))
+        routes[replacement.deviceID] = HALInputRoute(uid: usb.uid, nominalRate: 44_100, channels: 1, streams: [], controls: [])
+        XCTAssertThrowsError(try devices.validate(replacement))
+        let negotiated = try devices.refreshFormat(of: replacement)
+        XCTAssertEqual(negotiated.uid, replacement.uid)
+        XCTAssertNoThrow(try devices.validate(negotiated))
+        let jack = HALInput.inputProperty(replacement.deviceID, kAudioDevicePropertyJackIsConnected)
+        routes[replacement.deviceID] = HALInputRoute(uid: usb.uid, nominalRate: 44_100, channels: 1, streams: [],
+                                                    controls: [HALInput.Control(property: jack, values: [0])])
+        XCTAssertThrowsError(try devices.refreshFormat(of: negotiated))
+        await model.shutdown()
+    }
+
+    func testRecordingSourceDraftCommitsModesAndRestoresDeviceName() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try RecordingRepository(root: root)
+        let model = AppModel(repository: repository, startServices: false, userDefaults: defaults)
+        let draft = SettingsDraft(model: model)
+        XCTAssertEqual(draft.recordingSources, RecordingSourcePreferences())
+        draft.recordingSources.microphoneEnabled = false
+        draft.recordingSources.microphone = .device(uid: "usb", name: "USB Mic")
+        XCTAssertTrue(draft.hasChanges(from: model))
+        XCTAssertEqual(SettingsDraft(model: model).recordingSources, RecordingSourcePreferences())
+        XCTAssertEqual(RecordingSourcePreferences(defaults: defaults), RecordingSourcePreferences())
+
+        try model.applySettings(draft)
+        XCTAssertFalse(model.recordingSources.hasEnabledSource)
+        XCTAssertEqual(RecordingSourcePreferences(defaults: defaults), draft.recordingSources)
+        draft.recordingSources.systemAudioEnabled = true
+        try model.applySettings(draft)
+        XCTAssertFalse(draft.hasChanges(from: model))
+        XCTAssertEqual(RecordingSourcePreferences(defaults: defaults), draft.recordingSources)
+        draft.recordingSources.microphoneEnabled = true
+        XCTAssertFalse(model.recordingSources.microphoneEnabled)
+        try model.applySettings(draft)
+        let reopened = AppModel(repository: repository, startServices: false, userDefaults: defaults)
+        XCTAssertEqual(SettingsDraft(model: reopened).recordingSources, draft.recordingSources)
+        await model.shutdown()
+        await reopened.shutdown()
+    }
+
     func testBackgroundRecognitionIsStandardCheckboxInRecordingSettings() async throws {
         let suite = "LocalScribeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
@@ -333,9 +435,39 @@ final class ContentLayoutTests: XCTestCase {
         try await settle(hosting)
         XCTAssertNotNil(findElement("settings.hardware", in: hosting))
         XCTAssertNotNil(findElement("settings.models.verify", in: hosting))
+        XCTAssertNotNil(findElement("settings.applicationLanguage", in: hosting))
         XCTAssertNil(findElement("settings.diagramModels.status", in: hosting))
         XCTAssertNil(findElement("settings.backgroundRecognition", in: hosting))
         await model.shutdown()
+    }
+
+    func testApplicationLanguagePersistsOnlyWhenSettingsAreApplied() async throws {
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+
+        let draft = SettingsDraft(model: model)
+        XCTAssertEqual(draft.applicationLanguage, .system)
+        draft.applicationLanguage = .english
+        XCTAssertTrue(draft.hasChanges(from: model))
+        XCTAssertNil(defaults.object(forKey: ApplicationLanguage.defaultsKey))
+        XCTAssertEqual(SettingsDraft(model: model).applicationLanguage, .system)
+
+        try model.applySettings(draft)
+        XCTAssertFalse(draft.hasChanges(from: model))
+        let reopenedDefaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let reopened = AppModel(repository: repo, startServices: false, userDefaults: reopenedDefaults)
+        let reopenedDraft = SettingsDraft(model: reopened)
+        XCTAssertEqual(reopenedDraft.applicationLanguage, .english)
+        reopenedDraft.applicationLanguage = .system
+        try reopened.applySettings(reopenedDraft)
+        XCTAssertEqual(ApplicationLanguage.selection(in: defaults), .system)
+        await model.shutdown()
+        await reopened.shutdown()
     }
 
     func testSettingsWindowKeepsTitleAndSizeAcrossTabsAndReopening() async throws {

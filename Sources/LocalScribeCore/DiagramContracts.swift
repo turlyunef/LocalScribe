@@ -6,14 +6,14 @@ public enum DiagramState: String, Codable, Sendable {
     case waitingForModels, queued, recognizing, completed, completedWithWarnings, interrupted, cancelled, failed
     public var title: String {
         switch self {
-        case .waitingForModels: return "Ожидает модель"
-        case .queued: return "В очереди"
-        case .recognizing: return "Распознаётся"
-        case .completed: return "Распознана"
-        case .completedWithWarnings: return "Распознана с предупреждениями"
-        case .interrupted: return "Прервана — можно повторить"
-        case .cancelled: return "Отменена"
-        case .failed: return "Ошибка — можно повторить"
+        case .waitingForModels: return L10n.text("Ожидает модель")
+        case .queued: return L10n.text("В очереди")
+        case .recognizing: return L10n.text("Распознаётся")
+        case .completed: return L10n.text("Распознана")
+        case .completedWithWarnings: return L10n.text("Распознана с предупреждениями")
+        case .interrupted: return L10n.text("Прервана — можно повторить")
+        case .cancelled: return L10n.text("Отменена")
+        case .failed: return L10n.text("Ошибка — можно повторить")
         }
     }
     public var processing: Bool { self == .recognizing }
@@ -92,17 +92,17 @@ public enum DiagramConnectionKind: String, Codable, Sendable {
 
     public var title: String {
         switch self {
-        case .association: return "Ассоциация"
-        case .aggregation: return "Агрегация"
-        case .composition: return "Композиция"
-        case .generalization: return "Обобщение"
-        case .realization: return "Реализация"
-        case .dependency: return "Зависимость"
-        case .containment: return "Вложенность"
-        case .message: return "Сообщение"
-        case .reply: return "Ответное сообщение"
-        case .transition: return "Переход"
-        case .dashed: return "Пунктирная связь"
+        case .association: return L10n.text("Ассоциация")
+        case .aggregation: return L10n.text("Агрегация")
+        case .composition: return L10n.text("Композиция")
+        case .generalization: return L10n.text("Обобщение")
+        case .realization: return L10n.text("Реализация")
+        case .dependency: return L10n.text("Зависимость")
+        case .containment: return L10n.text("Вложенность")
+        case .message: return L10n.text("Сообщение")
+        case .reply: return L10n.text("Ответное сообщение")
+        case .transition: return L10n.text("Переход")
+        case .dashed: return L10n.text("Пунктирная связь")
         }
     }
 

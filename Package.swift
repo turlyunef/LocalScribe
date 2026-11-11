@@ -13,7 +13,7 @@ let package = Package(
     ],
     targets: [
         .target(name: "CWorkerIsolation", linkerSettings: [.linkedLibrary("sandbox")]),
-        .target(name: "LocalScribeCore"),
+        .target(name: "LocalScribeCore", resources: [.process("Localization")]),
         .target(name: "LocalScribeQwen", dependencies: [
             .product(name: "MLX", package: "mlx-swift"),
             .product(name: "MLXNN", package: "mlx-swift"),

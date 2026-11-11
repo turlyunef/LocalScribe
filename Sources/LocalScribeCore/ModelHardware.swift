@@ -72,11 +72,16 @@ public struct ModelHardware: Sendable {
     }
 
     public func warning(for profile: ModelProfile) -> String? {
-        compatibility(for: profile).explanation.map { "\(profile.displayName) недоступна на этом Mac: \($0)." }
+        let reasons = compatibility(for: profile).reasons
+        guard !reasons.isEmpty else { return nil }
+        let explanation = reasons.map { L10n.message($0) }.joined(separator: "; ")
+        return L10n.text("%1$@ недоступна на этом Mac: %2$@.", profile.displayName, explanation)
     }
 
     public func requireCompatibility(for profile: ModelProfile) throws {
-        if let warning = warning(for: profile) { throw ScribeError.message(warning) }
+        if let explanation = compatibility(for: profile).explanation {
+            throw ScribeError.message("\(profile.catalogName) недоступна на этом Mac: \(explanation).")
+        }
     }
 
     public func recommendedProfile(for role: ModelRole, in catalog: ModelCatalog) -> ModelProfile? {

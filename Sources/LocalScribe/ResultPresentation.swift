@@ -13,6 +13,9 @@ struct ResultJumpRequest: Equatable {
     @Published var elapsed = 0.0
     @Published var level = 0.0
     @Published var soundNotice: String?
+    @Published var waitingForSystemAudio = false
+    @Published var microphoneStatus: CaptureMicrophoneStatus?
+    @Published var captureWarnings: [String] = []
 }
 
 /// A bounded cache for the selected result. Keys compare only small metadata and
@@ -26,7 +29,7 @@ struct ResultJumpRequest: Equatable {
         let createdAt: Date
         let recordedAt: Date?
         let durationMs: Int
-        let state: String
+        let state: JobState
         let previousResult: Bool
         let warnings: [String]
         let sourceComplete: Bool
@@ -34,7 +37,7 @@ struct ResultJumpRequest: Equatable {
         init(_ m: Manifest, revision: UInt64) {
             recordingID = m.id; self.revision = revision; title = m.displayTitle
             createdAt = m.createdAt; recordedAt = m.recordedAt; durationMs = m.durationMs
-            state = m.activeRunId == nil ? m.state.title : m.warnings.isEmpty ? "Готово" : "Готово с предупреждениями"
+            state = m.activeRunId == nil ? m.state : m.warnings.isEmpty ? .completed : .completedWithWarnings
             previousResult = m.activeRunId != nil && m.pendingRunId != nil
             warnings = m.warnings; sourceComplete = m.sourceComplete
         }

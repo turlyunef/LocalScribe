@@ -28,6 +28,9 @@ cp Resources/models.lock.json "$SERVICE/Contents/Resources/"
 cp "$BIN/LocalScribe" "$APP/Contents/MacOS/"
 cp "$BIN/LocalScribeWorker" "$APP/Contents/Helpers/"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
+for localization in Resources/*.lproj; do
+    ditto "$localization" "$APP/Contents/Resources/$(basename "$localization")"
+done
 cp Resources/AppIcon.icns "$APP/Contents/Resources/"
 cp Resources/models.lock.json "$APP/Contents/Resources/"
 cp Assets/tools/ffmpeg Assets/tools/ffprobe "$APP/Contents/Resources/tools/"

@@ -6,6 +6,7 @@ public struct RecordingGroup: Codable, Identifiable, Equatable, Sendable {
     public var name: String
     public var expanded: Bool
     public var isSystem: Bool { id == Self.ungroupedID }
+    public var displayName: String { isSystem ? L10n.text("Без темы") : name }
 
     public init(id: String = UUID().uuidString, name: String, expanded: Bool = true) {
         self.id = id; self.name = name; self.expanded = expanded

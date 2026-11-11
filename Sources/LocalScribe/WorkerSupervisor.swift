@@ -136,22 +136,22 @@ struct WorkerFailureError: LocalizedError, Sendable {
     nonisolated private static func failureContext(command: WorkerCommand, process: Process,
                                                    last: WorkerEvent?, started: Date) -> [(String, String)] {
         var context: [(String, String)] = []
-        context.append(("вид задания", command.isDiagram ? "схема" : "запись"))
+        context.append((L10n.text("вид задания"), command.isDiagram ? L10n.text("схема") : L10n.text("запись")))
         if let stage = command.stage {
-            context.append(("этап", command.liveCapture == true ? stage.rawValue + " (live)" : stage.rawValue))
+            context.append((L10n.text("этап"), command.liveCapture == true ? stage.rawValue + " (live)" : stage.rawValue))
         } else if command.isDiagram {
-            context.append(("этап", "diagram"))
+            context.append((L10n.text("этап"), "diagram"))
         }
-        context.append(("задание", command.jobId))
+        context.append((L10n.text("задание"), command.jobId))
         context.append(("run", command.runId))
-        context.append(("процесс worker", terminationDescription(process)))
+        context.append((L10n.text("процесс worker"), terminationDescription(process)))
         if let last {
-            context.append(("последнее событие протокола",
-                            last.type + (last.message.isEmpty ? "" : " «\(last.message)»")))
+            context.append((L10n.text("последнее событие протокола"),
+                            last.type + (last.message.isEmpty ? "" : " «\(L10n.message(last.message))»")))
         } else {
-            context.append(("последнее событие протокола", "нет (протокольный канал молчал)"))
+            context.append((L10n.text("последнее событие протокола"), L10n.text("нет (протокольный канал молчал)")))
         }
-        context.append(("длительность этапа", String(format: "%.1f с", Date().timeIntervalSince(started))))
+        context.append((L10n.text("длительность этапа"), L10n.text("%1$@ с", String(format: "%.1f", Date().timeIntervalSince(started)))))
         return context
     }
 
@@ -160,26 +160,26 @@ struct WorkerFailureError: LocalizedError, Sendable {
         if process.terminationReason == .uncaughtSignal {
             let name: String, hint: String
             switch status {
-            case SIGILL: (name, hint) = ("SIGILL", "недопустимая инструкция")
-            case SIGTRAP: (name, hint) = ("SIGTRAP", "аварийное прерывание в коде worker (Swift runtime trap: force-unwrap, границы массива, переполнение)")
-            case SIGABRT: (name, hint) = ("SIGABRT", "аварийное завершение (abort/assert)")
-            case SIGFPE: (name, hint) = ("SIGFPE", "арифметическая ошибка")
-            case SIGKILL: (name, hint) = ("SIGKILL", "принудительное завершение системой (например, при нехватке памяти)")
-            case SIGBUS: (name, hint) = ("SIGBUS", "ошибка шины (обращение к памяти)")
-            case SIGSEGV: (name, hint) = ("SIGSEGV", "нарушение доступа к памяти")
-            case SIGTERM: (name, hint) = ("SIGTERM", "завершение по требованию")
-            default: (name, hint) = ("сигнал \(status)", "необработанный сигнал")
+            case SIGILL: (name, hint) = ("SIGILL", L10n.text("недопустимая инструкция"))
+            case SIGTRAP: (name, hint) = ("SIGTRAP", L10n.text("аварийное прерывание в коде worker (Swift runtime trap: force-unwrap, границы массива, переполнение)"))
+            case SIGABRT: (name, hint) = ("SIGABRT", L10n.text("аварийное завершение (abort/assert)"))
+            case SIGFPE: (name, hint) = ("SIGFPE", L10n.text("арифметическая ошибка"))
+            case SIGKILL: (name, hint) = ("SIGKILL", L10n.text("принудительное завершение системой (например, при нехватке памяти)"))
+            case SIGBUS: (name, hint) = ("SIGBUS", L10n.text("ошибка шины (обращение к памяти)"))
+            case SIGSEGV: (name, hint) = ("SIGSEGV", L10n.text("нарушение доступа к памяти"))
+            case SIGTERM: (name, hint) = ("SIGTERM", L10n.text("завершение по требованию"))
+            default: (name, hint) = (L10n.text("сигнал %1$@", String(status)), L10n.text("необработанный сигнал"))
             }
-            return "завершён по сигналу \(name) — \(hint)"
+            return L10n.text("завершён по сигналу %1$@ — %2$@", name, hint)
         }
         switch status {
-        case 0: return "код 0, но событие completed не получено"
-        case 1: return "код 1 (этап сообщил об ошибке)"
-        case 64: return "код 64 (нарушение формата команды)"
-        case 70: return "код 70 (не удалось запретить сеть worker)"
-        case 72: return "код 72 (отмена)"
-        case 73: return "код 73 (не удалось создать группу процессов)"
-        default: return "код \(status)"
+        case 0: return L10n.text("код 0, но событие completed не получено")
+        case 1: return L10n.text("код 1 (этап сообщил об ошибке)")
+        case 64: return L10n.text("код 64 (нарушение формата команды)")
+        case 70: return L10n.text("код 70 (не удалось запретить сеть worker)")
+        case 72: return L10n.text("код 72 (отмена)")
+        case 73: return L10n.text("код 73 (не удалось создать группу процессов)")
+        default: return L10n.text("код %1$@", String(status))
         }
     }
     func cancel() async {

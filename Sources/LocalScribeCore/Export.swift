@@ -1,5 +1,9 @@
 import Foundation
-public enum ExportPart: String, CaseIterable, Sendable { case transcript = "Расшифровка", summary = "Итоги", warnings = "Предупреждения", all = "Всё" }
+public enum ExportPart: String, CaseIterable, Sendable {
+    case transcript = "Расшифровка", summary = "Итоги", warnings = "Предупреждения", all = "Всё"
+
+    public var title: String { L10n.text(rawValue) }
+}
 public struct ExportTimestamp: Sendable, Equatable {
     public let segmentID: String
     public let range: NSRange
@@ -19,7 +23,9 @@ public enum ExportService {
     }
 
     public static func renderSegment(_ segment: Segment, markdown: Bool) -> String {
-        "[\(timecode(segment.startMs))] \(segment.overlap ? "Несколько голосов" : speakerName(segment.speakerId))\(segment.uncertain ? " — сомнительный участок" : "")\n\(clean(segment.text.trimmingCharacters(in: .whitespacesAndNewlines), markdown: markdown))\n\n"
+        let speaker = segment.overlap ? L10n.text("Несколько голосов") : speakerName(segment.speakerId)
+        let uncertainty = segment.uncertain ? L10n.text(" — сомнительный участок") : ""
+        return "[\(timecode(segment.startMs))] \(speaker)\(uncertainty)\n\(clean(segment.text.trimmingCharacters(in: .whitespacesAndNewlines), markdown: markdown))\n\n"
     }
 
     public static func render(manifest m: Manifest, transcript t: Transcript?, summary s: Summary?, part: ExportPart = .all, markdown: Bool) -> String {
@@ -48,29 +54,50 @@ public enum ExportService {
             evidenceIndex.reserveCapacity(t.segments.count)
             for (index, segment) in t.segments.enumerated() { evidenceIndex[segment.id] = index }
         }
-        let date = (m.recordedAt ?? m.createdAt).formatted(date: .numeric, time: .shortened)
+        let date = (m.recordedAt ?? m.createdAt).formatted(
+            Date.FormatStyle(date: .numeric, time: .shortened, locale: L10n.locale)
+        )
         append((markdown ? "# " : "") + clean(m.displayTitle) + "\n\n")
-        append("\(m.recordedAt == nil ? "Дата импорта" : "Дата записи"): \(date)\nДлительность: \(timecode(m.durationMs))\n")
-        let state = m.activeRunId == nil ? m.state.title : m.warnings.isEmpty ? "Готово" : "Готово с предупреждениями"
-        append("Статус: \(state)\nАвтоматическая локальная обработка. Возможны ошибки.\n")
-        if m.activeRunId != nil && m.pendingRunId != nil { append("Показан предыдущий успешный результат; новая обработка ещё не завершена.\n") }
-        if let s { append("Язык итогов: \(s.language == "ru" ? "русский" : "English")\n") }
-        if !m.sourceComplete { append("Запись неполная.\n") }
-        if let t, !t.diarized { append("Участники не определены. Промежуточная расшифровка.\n") }
+        append((m.recordedAt == nil ? L10n.text("Дата импорта: %1$@", date) : L10n.text("Дата записи: %1$@", date)) + "\n")
+        append(L10n.text("Длительность: %1$@", timecode(m.durationMs)) + "\n")
+        let state: JobState = m.activeRunId == nil ? m.state : m.warnings.isEmpty ? .completed : .completedWithWarnings
+        append(L10n.text("Статус: %1$@", state.title) + "\n")
+        append(L10n.text("Автоматическая локальная обработка. Возможны ошибки.") + "\n")
+        if m.activeRunId != nil && m.pendingRunId != nil {
+            append(L10n.text("Показан предыдущий успешный результат; новая обработка ещё не завершена.") + "\n")
+        }
+        if let s {
+            let summaryLanguage = s.language == "ru" ? L10n.text("русский") : L10n.text("английский")
+            append(L10n.text("Язык итогов: %1$@", summaryLanguage) + "\n")
+        }
+        if !m.sourceComplete { append(L10n.text("Запись неполная.") + "\n") }
+        if let t, !t.diarized { append(L10n.text("Участники не определены. Промежуточная расшифровка.") + "\n") }
         append("\n")
         if (part == .warnings || part == .all) && !m.warnings.isEmpty {
-            append(heading("Предупреждения"))
-            for warning in m.warnings { append("Предупреждение: \(clean(warning))\n\n") }
+            append(heading(ExportPart.warnings.title))
+            for warning in m.warnings {
+                append(L10n.text("Предупреждение: %1$@", clean(L10n.message(warning))) + "\n\n")
+            }
         }
         if part == .summary || part == .all {
             if let s {
-                for (title, findings) in [("Краткое содержание", s.overview), ("Решения и договорённости", s.decisions), ("Задачи", s.tasks), ("Открытые вопросы", s.openQuestions)] {
+                let sections = [
+                    (L10n.text("Краткое содержание"), s.overview, false),
+                    (L10n.text("Решения и договорённости"), s.decisions, false),
+                    (L10n.text("Задачи"), s.tasks, true),
+                    (L10n.text("Открытые вопросы"), s.openQuestions, false),
+                ]
+                for (title, findings, showsAssignment) in sections {
                     append(heading(title))
-                    if findings.isEmpty { append("Не обнаружены.\n\n"); continue }
+                    if findings.isEmpty { append(L10n.text("Не обнаружены.") + "\n\n"); continue }
                     for f in findings {
                         append((markdown ? "- " : "• ") + clean(f.text))
-                        if title == "Задачи" { append(" — Ответственный: \(clean(f.ownerName ?? f.ownerSpeakerId.map { speakerName($0) } ?? "Не указано")); срок: \(clean(f.dueText ?? "Не указано"))") }
-                        if f.uncertain { append(" (требует проверки)") }
+                        if showsAssignment {
+                            let unspecified = L10n.text("Не указано")
+                            let owner = f.ownerName ?? f.ownerSpeakerId.map { speakerName($0) } ?? unspecified
+                            append(L10n.text(" — Ответственный: %1$@; срок: %2$@", clean(owner), clean(f.dueText ?? unspecified)))
+                        }
+                        if f.uncertain { append(L10n.text(" (требует проверки)")) }
                         append(" ")
                         let evidence = Set(f.evidenceSegmentIds).compactMap { evidenceIndex[$0] }.sorted().compactMap { t?.segments[$0] }
                         for (index, segment) in evidence.enumerated() {
@@ -82,17 +109,17 @@ public enum ExportService {
                     }
                     append("\n")
                 }
-            } else { append("Итоги ещё не готовы.\n\n") }
+            } else { append(L10n.text("Итоги ещё не готовы.") + "\n\n") }
         }
         if part == .transcript || part == .all {
-            append(heading("Расшифровка"))
+            append(heading(ExportPart.transcript.title))
             if let t {
-                if t.segments.isEmpty { append("Речь не обнаружена.\n") }
+                if t.segments.isEmpty { append(L10n.text("Речь не обнаружена.") + "\n") }
                 for seg in t.segments {
                     timestamp(seg, isTranscript: true)
                     append(renderSegment(seg, markdown: markdown))
                 }
-            } else { append("Расшифровка ещё не готова.\n") }
+            } else { append(L10n.text("Расшифровка ещё не готова.") + "\n") }
         }
         return result
     }

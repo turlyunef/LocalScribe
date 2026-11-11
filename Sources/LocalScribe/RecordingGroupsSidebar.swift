@@ -28,16 +28,16 @@ struct RecordingGroupsSidebar: View {
             SidebarWorkspaceHeader(mode: $mode) {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
-                SidebarActionButton(icon: "folder.badge.plus", title: "Добавить группу", identifier: "groups.add") {
+                SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу"), identifier: "groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingGroupID != nil)
             } archiveActions: {
                 if let newRecording {
-                    SidebarActionButton(icon: "mic", title: "Новая запись", identifier: "recordings.sidebar.new",
+                    SidebarActionButton(icon: "mic", title: L10n.text("Новая запись"), identifier: "recordings.sidebar.new",
                                         action: newRecording)
                         .disabled(!model.canStartRecording)
-                    SidebarActionButton(icon: "square.and.arrow.down", title: "Импортировать аудио",
+                    SidebarActionButton(icon: "square.and.arrow.down", title: L10n.text("Импортировать аудио"),
                                         identifier: "recordings.sidebar.import", action: model.chooseImport)
                 } else {
                     SidebarEmptyAction()
@@ -47,10 +47,10 @@ struct RecordingGroupsSidebar: View {
                 .padding(.horizontal, 12).padding(.bottom, 8)
             if search.active && search.completed {
                 SidebarSearchStatus(
-                    countTitle: "Найдено: \(search.matchingIDs.count)",
+                    countTitle: L10n.text("Найдено: %1$@", String(search.matchingIDs.count)),
                     countIdentifier: "recordings.search.count",
-                    emptyTitle: "Записи не найдены",
-                    emptyHint: "Попробуйте другое название или очистите поиск",
+                    emptyTitle: L10n.text("Записи не найдены"),
+                    emptyHint: L10n.text("Попробуйте другое название или очистите поиск"),
                     emptyIdentifier: "recordings.search.empty",
                     empty: search.matchingIDs.isEmpty)
             }
@@ -72,7 +72,7 @@ struct RecordingGroupsSidebar: View {
                         if search.expanded(group) {
                             let members = model.visibleRecordings(in: group.id)
                             if members.isEmpty && !search.active {
-                                Text("Перетащите записи сюда или начните новую запись")
+                                Text(L10n.text("Перетащите записи сюда или начните новую запись"))
                                     .accessibilityIdentifier("groups.empty.\(group.id)")
                                     .font(.caption).foregroundStyle(.secondary)
                                     .padding(.leading, 28).padding(.trailing, 12).padding(.vertical, 10)
@@ -138,7 +138,7 @@ struct RecordingGroupsSidebar: View {
     private func expansionButton(expanded: Bool) -> some View {
         SidebarExpansionButton(
             expanded: expanded,
-            title: expanded ? "Развернуть все группы" : "Свернуть все группы",
+            title: expanded ? L10n.text("Развернуть все группы") : L10n.text("Свернуть все группы"),
             identifier: expanded ? "groups.expandAll" : "groups.collapseAll",
             disabled: model.deletingGroupID != nil) {
             Task { await model.setAllSidebarExpanded(expanded) }
@@ -153,12 +153,12 @@ private struct RecordingContextMenuItems: View {
     let delete: (Set<String>) -> Void
 
     var body: some View {
-        Menu("Переместить в") {
+        Menu(L10n.text("Переместить в")) {
             RecordingMoveMenuItems(model: model, recordingID: recordingID)
         }.disabled(model.deletingGroupID != nil || model.deletingSidebarRecordings)
         Divider()
         let ids = model.sidebarActionIDs(for: recordingID)
-        Button(ids.count > 1 ? "Удалить выбранные записи…" : "Удалить запись…", role: .destructive) {
+        Button(ids.count > 1 ? L10n.text("Удалить выбранные записи…") : L10n.text("Удалить запись…"), role: .destructive) {
             delete(ids)
         }.disabled(!model.canDeleteSidebarRecordings(ids))
     }
@@ -175,7 +175,7 @@ struct RecordingMoveMenuItems: View {
         ForEach(model.recordingGroups.groups.filter { target in
             ids.contains { model.recordingGroups.groupID(for: $0) != target.id }
         }) { target in
-            Button(target.name) { Task { await model.moveRecordings(ids, to: target.id) } }
+            Button(target.displayName) { Task { await model.moveRecordings(ids, to: target.id) } }
         }
     }
 }
@@ -220,8 +220,8 @@ private struct RecordingGroupHeader: View {
             if !group.isSystem && !search.active {
                 Image(systemName: "line.3.horizontal")
                     .frame(width: 14).opacity(controlsVisible ? 1 : 0)
-                    .help("Перетащите, чтобы изменить порядок групп")
-                    .accessibilityLabel("Переставить группу \(group.name)")
+                    .help(L10n.text("Перетащите, чтобы изменить порядок групп"))
+                    .accessibilityLabel(L10n.text("Переставить группу %1$@", group.displayName))
                     .onDrag {
                         draggedRecording = nil; draggedGroup = group.id
                         return SidebarTransfer.provider(group.id, type: SidebarTransfer.group)
@@ -230,44 +230,44 @@ private struct RecordingGroupHeader: View {
             } else if !group.isSystem {
                 Image(systemName: "line.3.horizontal").foregroundStyle(.tertiary)
                     .frame(width: 14).opacity(controlsVisible ? 1 : 0)
-                    .help("Очистите поиск, чтобы переставить группы")
-                    .accessibilityLabel("Очистите поиск, чтобы переставить группы")
+                    .help(L10n.text("Очистите поиск, чтобы переставить группы"))
+                    .accessibilityLabel(L10n.text("Очистите поиск, чтобы переставить группы"))
             } else { Color.clear.frame(width: 14, height: 14) }
             Button {
                 Task { await model.setSidebarExpanded(group) }
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: search.expanded(group) ? "chevron.down" : "chevron.right").frame(width: 10)
-                    Text(dropTargeted ? "Отпустите → \(group.name)" : "\(group.name) · \(model.sidebarGroupCount(group.id))")
+                    Text(dropTargeted ? L10n.text("Отпустите → %1$@", group.displayName) : "\(group.displayName) · \(model.sidebarGroupCount(group.id))")
                         .lineLimit(1).contentTransition(.opacity)
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain).focused($focus, equals: .disclosure)
                 .accessibilityIdentifier("groups.header.\(group.id)")
-                .accessibilityValue(dropTargeted ? "Отпустите для добавления в группу" : "")
-                .accessibilityLabel("\(group.name), записей: \(model.sidebarGroupCount(group.id)), \(search.expanded(group) ? "раскрыта" : "свёрнута")")
+                .accessibilityValue(dropTargeted ? L10n.text("Отпустите для добавления в группу") : "")
+                .accessibilityLabel(L10n.text("%1$@, записей: %2$@, %3$@", group.displayName, String(model.sidebarGroupCount(group.id)), search.expanded(group) ? L10n.text("раскрыта") : L10n.text("свёрнута")))
             if !group.isSystem {
                 Button(role: .destructive, action: delete) { Image(systemName: "trash") }
                     .buttonStyle(.borderless).foregroundStyle(.red)
                     .focused($focus, equals: .delete)
                     .opacity(controlsVisible ? 1 : 0)
-                    .help("Удалить группу").accessibilityLabel("Удалить группу \(group.name)")
+                    .help(L10n.text("Удалить группу")).accessibilityLabel(L10n.text("Удалить группу %1$@", group.displayName))
                     .accessibilityIdentifier("groups.delete.\(group.id)")
             } else { Color.clear.frame(width: 16, height: 16) }
             Image(systemName: dropTargeted ? "arrow.down.to.line" : "checkmark").frame(width: 16)
                 .foregroundStyle(dropTargeted ? Color.accentColor : Color.primary)
                 .opacity(dropTargeted || model.recordingGroups.defaultID == group.id ? 1 : 0)
-                .help(dropTargeted ? "Отпустите для добавления в группу" : "Группа для новых записей")
-                .accessibilityLabel(dropTargeted ? "Отпустите для добавления в группу" : model.recordingGroups.defaultID == group.id ? "Группа для новых записей" : "")
+                .help(dropTargeted ? L10n.text("Отпустите для добавления в группу") : L10n.text("Группа для новых записей"))
+                .accessibilityLabel(dropTargeted ? L10n.text("Отпустите для добавления в группу") : model.recordingGroups.defaultID == group.id ? L10n.text("Группа для новых записей") : "")
         }
         .font(.subheadline.weight(.semibold)).padding(.vertical, 8).padding(.horizontal, 6)
         .onHover { hovered = $0 }
         .contextMenu {
-            Button("Сделать группой по умолчанию") { Task { await model.changeGroups { try $0.setDefault(group.id) } } }
+            Button(L10n.text("Сделать группой по умолчанию")) { Task { await model.changeGroups { try $0.setDefault(group.id) } } }
                 .disabled(model.recordingGroups.defaultID == group.id)
             if !group.isSystem {
-                Button("Переименовать", action: rename)
-                Button("Удалить группу", role: .destructive, action: delete)
+                Button(L10n.text("Переименовать"), action: rename)
+                Button(L10n.text("Удалить группу"), role: .destructive, action: delete)
             }
         }
         .disabled(model.deletingGroupID != nil)
@@ -362,15 +362,15 @@ struct DeleteSidebarRecordingsView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(ids.count > 1 ? "Удалить выбранные записи (\(ids.count))?" : "Удалить запись?").font(.title2)
-            Text("Копии аудио и результаты в LocalScribe будут удалены без возможности восстановления. Внешние оригиналы и ваши экспорты сохранятся.")
+            Text(ids.count > 1 ? L10n.text("Удалить выбранные записи (%1$@)?", String(ids.count)) : L10n.text("Удалить запись?")).font(.title2)
+            Text(L10n.text("Копии аудио и результаты в LocalScribe будут удалены без возможности восстановления. Внешние оригиналы и ваши экспорты сохранятся."))
             if !model.canDeleteSidebarRecordings(ids) {
-                Text("Дождитесь завершения текущей операции и остановите выбранную запись.").foregroundStyle(.secondary)
+                Text(L10n.text("Дождитесь завершения текущей операции и остановите выбранную запись.")).foregroundStyle(.secondary)
             }
             HStack {
-                Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
+                Button(L10n.text("Отмена"), action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Удалить", role: .destructive) {
+                Button(L10n.text("Удалить"), role: .destructive) {
                     guard model.canDeleteSidebarRecordings(ids) else { return }
                     dismiss()
                     Task { await model.deleteSidebarRecordings(ids) }
@@ -389,19 +389,19 @@ struct DeleteRecordingGroupView: View {
     let dismiss: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Удалить группу «\(group.name)»?").font(.title2)
-            Text("В группе \(model.recordings(in: group.id).count) записей. Можно удалить группу вместе со всеми её записями, аудио и результатами без возможности восстановления либо сохранить записи, переместив их в «Без темы». Внешние исходные файлы и экспорты сохранятся.")
+            Text(L10n.text("Удалить группу «%1$@»?", group.displayName)).font(.title2)
+            Text(L10n.text("В группе %1$@ записей. Можно удалить группу вместе со всеми её записями, аудио и результатами без возможности восстановления либо сохранить записи, переместив их в «Без темы». Внешние исходные файлы и экспорты сохранятся.", String(model.recordings(in: group.id).count)))
             if !model.canDeleteRecordings(in: group.id) {
-                Text("Сначала остановите запись").foregroundStyle(.secondary)
+                Text(L10n.text("Сначала остановите запись")).foregroundStyle(.secondary)
             }
             HStack {
-                Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
+                Button(L10n.text("Отмена"), action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Нет, удалить только группу") {
+                Button(L10n.text("Нет, удалить только группу")) {
                     dismiss(); Task { await model.deleteGroup(group.id, deleteRecordings: false) }
                 }
             }
-            Button("Да, удалить записи", role: .destructive) {
+            Button(L10n.text("Да, удалить записи"), role: .destructive) {
                 dismiss(); Task { await model.deleteGroup(group.id, deleteRecordings: true) }
             }
             .foregroundStyle(.red)
@@ -423,12 +423,12 @@ private struct SidebarRecordingRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(recording.displayTitle).lineLimit(2).fontWeight(.medium)
-            Text("\(timecode(recording.durationMs)) · \(recording.createdAt.formatted(date: .abbreviated, time: .omitted))").font(.caption).foregroundStyle(.secondary)
+            Text("\(timecode(recording.durationMs)) · \(recording.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: L10n.locale)))").font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 5) {
                 if recording.state == .queued, let position = model.queuePosition(for: recording.id) {
-                    Text("\(position)").foregroundStyle(.red).accessibilityLabel("Место в очереди: \(position)").accessibilityIdentifier("recording.queuePosition.\(recording.id)")
+                    Text("\(position)").foregroundStyle(.red).accessibilityLabel(L10n.text("Место в очереди: %1$@", String(position))).accessibilityIdentifier("recording.queuePosition.\(recording.id)")
                 }
-                Label(recording.state == .queued && model.queuePosition(for: recording.id) != nil ? model.resourcePauseTitle ?? displayedState.title : displayedState.title,
+                Label(recording.state == .queued && model.queuePosition(for: recording.id) != nil ? model.resourcePauseTitle.map(L10n.message) ?? displayedState.title : displayedState.title,
                       systemImage: recording.state == .recording ? "record.circle.fill" : displayedState == .completed ? "checkmark.circle" : "waveform")
                     .foregroundStyle(recording.state == .recording ? .red : .secondary)
                     .accessibilityIdentifier("recording.status.\(recording.id)")
@@ -436,9 +436,9 @@ private struct SidebarRecordingRow: View {
             if let processing = recording.captureProcessing, recording.state == .recording {
                 HStack(spacing: 5) {
                     if processing == .queued, let position = model.queuePosition(for: recording.id) {
-                        Text("\(position)").foregroundStyle(.red).accessibilityLabel("Место в очереди: \(position)").accessibilityIdentifier("recording.queuePosition.\(recording.id)")
+                        Text("\(position)").foregroundStyle(.red).accessibilityLabel(L10n.text("Место в очереди: %1$@", String(position))).accessibilityIdentifier("recording.queuePosition.\(recording.id)")
                     }
-                    Label(model.resourcePauseTitle ?? (processing == .transcribing ? "Речь распознаётся в фоне" : processing == .queued ? "Распознавание в очереди" : "Распознавание приостановлено; запись идёт"), systemImage: "waveform")
+                    Label(model.resourcePauseTitle.map(L10n.message) ?? (processing == .transcribing ? L10n.text("Речь распознаётся в фоне") : processing == .queued ? L10n.text("Распознавание в очереди") : L10n.text("Распознавание приостановлено; запись идёт")), systemImage: "waveform")
                         .foregroundStyle(.secondary)
                         .accessibilityIdentifier("recording.captureStatus.\(recording.id)")
                 }.font(.caption2)

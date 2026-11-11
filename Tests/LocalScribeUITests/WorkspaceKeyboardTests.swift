@@ -11,7 +11,7 @@ final class WorkspaceKeyboardTests: XCTestCase {
     private let startRecording = "recordings.start.new"
     private let sidebarRecording = "recordings.sidebar.new"
 
-    private func fixture() async throws -> (AppModel, [Manifest]) {
+    private func fixture(microphoneDevices: MicrophoneDevices? = nil) async throws -> (AppModel, [Manifest]) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         let repository = try RecordingRepository(root: root)
@@ -37,7 +37,8 @@ final class WorkspaceKeyboardTests: XCTestCase {
             try repository.save(row)
             return row
         }
-        let model = AppModel(repository: repository, startServices: false, userDefaults: defaults)
+        let model = AppModel(repository: repository, startServices: false, userDefaults: defaults,
+                             microphoneDevices: microphoneDevices, requestMicrophoneAccess: { false })
         await model.reload()
         await model.recordingSearch.waitUntilIdle()
         return (model, rows)
@@ -452,7 +453,11 @@ final class WorkspaceKeyboardTests: XCTestCase {
     }
 
     func testBothNewRecordingButtonsShowSameSheetAndShareAvailability() async throws {
-        let (model, rows) = try await fixture()
+        let microphone = MicrophoneInputDevice(deviceID: 1, uid: "built-in", name: "MacBook", isBuiltIn: true)
+        let devices = MicrophoneDevices(observeChanges: false,
+            loadSnapshot: { MicrophoneDevicesSnapshot(devices: [microphone], defaultDeviceID: microphone.deviceID) },
+            loadRoute: { _ in HALInputRoute(uid: microphone.uid, nominalRate: 48_000, channels: 1, streams: [], controls: []) })
+        let (model, rows) = try await fixture(microphoneDevices: devices)
         let window = host(model)
         defer { window.close() }
         try await settle(window)
@@ -477,12 +482,10 @@ final class WorkspaceKeyboardTests: XCTestCase {
         model.installing = false
         try await settle(window)
         try enter(recordingSheet)
-        // Block the queued start before yielding the main actor so no microphone access is requested.
-        model.installing = true
         try await settle(window)
         XCTAssertNil(window.attachedSheet)
         XCTAssertNil(model.recordingID)
-        model.installing = false
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
 
         for state in [\.startingRecording, \.finalizingRecording, \.installing] as [ReferenceWritableKeyPath<AppModel, Bool>] {
             model[keyPath: state] = true

@@ -14,9 +14,10 @@ struct RecordingDetailColumn: View {
             if model.recordingID != nil {
                 HStack(spacing: 14) {
                     Image(systemName: "record.circle.fill").foregroundStyle(.red)
-                    CaptureMeterView(indicators: model.indicators, finalizing: model.finalizingRecording)
+                    CaptureMeterView(indicators: model.indicators, finalizing: model.finalizingRecording,
+                                     enableFallback: model.enableFallbackMicrophone)
                     Spacer()
-                    Button("Остановить") { Task { await model.stopRecording() } }.buttonStyle(.borderedProminent).disabled(model.finalizingRecording).help("Остановить запись и сохранить аудио")
+                    Button(L10n.text("Остановить")) { Task { await model.stopRecording() } }.buttonStyle(.borderedProminent).disabled(model.finalizingRecording).help(L10n.text("Остановить запись и сохранить аудио"))
                 }.padding().background(.red.opacity(0.05))
                 Divider()
             }
@@ -30,20 +31,20 @@ struct RecordingDetailColumn: View {
                     Group {
                         if selected.state.processing {
                             ProgressView()
-                            Button("Отменить") { Task { await model.cancel(selected.id) } }
-                                .help("Отменить обработку выбранной записи")
+                            Button(L10n.text("Отменить")) { Task { await model.cancel(selected.id) } }
+                                .help(L10n.text("Отменить обработку выбранной записи"))
                                 .accessibilityIdentifier("recording.cancel")
                         } else if model.queuePosition(for: selected.id) != nil {
-                            Button("Поднять на верх очереди") { model.moveToFrontOfQueue(selected.id) }
-                                .help("Обработать выбранную запись следующей после текущего задания")
+                            Button(L10n.text("Поднять на верх очереди")) { model.moveToFrontOfQueue(selected.id) }
+                                .help(L10n.text("Обработать выбранную запись следующей после текущего задания"))
                                 .accessibilityIdentifier("recording.moveToFront")
-                            Button("Отменить") { Task { await model.cancel(selected.id) } }
-                                .help("Убрать запись из очереди, сохранив аудио и результаты")
+                            Button(L10n.text("Отменить")) { Task { await model.cancel(selected.id) } }
+                                .help(L10n.text("Убрать запись из очереди, сохранив аудио и результаты"))
                                 .accessibilityIdentifier("recording.cancel")
                         } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
-                            Button("Продолжить") { model.resume(selected.id) }
+                            Button(L10n.text("Продолжить")) { model.resume(selected.id) }
                                 .disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady)
-                                .help("Продолжить обработку выбранной записи с контрольной точки")
+                                .help(L10n.text("Продолжить обработку выбранной записи с контрольной точки"))
                                 .accessibilityIdentifier("recording.resume")
                         }
                     }.controlSize(.small)
@@ -58,20 +59,20 @@ struct RecordingDetailColumn: View {
                     )
                 }.padding(20)
                 if let message = model.resourcePauseMessage {
-                    Label(message, systemImage: "pause.circle")
+                    Label(L10n.message(message), systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .padding(.horizontal, 20).padding(.bottom, 10)
                         .accessibilityIdentifier("queue.resourcePause")
                 }
                 if let message = selected.lastError {
-                    Button("Показать сообщение об обработке", systemImage: "exclamationmark.bubble") {
+                    Button(L10n.text("Показать сообщение об обработке"), systemImage: "exclamationmark.bubble") {
                         model.errorHandler.report(message: message)
                     }
-                    .help("Открыть подробности последней ошибки или прерывания в отдельном окне")
+                    .help(L10n.text("Открыть подробности последней ошибки или прерывания в отдельном окне"))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.bottom, 10)
                 }
-                if selected.activeRunId != nil && selected.pendingRunId != nil { Text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.").font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
+                if selected.activeRunId != nil && selected.pendingRunId != nil { Text(L10n.text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.")).font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
                 HStack {
                     Picker(selection: Binding(get: { model.tab }, set: { part in
                         // Updating the prepared text also publishes changes; wait
@@ -79,10 +80,10 @@ struct RecordingDetailColumn: View {
                         Task { @MainActor in model.tab = part }
                     })) {
                         ForEach(model.resultTabs, id: \.self) { part in
-                            Text(part.rawValue).tag(part)
+                            Text(part.title).tag(part)
                         }
                     } label: {
-                        Text("Результат")
+                        Text(L10n.text("Результат"))
                             .lineLimit(1)
                             .fixedSize(horizontal: true, vertical: false)
                     }
@@ -90,24 +91,24 @@ struct RecordingDetailColumn: View {
                     .frame(width: model.resultTabs.contains(.warnings) ? 410 : 270)
                     .accessibilityIdentifier("result.section")
                     Spacer()
-                    Button("Редактировать", systemImage: "pencil", action: model.beginResultEditing)
+                    Button(L10n.text("Редактировать"), systemImage: "pencil", action: model.beginResultEditing)
                         .disabled(!model.canEditResult)
-                        .help("Изменить текст расшифровки и итогов")
+                        .help(L10n.text("Изменить текст расшифровки и итогов"))
                         .accessibilityIdentifier("result.edit")
                     Menu {
-                        ForEach(model.exportParts, id: \.self) { part in Button(part.rawValue) { model.copy(part) }.help("Копировать: \(part.rawValue)") }
-                    } label: { Label("Копировать", systemImage: "doc.on.doc") } primaryAction: { model.copy(model.tab) }
-                    .help("Копировать открытый результат; меню позволяет выбрать раздел")
+                        ForEach(model.exportParts, id: \.self) { part in Button(part.title) { model.copy(part) }.help(L10n.text("Копировать: %1$@", part.title)) }
+                    } label: { Label(L10n.text("Копировать"), systemImage: "doc.on.doc") } primaryAction: { model.copy(model.tab) }
+                    .help(L10n.text("Копировать открытый результат; меню позволяет выбрать раздел"))
                     Menu {
                         ForEach(model.exportParts, id: \.self) { part in
-                            Menu(part.rawValue) { Button("Markdown (.md)") { model.export(markdown: true, part: part) }.help("Сохранить раздел «\(part.rawValue)» в Markdown"); Button("Текст (.txt)") { model.export(markdown: false, part: part) }.help("Сохранить раздел «\(part.rawValue)» в текстовый файл") }
+                            Menu(part.title) { Button("Markdown (.md)") { model.export(markdown: true, part: part) }.help(L10n.text("Сохранить раздел «%1$@» в Markdown", part.title)); Button(L10n.text("Текст (.txt)")) { model.export(markdown: false, part: part) }.help(L10n.text("Сохранить раздел «%1$@» в текстовый файл", part.title)) }
                         }
-                    } label: { Label("Экспорт", systemImage: "square.and.arrow.up") }
-                    .help("Сохранить выбранный раздел результата или всё вместе в файл")
+                    } label: { Label(L10n.text("Экспорт"), systemImage: "square.and.arrow.up") }
+                    .help(L10n.text("Сохранить выбранный раздел результата или всё вместе в файл"))
                 }.padding(.horizontal,20).padding(.bottom,12)
                 Divider()
                 if model.tab == .summary, model.summary == nil, !model.automaticSummaries {
-                    Text("Автоматическое создание итогов отключено")
+                    Text(L10n.text("Автоматическое создание итогов отключено"))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .accessibilityIdentifier("result.automaticSummariesDisabled")
@@ -116,14 +117,14 @@ struct RecordingDetailColumn: View {
                 }
             } else {
                 ContentUnavailableView {
-                    Label("Разговор останется на вашем Mac", systemImage: "waveform")
-                } description: { Text("Запишите встроенный микрофон или импортируйте аудио.\nРаспознавание можно начать вместе с записью.\nУчастники и итоги — после сохранения звука.") } actions: {
-                    Button("Новая запись") { recordingSheet = true }
+                    Label(L10n.text("Разговор останется на вашем Mac"), systemImage: "waveform")
+                } description: { Text(L10n.text("Запишите звук с выбранных источников или импортируйте аудио.\nРаспознавание можно начать вместе с записью.\nУчастники и итоги — после сохранения звука.")) } actions: {
+                    Button(L10n.text("Новая запись")) { recordingSheet = true }
                         .buttonStyle(.borderedProminent)
                         .disabled(!model.canStartRecording)
-                        .help("Настроить и начать запись встроенного микрофона")
+                        .help(L10n.text("Настроить и начать запись"))
                         .accessibilityIdentifier("recordings.start.new")
-                    Button("Импортировать аудио", action: model.chooseImport).help("Выбрать аудиофайлы для расшифровки")
+                    Button(L10n.text("Импортировать аудио"), action: model.chooseImport).help(L10n.text("Выбрать аудиофайлы для расшифровки"))
                 }
             }
             ActivityStatusView(indicators: model.indicators)
@@ -133,26 +134,26 @@ struct RecordingDetailColumn: View {
             }
             .sheet(isPresented: $recordingSheet) {
                 VStack(alignment: .leading, spacing: 18) {
-                    Label("Новая запись", systemImage: "mic.fill").font(.title2)
-                    Text("Встроенный микрофон MacBook")
-                    Text("Группа: \(model.defaultGroup.name) ✓").accessibilityIdentifier("recording.destination")
-                    Text("Убедитесь, что участники знают о записи.").foregroundStyle(.secondary)
-                    Text("Голоса в наушниках не записываются. Запись можно сохранить и без установленных моделей.").font(.callout).foregroundStyle(.secondary)
+                    Label(L10n.text("Новая запись"), systemImage: "mic.fill").font(.title2)
+                    RecordingSourceSummary(preferences: model.recordingSources, devices: model.microphoneDevices)
+                    Text(L10n.text("Группа: %1$@ ✓", model.defaultGroup.displayName)).accessibilityIdentifier("recording.destination")
+                    Text(L10n.text("Убедитесь, что участники знают о записи.")).foregroundStyle(.secondary)
+                    Text(L10n.text("Запись можно сохранить и без установленных моделей.")).font(.callout).foregroundStyle(.secondary)
                     HStack {
                         Spacer()
-                        Button("Отмена") { recordingSheet = false }
+                        Button(L10n.text("Отмена")) { recordingSheet = false }
                             .keyboardShortcut(.cancelAction)
-                            .help("Закрыть окно без начала записи")
-                        Button("Начать") {
+                            .help(L10n.text("Закрыть окно без начала записи"))
+                        Button(L10n.text("Начать")) {
                             guard model.canStartRecording else { return }
-                            let destination = model.defaultGroup.id
-                            recordingSheet = false
-                            Task { await model.startRecording(groupID: destination) }
+                            if model.requestRecording(groupID: model.defaultGroup.id) != nil {
+                                recordingSheet = false
+                            }
                         }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
                         .disabled(!model.canStartRecording)
-                        .help("Начать запись встроенного микрофона")
+                        .help(L10n.text("Начать запись с выбранных источников"))
                     }
                 }.padding(28).frame(width: 440)
             }
@@ -163,16 +164,88 @@ struct RecordingDetailColumn: View {
     }
 }
 
+private struct RecordingSourceSummary: View {
+    let preferences: RecordingSourcePreferences
+    @ObservedObject var devices: MicrophoneDevices
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if preferences.microphoneEnabled {
+                Label(microphoneTitle, systemImage: "mic")
+                if case .device(let uid, let name) = preferences.microphone,
+                   let actual = devices.snapshot.candidates(for: preferences.microphone).first, actual.uid != uid {
+                    Text(L10n.text("%1$@ · Не подключён", name))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            if preferences.systemAudioEnabled {
+                Label(L10n.text("Системный звук"), systemImage: "speaker.wave.2")
+            }
+            if !preferences.microphoneEnabled && !preferences.systemAudioEnabled {
+                Text(L10n.text("Источники записи не выбраны")).foregroundStyle(.secondary)
+            }
+        }
+        .accessibilityIdentifier("recording.sources")
+    }
+
+    private var microphoneTitle: String {
+        if let device = devices.snapshot.candidates(for: preferences.microphone).first {
+            return preferences.microphone == .builtIn ? L10n.text("Встроенный микрофон") : device.name
+        }
+        switch preferences.microphone {
+        case .builtIn:
+            return L10n.text("%1$@ · недоступен", L10n.text("Встроенный микрофон"))
+        case .systemDefault:
+            return L10n.text("%1$@ · недоступен", L10n.text("Как в настройках macOS"))
+        case let .device(_, name):
+            return L10n.text("%1$@ · Не подключён", name)
+        }
+    }
+}
+
 private struct CaptureMeterView: View {
     @ObservedObject var indicators: ActivityIndicators
     var finalizing: Bool
+    var enableFallback: () -> Void
 
     var body: some View {
         VStack(alignment: .leading) {
-            RecordingStatusText(indicators: indicators, finalizing: finalizing, prefix: "Встроенный микрофон")
-            if let notice = indicators.soundNotice { Text(notice).font(.caption).foregroundStyle(.orange) }
+            RecordingStatusText(indicators: indicators, finalizing: finalizing, prefix: L10n.text("Идёт запись"))
+            CaptureStatusNotices(indicators: indicators, enableFallback: enableFallback)
         }
-        ProgressView(value: indicators.level).frame(width: 100).accessibilityLabel("Уровень микрофона")
+        ProgressView(value: indicators.level).frame(width: 100).accessibilityLabel(L10n.text("Уровень звука"))
+    }
+}
+
+struct CaptureStatusNotices: View {
+    @ObservedObject var indicators: ActivityIndicators
+    var enableFallback: () -> Void
+
+    var body: some View {
+        switch indicators.microphoneStatus {
+        case .active(let name):
+            Text(L10n.text("Микрофон: %1$@", name)).font(.caption).foregroundStyle(.secondary)
+        case .waiting:
+            Text(L10n.text("Микрофон недоступен")).font(.caption).foregroundStyle(.orange)
+        case .mutedFallback:
+            Button(L10n.text("Включить запасной микрофон"), action: enableFallback)
+                .accessibilityIdentifier("recording.microphone.enableFallback")
+        case nil:
+            EmptyView()
+        }
+        if indicators.waitingForSystemAudio {
+            Text(L10n.text("Системный звук пока не поступает"))
+                .font(.caption).foregroundStyle(.secondary)
+                .accessibilityIdentifier("recording.systemAudio.waiting")
+        }
+        if let notice = indicators.soundNotice {
+            Text(L10n.message(notice)).font(.caption).foregroundStyle(.orange)
+        }
+        ForEach(indicators.captureWarnings, id: \.self) { warning in
+            Label(L10n.message(warning), systemImage: "exclamationmark.triangle")
+                .font(.caption).foregroundStyle(.orange)
+                .accessibilityIdentifier("recording.source.warning")
+        }
     }
 }
 
@@ -182,7 +255,7 @@ private struct ActivityStatusView: View {
     var body: some View {
         if !indicators.status.isEmpty {
             Divider()
-            Text(indicators.status).font(.caption).foregroundStyle(.secondary)
+            Text(L10n.message(indicators.status)).font(.caption).foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity, alignment: .leading).padding(10)
         }
     }
@@ -196,14 +269,14 @@ private struct PresentedResultView: View {
     var body: some View {
         ZStack {
             ResultTextView(result: presentation.result, jumpRequest: jumpRequest, onJump: onJump)
-            if presentation.isRendering { ProgressView("Подготавливаем результат…") }
+            if presentation.isRendering { ProgressView(L10n.text("Подготавливаем результат…")) }
         }
     }
 }
 
 struct RecordingTitleView: View {
     var title: String
-    var itemName = "записи"
+    var itemName = L10n.text("записи")
     var save: (String) -> Void
     @State private var draft = ""
     @State private var editing = false
@@ -212,7 +285,7 @@ struct RecordingTitleView: View {
     var body: some View {
         Group {
             if editing {
-                TextField("Название \(itemName)", text: $draft)
+                TextField(L10n.text("Название %1$@", itemName), text: $draft)
                     .textFieldStyle(.roundedBorder)
                     .focused($focused)
                     .onSubmit(commit)
@@ -224,7 +297,7 @@ struct RecordingTitleView: View {
                         if !value { commit() }
                     }
                     .onAppear { focused = true }
-                    .accessibilityLabel("Название \(itemName)")
+                    .accessibilityLabel(L10n.text("Название %1$@", itemName))
             } else {
                 Button {
                     draft = title
@@ -233,8 +306,8 @@ struct RecordingTitleView: View {
                     Text(title).multilineTextAlignment(.leading).lineLimit(2)
                 }
                 .buttonStyle(.plain)
-                .help("Нажмите, чтобы изменить название")
-                .accessibilityLabel("Изменить название \(itemName): \(title)")
+                .help(L10n.text("Нажмите, чтобы изменить название"))
+                .accessibilityLabel(L10n.text("Изменить название %1$@: %2$@", itemName, title))
             }
         }
         .font(.title2).fontWeight(.semibold)

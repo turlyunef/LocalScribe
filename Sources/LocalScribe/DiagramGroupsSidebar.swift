@@ -26,24 +26,24 @@ struct DiagramGroupsSidebar: View {
             SidebarWorkspaceHeader(mode: $mode) {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
-                SidebarActionButton(icon: "folder.badge.plus", title: "Добавить группу схем", identifier: "diagrams.groups.add") {
+                SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу схем"), identifier: "diagrams.groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingDiagramJobs)
             } archiveActions: {
-                SidebarActionButton(icon: "photo.badge.plus", title: "Загрузить изображение", identifier: "diagrams.import",
+                SidebarActionButton(icon: "photo.badge.plus", title: L10n.text("Загрузить изображение"), identifier: "diagrams.import",
                                     iconVerticalOffset: 2, action: workspace.presentImportPanel)
                 SidebarEmptyAction()
             }
-            RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: "Поиск по названиям",
-                                 label: "Поиск по названиям схем", shortcutActive: true)
+            RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: L10n.text("Поиск по названиям"),
+                                 label: L10n.text("Поиск по названиям схем"), shortcutActive: true)
                 .padding(.horizontal, 12).padding(.bottom, 8)
             if search.active && search.completed {
                 SidebarSearchStatus(
-                    countTitle: "Найдено: \(search.matchingIDs.count)",
+                    countTitle: L10n.text("Найдено: %1$@", String(search.matchingIDs.count)),
                     countIdentifier: "diagrams.search.count",
-                    emptyTitle: "Схемы не найдены",
-                    emptyHint: "Попробуйте другое название или очистите поиск",
+                    emptyTitle: L10n.text("Схемы не найдены"),
+                    emptyHint: L10n.text("Попробуйте другое название или очистите поиск"),
                     emptyIdentifier: "diagrams.search.empty",
                     empty: search.matchingIDs.isEmpty)
             }
@@ -67,7 +67,7 @@ struct DiagramGroupsSidebar: View {
                         if search.expanded(group) {
                             let members = workspace.visibleDiagrams(in: group.id)
                             if members.isEmpty {
-                                Text("Загрузите изображение, чтобы добавить схему")
+                                Text(L10n.text("Загрузите изображение, чтобы добавить схему"))
                                     .accessibilityIdentifier("diagrams.groups.empty.\(group.id)")
                                     .font(.caption).foregroundStyle(.secondary)
                                     .padding(.leading, 28).padding(.trailing, 12).padding(.vertical, 10)
@@ -125,7 +125,7 @@ struct DiagramGroupsSidebar: View {
         }
     }
     private func nameEditor(_ draft: GroupNameDraft) -> some View {
-        GroupNameEditor(draft: draft, placeholder: "Название группы схем",
+        GroupNameEditor(draft: draft, placeholder: L10n.text("Название группы схем"),
             fieldIdentifier: "diagrams.groups.name", errorIdentifier: "diagrams.groups.name.error",
             save: { name in
                 try await workspace.saveGroupName(name, id: draft.groupID)
@@ -135,7 +135,7 @@ struct DiagramGroupsSidebar: View {
     private func expansionButton(expanded: Bool) -> some View {
         SidebarExpansionButton(
             expanded: expanded,
-            title: expanded ? "Развернуть все группы схем" : "Свернуть все группы схем",
+            title: expanded ? L10n.text("Развернуть все группы схем") : L10n.text("Свернуть все группы схем"),
             identifier: expanded ? "diagrams.groups.expandAll" : "diagrams.groups.collapseAll",
             disabled: model.deletingDiagramJobs) {
             Task { await workspace.setAllSidebarExpanded(expanded) }
@@ -149,11 +149,11 @@ private struct SidebarDiagramRow: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(diagram.displayTitle).lineLimit(2).fontWeight(.medium)
-            Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(diagram.createdAt.formatted(date: .abbreviated, time: .omitted))")
+            Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(diagram.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .omitted, locale: L10n.locale)))")
                 .font(.caption).foregroundStyle(.secondary)
             HStack(spacing: 5) {
                 if diagram.state == .queued, let position = model.diagramQueuePosition(for: diagram.id) {
-                    Text("\(position)").foregroundStyle(.red).accessibilityLabel("Место в очереди: \(position)").accessibilityIdentifier("diagrams.queuePosition.\(diagram.id)")
+                    Text("\(position)").foregroundStyle(.red).accessibilityLabel(L10n.text("Место в очереди: %1$@", String(position))).accessibilityIdentifier("diagrams.queuePosition.\(diagram.id)")
                 }
                 Label(diagram.state.title, systemImage: statusIcon)
                     .foregroundStyle(diagram.state == .failed ? .red : .secondary)
@@ -179,18 +179,18 @@ private struct DiagramContextMenuItems: View {
     let rename: () -> Void
     let delete: (Set<String>) -> Void
     var body: some View {
-        Menu("Переместить в") {
+        Menu(L10n.text("Переместить в")) {
             let ids = workspace.sidebarActionIDs(for: diagramID)
             ForEach(workspace.model.diagramGroups.groups.filter { target in
                 ids.contains { workspace.model.diagramGroups.groupID(for: $0) != target.id }
             }) { target in
-                Button(target.name) { Task { await workspace.model.moveDiagrams(ids, to: target.id) } }
+                Button(target.displayName) { Task { await workspace.model.moveDiagrams(ids, to: target.id) } }
             }
         }
         Divider()
-        Button("Переименовать…", action: rename)
+        Button(L10n.text("Переименовать…"), action: rename)
         let ids = workspace.sidebarActionIDs(for: diagramID)
-        Button(ids.count > 1 ? "Удалить выбранные схемы…" : "Удалить схему…", role: .destructive) {
+        Button(ids.count > 1 ? L10n.text("Удалить выбранные схемы…") : L10n.text("Удалить схему…"), role: .destructive) {
             delete(ids)
         }
     }
@@ -209,8 +209,8 @@ private struct DiagramGroupHeader: View {
             if !group.isSystem && !workspace.search.active {
                 Image(systemName: "line.3.horizontal")
                     .frame(width: 14).opacity(hovered ? 1 : 0)
-                    .help("Перетащите, чтобы изменить порядок групп")
-                    .accessibilityLabel("Переставить группу \(group.name)")
+                    .help(L10n.text("Перетащите, чтобы изменить порядок групп"))
+                    .accessibilityLabel(L10n.text("Переставить группу %1$@", group.displayName))
                     .onDrag {
                         draggedGroup = group.id
                         return SidebarItemTransfer.provider(group.id, type: DiagramTransferTypes.group)
@@ -222,35 +222,35 @@ private struct DiagramGroupHeader: View {
             } label: {
                 HStack(spacing: 5) {
                     Image(systemName: workspace.search.expanded(group) ? "chevron.down" : "chevron.right").frame(width: 10)
-                    Text(dropTargeted ? "Отпустите → \(group.name)" : "\(group.name) · \(workspace.sidebarGroupCount(group.id))")
+                    Text(dropTargeted ? L10n.text("Отпустите → %1$@", group.displayName) : "\(group.displayName) · \(workspace.sidebarGroupCount(group.id))")
                         .lineLimit(1).contentTransition(.opacity)
                     Spacer(minLength: 0)
                 }.contentShape(Rectangle())
             }.buttonStyle(.plain)
                 .accessibilityIdentifier("diagrams.groups.header.\(group.id)")
-                .accessibilityLabel("\(group.name), схем: \(workspace.sidebarGroupCount(group.id))")
+                .accessibilityLabel(L10n.text("%1$@, схем: %2$@", group.displayName, String(workspace.sidebarGroupCount(group.id))))
             if !group.isSystem {
                 Button(role: .destructive, action: delete) { Image(systemName: "trash") }
                     .buttonStyle(.borderless).foregroundStyle(.red)
                     .opacity(hovered ? 1 : 0)
-                    .help("Удалить группу схем").accessibilityLabel("Удалить группу \(group.name)")
+                    .help(L10n.text("Удалить группу схем")).accessibilityLabel(L10n.text("Удалить группу %1$@", group.displayName))
                     .accessibilityIdentifier("diagrams.groups.delete.\(group.id)")
                     .disabled(workspace.model.deletingDiagramJobs)
             }
             Image(systemName: dropTargeted ? "arrow.down.to.line" : "checkmark").frame(width: 16)
                 .foregroundStyle(dropTargeted ? Color.accentColor : Color.primary)
                 .opacity(dropTargeted || workspace.model.diagramGroups.defaultID == group.id ? 1 : 0)
-                .help(dropTargeted ? "Отпустите для добавления в группу" : "Группа для новых схем")
+                .help(dropTargeted ? L10n.text("Отпустите для добавления в группу") : L10n.text("Группа для новых схем"))
         }
         .font(.subheadline.weight(.semibold)).padding(.vertical, 8).padding(.horizontal, 6)
         .onHover { hovered = $0 }
         .contextMenu {
-            Button("Сделать группой по умолчанию") {
+            Button(L10n.text("Сделать группой по умолчанию")) {
                 Task { await workspace.model.changeDiagramGroups { try $0.setDefault(group.id) } }
             }.disabled(workspace.model.diagramGroups.defaultID == group.id)
             if !group.isSystem {
-                Button("Переименовать", action: rename)
-                Button("Удалить группу", role: .destructive, action: delete)
+                Button(L10n.text("Переименовать"), action: rename)
+                Button(L10n.text("Удалить группу"), role: .destructive, action: delete)
                     .disabled(workspace.model.deletingDiagramJobs)
             }
         }
@@ -345,12 +345,12 @@ struct DeleteDiagramsView: View {
     let dismiss: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text(ids.count > 1 ? "Удалить выбранные схемы (\(ids.count))?" : "Удалить схему?").font(.title2)
-            Text("Копии изображений и результаты в LocalScribe будут удалены без возможности восстановления. Внешние оригиналы и ваши экспорты сохранятся.")
+            Text(ids.count > 1 ? L10n.text("Удалить выбранные схемы (%1$@)?", String(ids.count)) : L10n.text("Удалить схему?")).font(.title2)
+            Text(L10n.text("Копии изображений и результаты в LocalScribe будут удалены без возможности восстановления. Внешние оригиналы и ваши экспорты сохранятся."))
             HStack {
-                Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
+                Button(L10n.text("Отмена"), action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Удалить", role: .destructive) {
+                Button(L10n.text("Удалить"), role: .destructive) {
                     dismiss()
                     Task { await workspace.deleteSelected(ids) }
                 }
@@ -368,18 +368,18 @@ struct DeleteDiagramGroupView: View {
     let dismiss: () -> Void
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Удалить группу «\(group.name)»?").font(.title2)
-            Text("Количество схем в группе — \(model.diagrams(in: group.id).count). Если удалить только группу, схемы перейдут в «Без темы». При удалении вместе со схемами LocalScribe удалит архивные копии изображений и результаты без возможности восстановления. Внешние оригиналы и экспорты сохранятся.")
+            Text(L10n.text("Удалить группу «%1$@»?", group.displayName)).font(.title2)
+            Text(L10n.text("Количество схем в группе — %1$@. Если удалить только группу, схемы перейдут в «Без темы». При удалении вместе со схемами LocalScribe удалит архивные копии изображений и результаты без возможности восстановления. Внешние оригиналы и экспорты сохранятся.", String(model.diagrams(in: group.id).count)))
             HStack {
-                Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
+                Button(L10n.text("Отмена"), action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Удалить только группу") {
+                Button(L10n.text("Удалить только группу")) {
                     dismiss()
                     Task { await workspace.deleteGroup(group.id, deleteDiagrams: false) }
                 }
                 .accessibilityIdentifier("diagrams.groups.confirmDelete")
             }
-            Button("Удалить группу и схемы", role: .destructive) {
+            Button(L10n.text("Удалить группу и схемы"), role: .destructive) {
                 dismiss()
                 Task { await workspace.deleteGroup(group.id, deleteDiagrams: true) }
             }
@@ -397,15 +397,15 @@ struct RenameDiagramView: View {
     @FocusState private var focused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("Переименовать схему").font(.title2)
-            TextField("Название схемы", text: $name)
+            Text(L10n.text("Переименовать схему")).font(.title2)
+            TextField(L10n.text("Название схемы"), text: $name)
                 .focused($focused)
                 .accessibilityIdentifier("diagrams.rename.field")
                 .onSubmit(save)
             HStack {
-                Button("Отмена", action: dismiss).keyboardShortcut(.cancelAction)
+                Button(L10n.text("Отмена"), action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
-                Button("Сохранить", action: save)
+                Button(L10n.text("Сохранить"), action: save)
                     .keyboardShortcut(.defaultAction)
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     .accessibilityIdentifier("diagrams.rename.save")

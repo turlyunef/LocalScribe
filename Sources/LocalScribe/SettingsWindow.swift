@@ -5,11 +5,15 @@ import LocalScribeCore
 @MainActor final class SettingsDraft: ObservableObject {
     @Published var backgroundRecognition: Bool
     @Published var automaticSummaries: Bool
+    @Published var applicationLanguage: ApplicationLanguage
+    @Published var recordingSources: RecordingSourcePreferences
     @Published var modelIDs: [ModelRole: String] = [:]
 
     init(model: AppModel) {
         backgroundRecognition = model.backgroundRecognition
         automaticSummaries = model.automaticSummaries
+        applicationLanguage = model.applicationLanguage
+        recordingSources = model.recordingSources
     }
 
     func changedModels(in library: ModelLibrary) -> [ModelRole: String] {
@@ -18,6 +22,8 @@ import LocalScribeCore
 
     func hasChanges(from model: AppModel) -> Bool {
         backgroundRecognition != model.backgroundRecognition || automaticSummaries != model.automaticSummaries
+            || applicationLanguage != model.applicationLanguage
+            || recordingSources != model.recordingSources
             || !changedModels(in: model.modelLibrary).isEmpty
     }
 }
@@ -46,7 +52,7 @@ import LocalScribeCore
         let screen = NSApp.keyWindow?.screen ?? NSScreen.main
         let style: NSWindow.StyleMask = [.titled, .closable, .miniaturizable, .resizable]
         let window = NSWindow(contentRect: .zero, styleMask: style, backing: .buffered, defer: false, screen: screen)
-        window.title = "Настройки"
+        window.title = L10n.text("Настройки")
         window.identifier = NSUserInterfaceItemIdentifier("settings")
         window.isReleasedWhenClosed = false
         let hosting = NSHostingView(rootView: VStack(spacing: 0) {
@@ -55,15 +61,15 @@ import LocalScribeCore
             Divider()
             HStack {
                 Spacer()
-                Button("Отмена") { [weak self] in self?.window?.close() }
+                Button(L10n.text("Отмена")) { [weak self] in self?.window?.close() }
                     .keyboardShortcut(.cancelAction)
                     .accessibilityIdentifier("settings.cancel")
-                Button("ОК") { [weak self] in self?.saveAndClose() }
+                Button(L10n.text("ОК")) { [weak self] in self?.saveAndClose() }
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("settings.ok")
             }
             .padding(12)
-        })
+        }.environment(\.locale, L10n.locale))
         hosting.sizingOptions = []
         window.contentView = hosting
 
@@ -97,10 +103,10 @@ import LocalScribeCore
         guard let model, let draft, draft.hasChanges(from: model) else { return true }
         guard sender.attachedSheet == nil else { return false }
         let alert = NSAlert()
-        alert.messageText = "Сохранить изменения настроек?"
-        alert.addButton(withTitle: "Сохранить")
-        alert.addButton(withTitle: "Не сохранять")
-        alert.addButton(withTitle: "Продолжить редактирование").keyEquivalent = "\u{1b}"
+        alert.messageText = L10n.text("Сохранить изменения настроек?")
+        alert.addButton(withTitle: L10n.text("Сохранить"))
+        alert.addButton(withTitle: L10n.text("Не сохранять"))
+        alert.addButton(withTitle: L10n.text("Продолжить редактирование")).keyEquivalent = "\u{1b}"
         alert.beginSheetModal(for: sender) { [weak self, weak sender] response in
             if response == .alertFirstButtonReturn { self?.saveAndClose() }
             if response == .alertSecondButtonReturn { sender?.close() }

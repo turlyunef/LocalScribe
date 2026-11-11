@@ -1,4 +1,5 @@
 import SwiftUI
+import LocalScribeCore
 
 struct SidebarWorkspaceHeader<GroupActions: View, ArchiveActions: View>: View {
     @Binding var mode: WorkspaceMode
@@ -7,16 +8,16 @@ struct SidebarWorkspaceHeader<GroupActions: View, ArchiveActions: View>: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Picker("Раздел архива", selection: $mode) {
+            Picker(L10n.text("Раздел архива"), selection: $mode) {
                 ForEach(WorkspaceMode.allCases) { value in
-                    Text(value.rawValue).tag(value)
+                    Text(value.title).tag(value)
                 }
             }
             .labelsHidden()
             .pickerStyle(.segmented)
             .controlSize(.small)
             .tint(.blue)
-            .frame(width: 120)
+            .frame(width: 144)
             .accessibilityIdentifier("workspace.mode")
 
             Spacer(minLength: 0)

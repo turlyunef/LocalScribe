@@ -1,11 +1,12 @@
 import SwiftUI
 import AppKit
+import LocalScribeCore
 
 struct RecordingSearchField: View {
     @ObservedObject var search: RecordingSearch
     var identifierPrefix = "recordings"
-    var placeholder = "Поиск по названиям"
-    var label = "Поиск по названиям записей"
+    var placeholder = L10n.text("Поиск по названиям")
+    var label = L10n.text("Поиск по названиям записей")
     /// Command-F belongs to the search field of the visible mode only.
     var shortcutActive = true
     @FocusState private var focused: Bool
@@ -30,7 +31,7 @@ struct RecordingSearchField: View {
                     Button { search.query = ""; focused = true } label: {
                         Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary)
                     }.buttonStyle(.plain)
-                        .accessibilityLabel("Очистить поиск")
+                        .accessibilityLabel(L10n.text("Очистить поиск"))
                         .accessibilityIdentifier("\(identifierPrefix).search.clear")
                 }
             }.frame(width: 16, height: 20)

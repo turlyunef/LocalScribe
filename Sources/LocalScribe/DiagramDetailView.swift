@@ -16,11 +16,11 @@ struct DiagramDetailColumn: View {
                 diagramDetail(diagram)
             } else {
                 ContentUnavailableView {
-                    Label("Схема не выбрана", systemImage: "square.grid.2x2")
+                    Label(L10n.text("Схема не выбрана"), systemImage: "square.grid.2x2")
                 } description: {
-                    Text("Загрузите изображение блок-схемы или архитектурной схемы (PNG или JPEG)")
+                    Text(L10n.text("Загрузите изображение блок-схемы или архитектурной схемы (PNG или JPEG)"))
                 } actions: {
-                    Button("Загрузить изображение", action: workspace.presentImportPanel)
+                    Button(L10n.text("Загрузить изображение"), action: workspace.presentImportPanel)
                         .accessibilityIdentifier("diagrams.emptyImport")
                 }
                 .padding(20)
@@ -34,7 +34,7 @@ struct DiagramDetailColumn: View {
     @ViewBuilder private func diagramDetail(_ diagram: DiagramManifest) -> some View {
         VStack(spacing: 0) {
             HStack {
-                RecordingTitleView(title: diagram.displayTitle, itemName: "схемы") { title in
+                RecordingTitleView(title: diagram.displayTitle, itemName: L10n.text("схемы")) { title in
                     Task { await model.renameDiagram(diagram.id, title: title) }
                 }
                 .id(diagram.id)
@@ -43,7 +43,7 @@ struct DiagramDetailColumn: View {
             }
             .padding(20)
             HStack {
-                Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(ByteCountFormatter.string(fromByteCount: diagram.byteSize, countStyle: .file)) · \(diagram.createdAt.formatted(date: .abbreviated, time: .shortened))")
+                Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(diagram.byteSize.formatted(.byteCount(style: .file).locale(L10n.locale))) · \(diagram.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale)))")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -60,7 +60,7 @@ struct DiagramDetailColumn: View {
 
     private func diagramActions(_ diagram: DiagramManifest) -> some View {
         HStack(spacing: 8) {
-            Button("Показать изображение в Finder") {
+            Button(L10n.text("Показать изображение в Finder")) {
                 workspace.showImageInFinder(diagram)
             }
             .accessibilityIdentifier("diagrams.showImageInFinder")
@@ -72,8 +72,8 @@ struct DiagramDetailColumn: View {
             }
             .buttonStyle(.borderless)
             .disabled(model.deletingDiagramJobs)
-            .help("Удалить открытую схему")
-            .accessibilityLabel("Удалить схему")
+            .help(L10n.text("Удалить открытую схему"))
+            .accessibilityLabel(L10n.text("Удалить схему"))
             .accessibilityIdentifier("diagrams.detail.delete")
         }
         .controlSize(.small)
@@ -83,12 +83,12 @@ struct DiagramDetailColumn: View {
     private func diagramContent(_ diagram: DiagramManifest) -> some View {
         VStack(alignment: .leading, spacing: 14) {
             if workspace.showsPreviousVersion {
-                Label("Идёт повторное распознавание: показана предыдущая проверенная версия", systemImage: "clock.arrow.circlepath")
+                Label(L10n.text("Идёт повторное распознавание: показана предыдущая проверенная версия"), systemImage: "clock.arrow.circlepath")
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("diagrams.previousVersion")
             }
             if let message = diagram.lastError {
-                Label(message, systemImage: "exclamationmark.bubble").font(.caption).foregroundStyle(.secondary)
+                Label(L10n.message(message), systemImage: "exclamationmark.bubble").font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("diagrams.lastError.\(diagram.id)")
             }
             HStack(alignment: .top, spacing: 16) {
@@ -102,8 +102,8 @@ struct DiagramDetailColumn: View {
     @ViewBuilder private func statusActions(_ diagram: DiagramManifest) -> some View {
         HStack(spacing: 8) {
             if model.diagramQueuePosition(for: diagram.id) != nil {
-                Button("Поднять на верх очереди") { model.moveToFrontOfQueue(.diagram(diagram.id)) }
-                    .help("Распознать эту схему следующей после текущего задания")
+                Button(L10n.text("Поднять на верх очереди")) { model.moveToFrontOfQueue(.diagram(diagram.id)) }
+                    .help(L10n.text("Распознать эту схему следующей после текущего задания"))
                     .accessibilityIdentifier("diagrams.moveToFront")
             }
             switch diagram.state {
@@ -111,20 +111,20 @@ struct DiagramDetailColumn: View {
                 Button {
                     model.settingsWindow.show(tab: .diagrams)
                 } label: {
-                    Label("Открыть настройки", systemImage: "gear")
+                    Label(L10n.text("Открыть настройки"), systemImage: "gear")
                 }
                 .accessibilityIdentifier("diagrams.openSettings")
-                Button("Распознать") { Task { await model.recognizeDiagram(diagram.id) } }
+                Button(L10n.text("Распознать")) { Task { await model.recognizeDiagram(diagram.id) } }
                     .disabled(!model.diagramModelsReady)
-                    .help(model.diagramModelsReady ? "Распознать схему локально" : "Сначала загрузите модель схем в настройках")
+                    .help(model.diagramModelsReady ? L10n.text("Распознать схему локально") : L10n.text("Сначала загрузите модель схем в настройках"))
                     .accessibilityIdentifier("diagrams.recognize")
             case .queued, .recognizing:
-                Button("Отменить", role: .destructive) { Task { await model.cancelDiagram(diagram.id) } }
+                Button(L10n.text("Отменить"), role: .destructive) { Task { await model.cancelDiagram(diagram.id) } }
                     .accessibilityIdentifier("diagrams.cancel")
             case .completed, .completedWithWarnings, .failed, .interrupted, .cancelled:
-                Button(diagram.activeRunId == nil ? "Распознать" : "Распознать заново") { Task { await model.recognizeDiagram(diagram.id) } }
+                Button(diagram.activeRunId == nil ? L10n.text("Распознать") : L10n.text("Распознать заново")) { Task { await model.recognizeDiagram(diagram.id) } }
                     .disabled(!model.diagramModelsReady)
-                    .help(model.diagramModelsReady ? "Создать новую попытку распознавания" : "Сначала загрузите модель схем в настройках")
+                    .help(model.diagramModelsReady ? L10n.text("Создать новую попытку распознавания") : L10n.text("Сначала загрузите модель схем в настройках"))
                     .accessibilityIdentifier("diagrams.rerun")
             }
         }
@@ -135,25 +135,25 @@ struct DiagramDetailColumn: View {
         return HStack {
             Menu {
                 ForEach(parts, id: \.self) { part in
-                    Button(part.rawValue) { workspace.copy(part) }
+                    Button(part.title) { workspace.copy(part) }
                 }
             } label: {
-                Label("Копировать", systemImage: "doc.on.doc")
+                Label(L10n.text("Копировать"), systemImage: "doc.on.doc")
             } primaryAction: {
                 workspace.copy(workspace.resultTab)
             }
             .accessibilityIdentifier("diagrams.copy")
-            .help("Скопировать открытую вкладку")
+            .help(L10n.text("Скопировать открытую вкладку"))
             Menu {
                 ForEach(parts, id: \.self) { part in
-                    Menu(part.rawValue) {
+                    Menu(part.title) {
                         Button("Markdown (.md)") { workspace.presentExportPanel(part: part, format: .markdown) }
-                        Button("Текст (.txt)") { workspace.presentExportPanel(part: part, format: .plainText) }
+                        Button(L10n.text("Текст (.txt)")) { workspace.presentExportPanel(part: part, format: .plainText) }
                     }
                 }
                 Button("PlantUML (.puml)") { workspace.presentExportPanel(part: .all, format: .plantuml) }
             } label: {
-                Label("Сохранить", systemImage: "square.and.arrow.up")
+                Label(L10n.text("Сохранить"), systemImage: "square.and.arrow.up")
             }
             .accessibilityIdentifier("diagrams.save")
         }
@@ -162,14 +162,14 @@ struct DiagramDetailColumn: View {
 
     @ViewBuilder private func previewSection(_ diagram: DiagramManifest) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Оригинал").font(.headline)
+            Text(L10n.text("Оригинал")).font(.headline)
             if let preview = workspace.preview {
                 Image(nsImage: preview)
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: .infinity, maxHeight: 360)
                     .clipShape(RoundedRectangle(cornerRadius: 8))
-                    .accessibilityLabel("Предпросмотр схемы \(diagram.displayTitle)")
+                    .accessibilityLabel(L10n.text("Предпросмотр схемы %1$@", diagram.displayTitle))
                     .accessibilityIdentifier("diagrams.preview.\(diagram.id)")
             } else if workspace.previewError != nil {
                 Label(workspace.previewError ?? "", systemImage: "photo.badge.exclamationmark")
@@ -183,13 +183,13 @@ struct DiagramDetailColumn: View {
 
     @ViewBuilder private func structureSection(_ diagram: DiagramManifest) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Распознанная структура").font(.headline)
+            Text(L10n.text("Распознанная структура")).font(.headline)
             if let result = workspace.result {
-                Picker("Раздел результата", selection: Binding(
+                Picker(L10n.text("Раздел результата"), selection: Binding(
                     get: { workspace.resultTab }, set: workspace.selectResultTab
                 )) {
                     ForEach(workspace.resultTabs, id: \.self) { part in
-                        Text(part.rawValue).tag(part)
+                        Text(part.title).tag(part)
                     }
                 }
                 .labelsHidden()
@@ -205,17 +205,17 @@ struct DiagramDetailColumn: View {
                                     Image(systemName: node.uncertain ? "questionmark.square.dashed" : "square")
                                         .foregroundStyle(node.uncertain ? .orange : .secondary)
                                     Text(node.label)
-                                    if node.uncertain { Text("подпись нечитаема").font(.caption2).foregroundStyle(.orange) }
+                                    if node.uncertain { Text(L10n.text("подпись нечитаема")).font(.caption2).foregroundStyle(.orange) }
                                 }.accessibilityIdentifier("diagrams.node.\(node.id)")
                             }
                         case .edges:
                             if result.edges.isEmpty {
-                                Text("Связи не распознаны").foregroundStyle(.secondary)
+                                Text(L10n.text("Связи не распознаны")).foregroundStyle(.secondary)
                             }
                             ForEach(Array(result.edges.enumerated()), id: \.offset) { _, edge in edgeRow(edge) }
                         case .warnings:
                             ForEach(Array(diagram.warnings.enumerated()), id: \.offset) { _, warning in
-                                Label(warning, systemImage: "exclamationmark.triangle")
+                                Label(L10n.message(warning), systemImage: "exclamationmark.triangle")
                                     .font(.caption).foregroundStyle(.orange)
                             }
                         case .all:
@@ -225,13 +225,13 @@ struct DiagramDetailColumn: View {
                 }
                 .id(workspace.resultTab)
             } else if let error = workspace.resultError {
-                Label(error, systemImage: "exclamationmark.triangle").foregroundStyle(.secondary)
+                Label(L10n.message(error), systemImage: "exclamationmark.triangle").foregroundStyle(.secondary)
                     .accessibilityIdentifier("diagrams.resultError.\(diagram.id)")
             } else if diagram.state.processing || diagram.state == .queued {
-                Label("Структура появится после распознавания", systemImage: "sparkles")
+                Label(L10n.text("Структура появится после распознавания"), systemImage: "sparkles")
                     .foregroundStyle(.secondary)
             } else if diagram.activeRunId == nil {
-                Text("Схема ещё не распознана").foregroundStyle(.secondary)
+                Text(L10n.text("Схема ещё не распознана")).foregroundStyle(.secondary)
             } else {
                 ProgressView()
             }
@@ -244,7 +244,7 @@ struct DiagramDetailColumn: View {
             Text("\(workspace.edgeLabel(edge.from)) \(edge.symbol) \(workspace.edgeLabel(edge.to))")
             if let text = edge.label { Text("(\(text))").foregroundStyle(.secondary) }
             if let kind = edge.kind { Text(kind.title).font(.caption).foregroundStyle(.secondary) }
-            if edge.uncertain { Text("не подтверждена").font(.caption2).foregroundStyle(.orange) }
+            if edge.uncertain { Text(L10n.text("не подтверждена")).font(.caption2).foregroundStyle(.orange) }
         }.font(.callout)
     }
 }

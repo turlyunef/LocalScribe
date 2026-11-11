@@ -1,4 +1,5 @@
 import SwiftUI
+import LocalScribeCore
 
 struct GroupNameDraft: Identifiable {
     let id = UUID()
@@ -21,7 +22,7 @@ struct GroupNameEditor: View {
     @State private var finished = false
     @FocusState private var focused: Bool
     init(draft: GroupNameDraft,
-         placeholder: String = "Название группы",
+         placeholder: String = L10n.text("Название группы"),
          fieldIdentifier: String = "groups.name",
          errorIdentifier: String = "groups.name.error",
          save: @escaping (String) async throws -> Void,
@@ -42,7 +43,7 @@ struct GroupNameEditor: View {
                 .onExitCommand { guard !saving else { return }; finished = true; cancel() }
                 .onChange(of: focused) { _, value in if !value { commit(blur: true) } }
                 .disabled(saving)
-            if let error { Text(error).font(.caption).foregroundStyle(.red).accessibilityIdentifier(errorIdentifier) }
+            if let error { Text(L10n.message(error)).font(.caption).foregroundStyle(.red).accessibilityIdentifier(errorIdentifier) }
         }.padding(8)
             .task { await Task.yield(); focused = true }
     }

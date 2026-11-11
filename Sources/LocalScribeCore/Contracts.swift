@@ -46,19 +46,19 @@ public enum JobState: String, Codable, Sendable {
     case recording, recorded, waitingForModels, queued, preparingAudio, transcribing, diarizing, summarizing, completed, completedWithWarnings, interrupted, cancelled, failed
     public var title: String {
         switch self {
-        case .recording: return "Идёт запись"
-        case .recorded: return "Сохранено"
-        case .waitingForModels: return "Ожидает модели"
-        case .queued: return "В очереди"
-        case .preparingAudio: return "Подготавливаем аудио"
-        case .transcribing: return "Распознаём речь"
-        case .diarizing: return "Определяем участников"
-        case .summarizing: return "Составляем итоги"
-        case .completed: return "Готово"
-        case .completedWithWarnings: return "Готово с предупреждениями"
-        case .interrupted: return "Прервано — можно продолжить"
-        case .cancelled: return "Отменено"
-        case .failed: return "Ошибка — можно повторить"
+        case .recording: return L10n.text("Идёт запись")
+        case .recorded: return L10n.text("Сохранено")
+        case .waitingForModels: return L10n.text("Ожидает модели")
+        case .queued: return L10n.text("В очереди")
+        case .preparingAudio: return L10n.text("Подготавливаем аудио")
+        case .transcribing: return L10n.text("Распознаём речь")
+        case .diarizing: return L10n.text("Определяем участников")
+        case .summarizing: return L10n.text("Составляем итоги")
+        case .completed: return L10n.text("Готово")
+        case .completedWithWarnings: return L10n.text("Готово с предупреждениями")
+        case .interrupted: return L10n.text("Прервано — можно продолжить")
+        case .cancelled: return L10n.text("Отменено")
+        case .failed: return L10n.text("Ошибка — можно повторить")
         }
     }
     public var processing: Bool { [.preparingAudio, .transcribing, .diarizing, .summarizing].contains(self) }
@@ -246,4 +246,7 @@ public struct WorkerEvent: Codable, Sendable {
     public init(command: WorkerCommand, type: String, message: String = "", artifact: String? = nil) { jobId = command.jobId; runId = command.runId; self.type = type; self.message = message; self.artifact = artifact }
 }
 public func timecode(_ ms: Int) -> String { let s = max(0, ms) / 1000; return String(format: "%02d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) }
-public func speakerName(_ id: String?) -> String { id.map { "Спикер \($0.replacingOccurrences(of: "speaker-", with: ""))" } ?? "Спикер не определён" }
+public func speakerName(_ id: String?) -> String {
+    guard let id else { return L10n.text("Спикер не определён") }
+    return L10n.text("Спикер %1$@", id.replacingOccurrences(of: "speaker-", with: ""))
+}

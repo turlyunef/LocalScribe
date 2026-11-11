@@ -1,4 +1,5 @@
 import SwiftUI
+import LocalScribeCore
 
 struct RecordingActionsView: View {
     var canRepeatAnalysis: Bool
@@ -11,27 +12,27 @@ struct RecordingActionsView: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            Button("Показать аудио в Finder", action: showAudio)
-                .help("Показать исходный аудиофайл записи в Finder")
+            Button(L10n.text("Показать аудио в Finder"), action: showAudio)
+                .help(L10n.text("Показать исходный аудиофайл записи в Finder"))
                 .accessibilityIdentifier("recording.showAudio")
-            Button("Обработать заново", action: repeatAnalysis)
-                .help("Заново распознать речь, определить участников и создать итоги")
+            Button(L10n.text("Обработать заново"), action: repeatAnalysis)
+                .help(L10n.text("Заново распознать речь, определить участников и создать итоги"))
                 .disabled(!canRepeatAnalysis)
                 .accessibilityIdentifier("recording.repeatAnalysis")
-            Menu("Пересоздать итоги") {
-                Button("Русский") { recreateSummary("ru") }.help("Создать итоги на русском языке")
-                Button("English") { recreateSummary("en") }.help("Создать итоги на английском языке")
+            Menu(L10n.text("Пересоздать итоги")) {
+                Button(L10n.text("Русский")) { recreateSummary("ru") }.help(L10n.text("Создать итоги на русском языке"))
+                Button("English") { recreateSummary("en") }.help(L10n.text("Создать итоги на английском языке"))
             }
             .disabled(!canRecreateSummary)
-            .help("Создать новые итоги по готовой расшифровке на выбранном языке")
-            .accessibilityLabel("Пересоздать итоги")
+            .help(L10n.text("Создать новые итоги по готовой расшифровке на выбранном языке"))
+            .accessibilityLabel(L10n.text("Пересоздать итоги"))
             .accessibilityIdentifier("recording.recreateSummary")
             Button(role: .destructive, action: deleteRecording) {
                 Image(systemName: "trash").foregroundStyle(.red)
             }
             .buttonStyle(.borderless)
-            .help("Удалить запись")
-            .accessibilityLabel("Удалить запись")
+            .help(L10n.text("Удалить запись"))
+            .accessibilityLabel(L10n.text("Удалить запись"))
             .accessibilityIdentifier("recording.delete")
             .disabled(!canDelete)
         }

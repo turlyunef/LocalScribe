@@ -3,6 +3,8 @@ import Foundation
 public enum DiagramExportPart: String, CaseIterable, Sendable {
     case nodes = "Узлы", edges = "Связи", warnings = "Предупреждения", all = "Всё"
 
+    public var title: String { L10n.text(rawValue) }
+
     public static func sections(includingWarnings: Bool) -> [Self] {
         includingWarnings ? [.nodes, .edges, .warnings] : [.nodes, .edges]
     }
@@ -30,11 +32,11 @@ public enum DiagramExport {
         let escape = markdown ? escapeMarkdown : singleLine
         var lines = [(markdown ? "# " : "") + escape(title)]
         for section in sections where part == .all || part == section {
-            lines += ["", (markdown ? "## " : "") + section.rawValue, ""]
+            lines += ["", (markdown ? "## " : "") + section.title, ""]
             switch section {
             case .nodes:
                 for node in result.nodes {
-                    lines.append("- " + escape(node.label) + (node.uncertain ? " (подпись нечитаема)" : ""))
+                    lines.append("- " + escape(node.label) + (node.uncertain ? L10n.text(" (подпись нечитаема)") : ""))
                 }
             case .edges:
                 let labels = Dictionary(result.nodes.map { ($0.id, escape($0.label)) }, uniquingKeysWith: { first, _ in first })
@@ -43,11 +45,11 @@ public enum DiagramExport {
                     var line = "- " + from + " " + edge.symbol + " " + to
                     if let edgeLabel = edge.label { line += " (" + escape(edgeLabel) + ")" }
                     if let kind = edge.kind { line += " · " + kind.title }
-                    if edge.uncertain { line += " ⚠ не подтверждена" }
+                    if edge.uncertain { line += L10n.text(" ⚠ не подтверждена") }
                     lines.append(line)
                 }
             case .warnings:
-                for warning in warnings { lines.append("- " + escape(warning)) }
+                for warning in warnings { lines.append("- " + escape(L10n.message(warning))) }
             case .all:
                 break
             }

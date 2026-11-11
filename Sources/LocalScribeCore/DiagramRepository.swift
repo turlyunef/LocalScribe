@@ -179,7 +179,7 @@ public struct DiagramRepository: Sendable {
 
     private func importTitle(from source: URL) -> String {
         let name = source.deletingPathExtension().lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
-        return name.isEmpty ? "Изображение" : name
+        return name.isEmpty ? L10n.text("Изображение") : name
     }
 
     // MARK: - Runs

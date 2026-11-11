@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import LocalScribeCore
 
 /// Diagnostics snapshot taken when an error is reported; the clipboard form
 /// must give the full picture needed to fix the problem offline.
@@ -22,7 +23,7 @@ struct AppErrorReport {
          timestamp: Date = Date(),
          context: [(String, String)] = [],
          stack: [String] = AppErrorReport.callStack()) {
-        self.message = message
+        self.message = L10n.message(message)
         self.appVersion = appVersion
         self.build = build
         self.osVersion = osVersion
@@ -45,21 +46,21 @@ struct AppErrorReport {
 
     var clipboardText: String {
         var lines = [
-            "LocalScribe \(appVersion) (сборка \(build))",
+            L10n.text("LocalScribe %1$@ (сборка %2$@)", appVersion, build),
             osVersion,
-            "Время ошибки: \(Self.timestampFormatter.string(from: timestamp))",
+            L10n.text("Время ошибки: %1$@", Self.timestampFormatter.string(from: timestamp)),
             "",
-            "Ошибка:",
+            L10n.text("Ошибка:"),
             message
         ]
         if !context.isEmpty {
             lines.append("")
-            lines.append("Технические сведения:")
+            lines.append(L10n.text("Технические сведения:"))
             lines += context.map { "  \($0.0): \($0.1)" }
         }
         if !stack.isEmpty {
             lines.append("")
-            lines.append("Стек вызовов (GUI):")
+            lines.append(L10n.text("Стек вызовов (GUI):"))
             lines += stack.map { "  " + $0 }
         }
         return lines.joined(separator: "\n")
@@ -139,7 +140,7 @@ struct AppErrorReport {
         } else {
             panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 520, height: 280),
                             styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
-            panel.title = "Ошибка — LocalScribe"
+            panel.title = L10n.text("Ошибка — LocalScribe")
             panel.identifier = NSUserInterfaceItemIdentifier("app.error")
             panel.isReleasedWhenClosed = false
             panel.hidesOnDeactivate = true
@@ -167,7 +168,7 @@ struct AppErrorView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Label("Не удалось выполнить действие", systemImage: "exclamationmark.triangle.fill")
+            Label(L10n.text("Не удалось выполнить действие"), systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
             ScrollView {
                 Text(report.message).frame(maxWidth: .infinity, alignment: .leading)
@@ -175,22 +176,22 @@ struct AppErrorView: View {
                     .accessibilityIdentifier("error.message")
             }
             HStack {
-                if count > 1 { Text("Ещё сообщений: \(count - 1)").font(.caption).foregroundStyle(.secondary) }
+                if count > 1 { Text(L10n.text("Ещё сообщений: %1$@", String(count - 1))).font(.caption).foregroundStyle(.secondary) }
                 Spacer()
                 Button {
                     guard copy() != nil else { return }
                     copied = true
                     Task { try? await Task.sleep(for: .seconds(2)); copied = false }
                 } label: {
-                    Label(copied ? "Скопировано" : "Копировать ошибку",
+                    Label(copied ? L10n.text("Скопировано") : L10n.text("Копировать ошибку"),
                           systemImage: copied ? "checkmark" : "doc.on.doc")
                 }
                 .accessibilityIdentifier("error.copy")
-                .help("Скопировать сообщение об ошибке, технические сведения и версию приложения")
-                Button(count > 1 ? "Далее" : "Закрыть", action: dismiss)
+                .help(L10n.text("Скопировать сообщение об ошибке, технические сведения и версию приложения"))
+                Button(count > 1 ? L10n.text("Далее") : L10n.text("Закрыть"), action: dismiss)
                     .keyboardShortcut(.defaultAction)
                     .accessibilityIdentifier("error.dismiss")
-                    .help("Закрыть сообщение об ошибке")
+                    .help(L10n.text("Закрыть сообщение об ошибке"))
             }
         }.padding(24).frame(maxWidth: .infinity, maxHeight: .infinity)
         .onExitCommand(perform: dismiss)
