@@ -4,6 +4,48 @@ import XCTest
 @testable import LocalScribe
 
 final class CaptureIngressTests: XCTestCase {
+    @MainActor func testStoppedStartupEngineRequiresNewMicrophonePacketAfterRestart() async throws {
+        let ingress = CaptureIngress(meter: { _ in }, failure: { XCTFail($0) }, pressure: {})
+        let token = try XCTUnwrap(ingress.beginMicrophoneAttempt())
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024))
+        buffer.frameLength = 1024
+        try XCTUnwrap(buffer.floatChannelData?[0]).update(repeating: 0, count: 1024)
+        func submitSilence() {
+            ingress.submitMicrophone(buffer.audioBufferList, format: format, frameCount: 1024,
+                                     hostTime: AudioGetCurrentHostTime(), token: token)
+        }
+
+        // The old engine can send one packet and then stop before activation.
+        submitSilence()
+        var restarts = 0
+        try await MicrophoneRecorder.waitForFirstMicrophonePacket(until: .now + .seconds(2), ingress: ingress, token: token) {
+            restarts > 0
+        } restart: {
+            restarts += 1
+            XCTAssertNil(ingress.lastMicrophoneCallbackHostTime(for: token))
+            XCTAssertFalse(ingress.activateMicrophone(token))
+            submitSilence()
+        }
+        XCTAssertEqual(restarts, 1)
+        XCTAssertTrue(ingress.activateMicrophone(token))
+    }
+
+    @MainActor func testRunningEngineWithoutPacketsStillTimesOut() async throws {
+        let ingress = CaptureIngress(meter: { _ in }, failure: { XCTFail($0) }, pressure: {})
+        let token = try XCTUnwrap(ingress.beginMicrophoneAttempt())
+        do {
+            try await MicrophoneRecorder.waitForFirstMicrophonePacket(until: .now + .milliseconds(100), ingress: ingress, token: token) {
+                true
+            } restart: {
+                XCTFail("A running engine must not be restarted")
+            }
+            XCTFail("A microphone must deliver a packet before startup succeeds")
+        } catch {
+            XCTAssertEqual(error.localizedDescription, "Выбранный микрофон не передал аудиоданные при запуске.")
+        }
+    }
+
     func testHardwareMuteNoticeChangesWhileSystemAudioIsSilent() async throws {
         let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: folder) }

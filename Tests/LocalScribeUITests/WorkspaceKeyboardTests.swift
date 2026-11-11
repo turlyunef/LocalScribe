@@ -1,5 +1,6 @@
 import AppKit
 import Carbon.HIToolbox
+import Combine
 import SwiftUI
 import XCTest
 import LocalScribeCore
@@ -259,6 +260,41 @@ final class WorkspaceKeyboardTests: XCTestCase {
         XCTAssertEqual(model.selection, rows[0].id)
         XCTAssertEqual(Set(model.recordings.map(\.id)), Set(rows.map(\.id)))
         XCTAssertEqual(model.sidebarSelection.ids, Set(rows.map(\.id)))
+        await model.shutdown()
+    }
+
+    func testCommandDeleteAndEnterDoNotReloadResultWhileDeleting() async throws {
+        let (model, rows) = try await fixture()
+        let window = host(model)
+        defer { window.close() }
+        try await settle(window)
+        let recording = rows[0]
+        try clickRecording(recording, in: window)
+        try await settle(window)
+        XCTAssertEqual(model.transcript?.segments.first?.text, "Fixture transcript")
+
+        var clearedDuringCancellation = false
+        let observation = model.$transcript.dropFirst().sink { transcript in
+            if transcript == nil, model.selected?.id == recording.id, model.selected?.state == .cancelled {
+                clearedDuringCancellation = true
+            }
+        }
+        defer { observation.cancel() }
+
+        try commandDelete(window)
+        try await settle(window)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        try enter(sheet)
+        for _ in 0..<20 where model.recordings.contains(where: { $0.id == recording.id }) {
+            try await Task.sleep(for: .milliseconds(50))
+        }
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertEqual(model.recordings.map(\.id), rows.dropFirst().map(\.id))
+        XCTAssertNil(model.selection)
+        XCTAssertNil(model.transcript)
+        XCTAssertFalse(clearedDuringCancellation, "Cancelling a recording for deletion must not start a result reload")
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
         await model.shutdown()
     }
 

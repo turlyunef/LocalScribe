@@ -302,6 +302,7 @@ struct QueueJobID: Hashable, Sendable {
     }
     func loadResult() {
         guard let selected, let archive else { transcript = nil; summary = nil; resultSignature = ""; return }
+        guard !deletingJobIDs.contains(.recording(selected.id)) else { return }
         let signature = selected.id + (selected.activeRunId ?? "") + (selected.pendingRunId ?? "") + selected.state.rawValue
         guard resultSignature != signature else { return }
         resultSignature = signature
@@ -1295,12 +1296,11 @@ struct QueueJobID: Hashable, Sendable {
         await reload()
     }
     func deleteSelected() async {
-        guard deletingGroupID == nil, !deletingSidebarRecordings, let selected, let archive, selected.id != recordingID, !finalizingRecording else { return }
+        guard let selected, archive != nil, canDeleteSidebarRecordings([selected.id]), !finalizingRecording else { return }
         let alert = NSAlert(); alert.messageText = L10n.text("Удалить запись и результаты?"); alert.informativeText = L10n.text("Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся.")
         alert.addButton(withTitle: L10n.text("Удалить запись")); alert.addButton(withTitle: L10n.text("Отмена"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        await cancelSelected()
-        do { try await archive.delete(selected); selection = nil; await reload() } catch { errorHandler.report(error) }
+        guard alert.runModal() == .alertFirstButtonReturn, !finalizingRecording else { return }
+        await deleteSidebarRecordings([selected.id])
     }
     var sidebarRecordingOrder: [String] {
         recordingGroups.groups.filter { recordingSearch.expanded($0) }.flatMap { recordingSearch.visible[$0.id] ?? [] }
@@ -1335,17 +1335,10 @@ struct QueueJobID: Hashable, Sendable {
     func deleteSidebarRecordings(_ ids: Set<String>) async {
         guard let archive, canDeleteSidebarRecordings(ids) else { return }
         deletingSidebarRecordings = true
-        deletingJobIDs.formUnion(ids.map { QueueJobID.recording($0) })
-        // Bar every selected job before cancellation can yield to an enqueue response.
-        for id in ids {
-            jobAdmission[.recording(id), default: 0] &+= 1
-            enqueuing.removeValue(forKey: .recording(id))
-        }
-        queued.removeAll { $0.isRecording && ids.contains($0.id) }
+        beginDeletingRecordings(ids)
         defer {
             deletingSidebarRecordings = false
-            deletingJobIDs.subtract(recordings.map { QueueJobID.recording($0.id) })
-            Task { await processQueue() }
+            finishDeletingRecordings()
         }
         for id in ids.sorted() { await cancel(id) }
         do {
@@ -1354,6 +1347,25 @@ struct QueueJobID: Hashable, Sendable {
             }
         } catch { errorHandler.report(error) }
         await reload()
+    }
+    private func beginDeletingRecordings(_ ids: Set<String>) {
+        let jobs = Set(ids.map { QueueJobID.recording($0) })
+        deletingJobIDs.formUnion(jobs)
+        // Cancellation can publish a new snapshot before the files are removed.
+        // Discard any in-flight read for the selected recording before that reload.
+        if let selection, ids.contains(selection) { resultSignature = "" }
+        for job in jobs {
+            jobAdmission[job, default: 0] &+= 1
+            enqueuing.removeValue(forKey: job)
+        }
+        queued.removeAll { jobs.contains($0) }
+    }
+    private func finishDeletingRecordings() {
+        // The refreshed archive contains any recordings that survived a partial failure.
+        let reloadSelectedResult = selected.map { deletingJobIDs.contains(.recording($0.id)) } ?? false
+        deletingJobIDs.subtract(recordings.map { QueueJobID.recording($0.id) })
+        if reloadSelectedResult { loadResult() }
+        Task { await processQueue() }
     }
     var defaultGroup: RecordingGroup { recordingGroups.defaultGroup }
     func recordings(in groupID: String) -> [Manifest] {
@@ -1426,27 +1438,18 @@ struct QueueJobID: Hashable, Sendable {
             errorHandler.report(message: "Сначала остановите запись"); return
         }
         deletingGroupID = id
-        var members: [String] = []
         defer {
             deletingGroupID = nil
-            // Deleted IDs stay barred; surviving members can be explicitly resumed.
-            deletingJobIDs.subtract(recordings.map { QueueJobID.recording($0.id) })
-            Task { await processQueue() }
+            finishDeletingRecordings()
         }
         do {
-            members = try await archive.prepareGroupDeletion(id)
+            let members = try await archive.prepareGroupDeletion(id)
             if deleteRecordings {
                 let protected = Set([recordingID, finalizingRecordingID].compactMap { $0 })
                 guard canDeleteRecordings(in: id), protected.isDisjoint(with: members) else {
                     throw ScribeError.message("Сначала остановите запись")
                 }
-                deletingJobIDs.formUnion(members.map { QueueJobID.recording($0) })
-                // Invalidate all admissions before the first cancellation suspends.
-                for member in members {
-                    jobAdmission[.recording(member), default: 0] &+= 1
-                    enqueuing.removeValue(forKey: .recording(member))
-                }
-                queued.removeAll { $0.isRecording && members.contains($0.id) }
+                beginDeletingRecordings(Set(members))
                 for member in members { await cancel(member) }
             }
             try await archive.finishGroupDeletion(id, deleteRecordings: deleteRecordings)

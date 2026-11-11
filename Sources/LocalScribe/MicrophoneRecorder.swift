@@ -126,7 +126,7 @@ enum CaptureMicrophoneStatus: Equatable {
                 }
             }
             try Task.checkCancellation()
-            if let microphone { try await openInitialMicrophone(microphone, systemAudio: systemAudio) }
+            if let microphone { try await openInitialMicrophone(microphone) }
             if let startupFailure { throw ScribeError.message(startupFailure) }
             try await ingress.start(folder: folder, sources: sources)
             try Task.checkCancellation()
@@ -155,7 +155,7 @@ enum CaptureMicrophoneStatus: Equatable {
         }
     }
 
-    private func openInitialMicrophone(_ request: MicrophoneCaptureRequest, systemAudio: Bool) async throws {
+    private func openInitialMicrophone(_ request: MicrophoneCaptureRequest) async throws {
         var candidates = request.candidates(in: devices)
         if let initial = request.initial, let pinned = try? devices.refreshFormat(of: initial) {
             candidates.removeAll { $0.uid == pinned.uid }
@@ -175,8 +175,9 @@ enum CaptureMicrophoneStatus: Equatable {
                 }
             }
         }
-        if let lastError { throw lastError }
-        guard systemAudio else { throw ScribeError.message(request.selection.unavailableMessage) }
+        guard sources.contains(.systemAudio) else {
+            throw startupFailure.map(ScribeError.message) ?? lastError ?? ScribeError.message(request.selection.unavailableMessage)
+        }
         microphoneStatus = .waiting
         onWarning?("Запись началась без микрофона. Системный звук продолжает записываться.")
     }
@@ -198,26 +199,19 @@ enum CaptureMicrophoneStatus: Equatable {
             try startEngineMicrophone(microphone, ingress: ingress, token: token)
         }
 
-        // In mixed mode, system audio can otherwise mask an input that opened
-        // successfully but never sends a packet. Silence is valid PCM.
-        while ingress.lastMicrophoneCallbackHostTime(for: token) == nil {
-            guard ContinuousClock.now < deadline else {
-                throw ScribeError.message("Выбранный микрофон не передал аудиоданные при запуске.")
-            }
-            try await Task.sleep(for: .milliseconds(40))
-        }
-        try Task.checkCancellation()
-        guard microphoneToken == token else { throw CancellationError() }
-        guard ContinuousClock.now < deadline else {
-            throw ScribeError.message("Выбранный микрофон не передал аудиоданные при запуске.")
+        try await Self.waitForFirstMicrophonePacket(until: deadline, ingress: ingress, token: token) {
+            guard self.microphoneToken == token else { throw CancellationError() }
+            return self.engine?.isRunning != false
+        } restart: {
+            guard let engine = self.engine, let expectedInput = self.expectedInput else { throw CancellationError() }
+            let pinned = try self.devices.refreshFormat(of: microphone)
+            let current = try self.validateEngineInput(for: pinned)
+            _ = try self.restartEngineMicrophone(engine, microphone: pinned, previous: expectedInput,
+                                                  current: current, ingress: ingress, token: token)
         }
         let negotiated = try devices.refreshFormat(of: microphone)
         if let engine {
-            guard let current = currentInput(), current.deviceID == negotiated.deviceID,
-                  supportsMicrophone(current) else {
-                throw ScribeError.message("Вход или формат выбранного микрофона изменился.")
-            }
-            expectedInput = current
+            expectedInput = try validateEngineInput(for: negotiated)
             changeObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
             ) { [weak self] _ in
@@ -248,6 +242,37 @@ enum CaptureMicrophoneStatus: Equatable {
         if engine?.isRunning == false { scheduleConfigurationCheck(token) }
     }
 
+    static func waitForFirstMicrophonePacket(
+        until deadline: ContinuousClock.Instant,
+        ingress: CaptureIngress, token: UUID,
+        isEngineRunning: () throws -> Bool,
+        restart: () throws -> Void
+    ) async throws {
+        var stoppedSince: ContinuousClock.Instant?
+        while true {
+            try Task.checkCancellation()
+            let now = ContinuousClock.now
+            guard now < deadline else {
+                throw ScribeError.message("Выбранный микрофон не передал аудиоданные при запуске.")
+            }
+            if try isEngineRunning() {
+                if ingress.lastMicrophoneCallbackHostTime(for: token) != nil { return } // Silence is valid PCM.
+                stoppedSince = nil
+            } else if let since = stoppedSince {
+                if since.duration(to: now) >= .milliseconds(100) {
+                    ingress.clearPendingMicrophonePacket(token)
+                    try restart()
+                    stoppedSince = nil
+                }
+            } else {
+                // Core Audio can stop the engine during startup, before the
+                // active-route observer is installed. Let HAL settle first.
+                stoppedSince = now
+            }
+            try await Task.sleep(until: min(deadline, now + .milliseconds(40)))
+        }
+    }
+
     private func startEngineMicrophone(_ microphone: PinnedMicrophone, ingress: CaptureIngress, token: UUID) throws {
         let engine = AVAudioEngine()
         self.engine = engine
@@ -265,6 +290,7 @@ enum CaptureMicrophoneStatus: Equatable {
             throw ScribeError.message("Выбранный микрофон недоступен или имеет неподдерживаемый формат.")
         }
         try installMicrophoneTap(input, sampleRate: configuration.sampleRate, ingress: ingress, token: token)
+        expectedInput = configuration
         engine.prepare()
         try engine.start()
     }
@@ -364,33 +390,48 @@ enum CaptureMicrophoneStatus: Equatable {
         self.expectedInput = current
         guard !engine.isRunning else { return }
 
+        do {
+            let updated = try restartEngineMicrophone(engine, microphone: negotiated, previous: expectedInput,
+                                                      current: current, ingress: ingress, token: token)
+            if updated != negotiated { observeInput(updated, token: token) }
+            self.microphone = updated
+            onWarning?("Аудиодвижок перезапущен с прежним микрофоном; возможен короткий пропуск звука.")
+        } catch {
+            microphoneLost(token, warning: error.localizedDescription)
+        }
+    }
+
+    private func validateEngineInput(for microphone: PinnedMicrophone) throws -> CaptureInputConfiguration {
+        guard let current = currentInput(), current.deviceID == microphone.deviceID,
+              supportsMicrophone(current) else {
+            throw ScribeError.message("Вход или формат выбранного микрофона изменился.")
+        }
+        return current
+    }
+
+    private func restartEngineMicrophone(_ engine: AVAudioEngine, microphone: PinnedMicrophone,
+                                         previous: CaptureInputConfiguration, current: CaptureInputConfiguration,
+                                         ingress: CaptureIngress, token: UUID) throws -> PinnedMicrophone {
         let now = Date()
         restartTimes.removeAll { now.timeIntervalSince($0) > 5 }
         guard restartTimes.count < 3 else {
-            microphoneLost(token, warning: "Аудиодвижок микрофона нестабилен.")
-            return
+            throw ScribeError.message("Аудиодвижок микрофона нестабилен.")
         }
         restartTimes.append(now)
         do {
-            if current != expectedInput {
+            if current != previous {
                 engine.inputNode.removeTap(onBus: 0)
                 tapInstalled = false
                 try installMicrophoneTap(engine.inputNode, sampleRate: current.sampleRate, ingress: ingress, token: token)
             }
             try engine.start()
-            let updated = try devices.refreshFormat(of: negotiated)
-            guard let restarted = currentInput(), restarted.deviceID == updated.deviceID, supportsMicrophone(restarted) else {
-                microphoneLost(token, warning: "Вход или формат выбранного микрофона изменился.")
-                return
-            }
-            if updated != negotiated { observeInput(updated, token: token) }
-            self.microphone = updated
-            self.expectedInput = restarted
-            engineRestartCount += 1
-            onWarning?("Аудиодвижок перезапущен с прежним микрофоном; возможен короткий пропуск звука.")
         } catch {
-            microphoneLost(token, warning: "Не удалось возобновить аудиодвижок микрофона.")
+            throw ScribeError.message("Не удалось возобновить аудиодвижок микрофона.")
         }
+        let updated = try devices.refreshFormat(of: microphone)
+        expectedInput = try validateEngineInput(for: updated)
+        engineRestartCount += 1
+        return updated
     }
 
     private func loseSystemAudio(warning: String) async {
@@ -668,6 +709,12 @@ final class CaptureIngress: @unchecked Sendable {
 
     func lastMicrophoneCallbackHostTime(for token: UUID) -> UInt64? {
         gate.withLock { microphoneToken == token ? microphoneCallbackHostTime : nil }
+    }
+
+    func clearPendingMicrophonePacket(_ token: UUID) {
+        gate.withLock {
+            if microphoneToken == token, !microphoneReady { microphoneCallbackHostTime = nil }
+        }
     }
 
     func activateMicrophone(_ token: UUID) -> Bool {
