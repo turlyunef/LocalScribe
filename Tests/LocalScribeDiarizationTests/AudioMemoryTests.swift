@@ -33,6 +33,11 @@ final class AudioMemoryTests: XCTestCase {
         XCTAssertEqual(try Media.samples(url), expected)
         XCTAssertEqual(try Media.samples(url, start: 1, duration: 2.5), Array(expected[16_000..<56_000]))
         XCTAssertEqual(try Media.samples(url, start: Double(expected.count) / 16_000), [])
+        let reader = try Media.PCMFrameReader(url)
+        XCTAssertEqual(reader.frameCount, expected.count)
+        XCTAssertEqual(try reader.read(16_000..<56_000), Array(expected[16_000..<56_000]))
+        XCTAssertEqual(try reader.read(56_000..<expected.count), Array(expected[56_000...]))
+        XCTAssertThrowsError(try reader.read(0..<(expected.count + 1)))
     }
 
     @MainActor
@@ -64,13 +69,16 @@ final class AudioMemoryTests: XCTestCase {
         guard ProcessInfo.processInfo.environment["LOCALSCRIBE_AUDIO_MEMORY_BENCHMARK"] == "1" else {
             throw XCTSkip("Opt in to allocating a three-hour synthetic PCM input")
         }
-        let audio = (0..<(10_800 * 16_000)).map { Float($0 % 127) }
+        let frameCount = 10_800 * 16_000
         let baseline = audioResidentBytes()
         let peak = Mutex(baseline)
         let model = try await SpeakerSegmenterModel(modelURL: URL(fileURLWithPath: "/unused"), concurrentWorkers: 1)
-        try await model.predictChunks(audioArray: audio, sendOutput: { _ in }, chunkStrideOffset: 64_000) { index, waveform in
+        try await model.predictChunks(audioRange: 0..<frameCount, readFrames: { range in
+            XCTAssertLessThanOrEqual(range.count, 480_000)
+            return Array(repeating: Float(range.lowerBound % 127), count: range.count)
+        }, sendOutput: { _ in }, chunkStrideOffset: 64_000) { index, waveform in
             peak.withLock { $0 = max($0, audioResidentBytes()) }
-            XCTAssertEqual(waveform.first, audio[index * 416_000])
+            XCTAssertEqual(waveform.first, Float((index * 416_000) % 127))
             return SpeakerSegmenterOutput(features: try MLDictionaryFeatureProvider(dictionary: [:]), chunkIndex: index,
                 audioChunk: MLMultiArray(), chunkStride: 26, waveformLength: Float(waveform.count) / 16_000,
                 modelSampleRate: 1, audioSampleRate: 16_000)

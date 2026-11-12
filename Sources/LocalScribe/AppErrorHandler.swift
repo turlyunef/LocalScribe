@@ -93,6 +93,7 @@ struct AppErrorReport {
 
     func report(message: String?, context: [(String, String)] = []) {
         guard let message, !message.isEmpty else { return }
+        if reports.count >= 50 { reports.remove(at: 1) }
         reports.append(AppErrorReport(message: message, context: context))
         presentIfNeeded()
     }

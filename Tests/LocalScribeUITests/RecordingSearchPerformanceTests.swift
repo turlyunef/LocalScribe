@@ -116,7 +116,14 @@ import Synchronization
                 try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: executable.path)
                 var ready = false
                 let worker = Task { try? await model.supervisor.run(command, executable: executable) { _ in ready = true } }
-                while !ready { await Task.yield() }
+                let readyDeadline = ContinuousClock.now + .seconds(5)
+                while !ready, ContinuousClock.now < readyDeadline { try await Task.sleep(for: .milliseconds(10)) }
+                guard ready else {
+                    worker.cancel()
+                    await worker.value
+                    XCTFail("Search benchmark worker did not start")
+                    return
+                }
                 var cancellation: [Double] = [], workerSamples: [Double] = [], longInput: [Double] = []
                 let longTitle = String(repeating: "п", count: 8192) + "а"
                 model.recordings.append(longRowWithNewID(longTitle))

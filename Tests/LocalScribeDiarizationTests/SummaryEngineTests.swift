@@ -1,4 +1,5 @@
 import XCTest
+import Synchronization
 import LocalScribeCore
 @testable import LocalScribeWorker
 
@@ -93,6 +94,33 @@ final class SummaryEngineTests: XCTestCase {
         return try await engine.verify(findings, kind: kind, source: source, model: model, language: "en", sourceHash: "source-hash") { _ in
             throw UnexpectedSummaryCall.amendment
         }
+    }
+
+    func testInvalidConfirmedAmendmentKeepsUncertainFindingAndWarns() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        var transcript = transcript(count: 2)
+        transcript.segments[1].text = "Instead I will check item 1."
+        let source = await SummarySourceIndex(transcript) { _ in 100 }
+        let finding = Finding(id: "t", text: "Check item 0", evidenceSegmentIds: ["s0"])
+        let positive = supported(0)
+        let model = EngineReviewLog { request in
+            request.purpose == .evidence ? positive :
+                #"{"effect":"amended","sourceSegmentId":"s1","quote":"Instead I will check item 1."}"#
+        }
+        let warnings = Mutex<[String]>([])
+        let engine = SummaryEngine(modelFolder: root, run: root) { type, message, _ in
+            if type == "warning" { warnings.withLock { $0.append(message) } }
+        }
+        let result = try await engine.verify([finding], kind: "task", source: source, model: model.model,
+                                             language: "en", sourceHash: "fixture") { _ in
+            Summary(language: "en", tasks: [finding])
+        }
+        var expected = finding
+        expected.uncertain = true
+        expected.evidenceSegmentIds.append("s1")
+        XCTAssertEqual(result, [expected])
+        XCTAssertEqual(warnings.withLock { $0.count }, 1)
     }
 
     func testPreparedLinesCountsIndexesAndLegacyBoundaries() async throws {

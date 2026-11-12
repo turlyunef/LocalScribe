@@ -20,7 +20,11 @@ public enum Media {
         // Foundation Process creates a separate process group on macOS. By
         // default, spawn without SETPGROUP to inherit the worker's group.
         let output = Pipe()
-        defer { try? output.fileHandleForReading.close(); try? output.fileHandleForWriting.close() }
+        var writeEndClosed = false
+        defer {
+            try? output.fileHandleForReading.close()
+            if !writeEndClosed { try? output.fileHandleForWriting.close() }
+        }
         for handle in [output.fileHandleForReading, output.fileHandleForWriting] {
             guard fcntl(handle.fileDescriptor, F_SETFD, FD_CLOEXEC) == 0 else { throw ScribeError.message("Не удалось настроить канал аудиоинструмента") }
         }
@@ -60,6 +64,7 @@ public enum Media {
             }
         }
         guard launch == 0 else { throw ScribeError.message("Не удалось запустить аудиоинструмент (код \(launch))") }
+        writeEndClosed = true
         try? output.fileHandleForWriting.close()
         if cancellable { return try cancellableOutput(output.fileHandleForReading.fileDescriptor, pid: pid) }
         let data = output.fileHandleForReading.readDataToEndOfFile()
@@ -183,6 +188,37 @@ public enum Media {
         file.framePosition = AVAudioFramePosition((start * rate).rounded())
         let remaining = max(0, file.length - file.framePosition)
         let count = AVAudioFrameCount(min(remaining, AVAudioFramePosition(((duration ?? (Double(remaining) / rate)) * rate).rounded())))
+        return try readSamples(file, count: count)
+    }
+
+    /// Keeps the prepared PCM open and gives each reader an exact frame range.
+    public final class PCMFrameReader: @unchecked Sendable {
+        private let file: AVAudioFile
+        private let lock = NSLock()
+        public let frameCount: Int
+
+        public init(_ url: URL) throws {
+            let file = try AVAudioFile(forReading: url)
+            guard file.processingFormat.channelCount == 1, file.processingFormat.sampleRate == 16_000,
+                  file.length > 0, file.length <= Int64(Manifest.maximumDurationMs) * 16 + 2_400 else {
+                throw ScribeError.message("Неполный или неподдерживаемый PCM")
+            }
+            self.file = file
+            frameCount = Int(file.length)
+        }
+
+        public func read(_ range: Range<Int>) throws -> [Float] {
+            guard range.lowerBound >= 0, range.upperBound <= frameCount else {
+                throw ScribeError.message("Неполный или неподдерживаемый PCM")
+            }
+            return try lock.withLock {
+                file.framePosition = AVAudioFramePosition(range.lowerBound)
+                return try Media.readSamples(file, count: AVAudioFrameCount(range.count))
+            }
+        }
+    }
+
+    private static func readSamples(_ file: AVAudioFile, count: AVAudioFrameCount) throws -> [Float] {
         guard count > 0 else { return [] }
         // Keep one result array and a bounded decode buffer, even for hours of PCM.
         guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: min(count, 16_384)) else { throw ScribeError.message("Не хватает памяти для аудиобуфера") }
@@ -197,7 +233,7 @@ public enum Media {
         return samples
     }
     public static func assembleCapture(_ folder: URL, destination: URL) throws -> (Int64, Double) {
-        let parts = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil).filter { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+        let parts = try CaptureIntegrity.fragmentURLs(at: folder)
         return try assembleCaptureParts(parts, destination: destination)
     }
     public static func assembleCaptureParts(_ parts: [URL], destination: URL) throws -> (Int64, Double) {

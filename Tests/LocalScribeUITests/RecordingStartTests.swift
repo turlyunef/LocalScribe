@@ -1,3 +1,4 @@
+import AppKit
 import AVFoundation
 import CoreAudio
 import Foundation
@@ -14,6 +15,7 @@ import LocalScribeCore
         var onMicrophoneStatus: ((CaptureMicrophoneStatus) -> Void)?
         var startError: Error?
         var startup: (() async throws -> Void)?
+        var stopping: (() async -> Void)?
         var microphone: PinnedMicrophone?
         var microphoneRequested = false
         var fallbackCalls = 0
@@ -42,6 +44,7 @@ import LocalScribeCore
 
         func stop() async throws -> Int64 {
             stopCalls += 1
+            await stopping?()
             return 1600
         }
     }
@@ -78,6 +81,65 @@ import LocalScribeCore
         do { try await run(model, repo, devices) }
         catch { await model.shutdown(); throw error }
         await model.shutdown()
+    }
+
+    private func waitForStart(_ ready: () -> Bool) async throws {
+        let deadline = ContinuousClock.now + .seconds(5)
+        while !ready(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }
+        guard ready() else { throw StartError.timeout }
+    }
+
+    private enum StartError: Error { case timeout }
+
+    func testMenuBarStartsWithoutWindowAndQuitSavesRecordingAndIndex() async throws {
+        let capture = Capture()
+        try await withModel(captures: [capture], authorize: { true }) { model, repo, _ in
+            let delegate = AppDelegate()
+            XCTAssertNil(delegate.model)
+            let start = try XCTUnwrap(delegate.requestMenuRecording(using: model))
+            XCTAssertTrue(delegate.model === model)
+            XCTAssertNil(delegate.requestMenuRecording(using: model))
+            await start.value
+            let id = try XCTUnwrap(model.recordingID)
+            var allowed: Bool?
+            XCTAssertEqual(delegate.requestTermination { allowed = $0 }, .terminateLater)
+            try await waitForStart { allowed != nil }
+            XCTAssertEqual(allowed, true)
+            XCTAssertNil(model.recordingID)
+            XCTAssertEqual(capture.startCalls, 1)
+            XCTAssertEqual(capture.stopCalls, 1)
+            XCTAssertTrue(try repo.load(id).sourceComplete)
+            let index = try Disk.read([Manifest].self, at: repo.root.appendingPathComponent("index.json"))
+            XCTAssertEqual(index.first(where: { $0.id == id })?.sourceComplete, true)
+        }
+    }
+
+    func testFirstQuitTimeoutAbortsAndSecondAllowsExit() async throws {
+        let capture = Capture()
+        var release: CheckedContinuation<Void, Never>?
+        capture.stopping = { await withCheckedContinuation { release = $0 } }
+        try await withModel(captures: [capture], authorize: { true }) { model, _, _ in
+            await model.startRecording()
+            let delegate = AppDelegate()
+            delegate.model = model
+            delegate.shutdownTimeout = .milliseconds(120)
+            var replies: [Bool] = []
+            defer {
+                release?.resume()
+                model.errorHandler.dismissCurrent()
+            }
+            XCTAssertEqual(delegate.requestTermination { replies.append($0) }, .terminateLater)
+            try await waitForStart { !replies.isEmpty }
+            XCTAssertEqual(replies, [false])
+            XCTAssertNotNil(release)
+            XCTAssertEqual(delegate.requestTermination { replies.append($0) }, .terminateLater)
+            try await waitForStart { replies.count == 2 }
+            XCTAssertEqual(replies, [false, true])
+            release?.resume()
+            release = nil
+            try await waitForStart { delegate.shutdownFinished }
+            XCTAssertEqual(delegate.requestTermination { _ in }, .terminateNow)
+        }
     }
 
     private func configure(_ model: AppModel, microphone: Bool, systemAudio: Bool,
@@ -224,7 +286,7 @@ import LocalScribeCore
 
             try configure(model, microphone: true, systemAudio: true, selection: .systemDefault)
             let start = try XCTUnwrap(model.requestRecording())
-            while permission == nil { await Task.yield() }
+            try await waitForStart { permission != nil }
             XCTAssertTrue(model.startingRecording)
             await model.changeGroups { try $0.setDefault(second.id) }
             try configure(model, microphone: false, systemAudio: false)
@@ -246,7 +308,7 @@ import LocalScribeCore
             await withCheckedContinuation { permission = $0 }
         }) { model, repo, _ in
             let start = try XCTUnwrap(model.requestRecording())
-            while permission == nil { await Task.yield() }
+            try await waitForStart { permission != nil }
             await model.prepareForSleep()
             XCTAssertFalse(model.startingRecording)
             XCTAssertNil(model.recordingID)
@@ -265,7 +327,7 @@ import LocalScribeCore
         }) { model, repo, _ in
             try configure(model, microphone: false, systemAudio: true)
             let start = try XCTUnwrap(model.requestRecording())
-            while capture.startCalls == 0 { await Task.yield() }
+            try await waitForStart { capture.startCalls != 0 }
             await model.shutdown()
             await start.value
             XCTAssertEqual(capture.stopCalls, 1)

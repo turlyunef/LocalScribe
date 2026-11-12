@@ -5,16 +5,59 @@ import LocalScribeCore
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     let aboutPanel = AboutPanelPresenter()
-    private var quitting = false
-    private var shutdownFinished = false
+    var shutdownTimeout: Duration = .seconds(15)
+    private var cleanup: Task<Void, Never>?
+    private var timeout: Task<Void, Never>?
+    private var reply: ((Bool) -> Void)?
+    private var timedOut = false
+    private(set) var shutdownFinished = false
+
+    @discardableResult
+    func requestMenuRecording(using model: AppModel) -> Task<Void, Never>? {
+        guard model.canStartRecording else { return nil }
+        self.model = model
+        model.errorHandler.startPresenting()
+        return model.requestRecording(groupID: model.defaultGroup.id)
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        requestTermination { sender.reply(toApplicationShouldTerminate: $0) }
+    }
+
+    func requestTermination(reply: @escaping (Bool) -> Void) -> NSApplication.TerminateReply {
         guard !shutdownFinished, let model else { return .terminateNow }
-        if !quitting {
-            quitting = true
-            // Finish asynchronous cleanup, then issue a fresh termination request.
-            DispatchQueue.main.async { Task { await model.shutdown(); self.shutdownFinished = true; sender.terminate(nil) } }
+        guard self.reply == nil else { return .terminateLater }
+        self.reply = reply
+        if cleanup == nil {
+            cleanup = Task { [weak self] in
+                await model.shutdown()
+                guard let self else { return }
+                shutdownFinished = true
+                finishTermination(allow: true)
+            }
         }
-        return .terminateCancel
+        timeout = Task { [weak self, shutdownTimeout] in
+            do { try await Task.sleep(for: shutdownTimeout) } catch { return }
+            guard let self else { return }
+            if timedOut {
+                model.supervisor.terminateNow()
+                finishTermination(allow: true)
+            } else {
+                timedOut = true
+                finishTermination(allow: false)
+                model.errorHandler.startPresenting()
+                model.errorHandler.report(message: L10n.text("Не удалось вовремя завершить сохранение. Повторите выход, чтобы завершить приложение при следующем таймауте."))
+            }
+        }
+        return .terminateLater
+    }
+
+    private func finishTermination(allow: Bool) {
+        timeout?.cancel()
+        timeout = nil
+        let reply = self.reply
+        self.reply = nil
+        reply?(allow)
     }
     func applicationWillTerminate(_ notification: Notification) { model?.supervisor.terminateNow() }
 }
@@ -63,10 +106,7 @@ struct LocalScribeApp: App {
             } else {
                 Text(L10n.text("LocalScribe · локальный архив"))
                 Button(L10n.text("Начать запись")) {
-                    guard model.canStartRecording else { return }
-                    delegate.model = model
-                    model.errorHandler.startPresenting()
-                    model.requestRecording(groupID: model.defaultGroup.id)
+                    delegate.requestMenuRecording(using: model)
                 }
                 .disabled(!model.canStartRecording)
             }

@@ -7,9 +7,8 @@ import argparse
 import hashlib
 import json
 from pathlib import Path
-import urllib.request
+from catalog_io import ROOT, get, write_catalog
 
-ROOT = Path(__file__).resolve().parents[1]
 REVISIONS = {
     'Qwen3-ASR-1.7B-bf16': 'e1f6c266914abc5a46e8756e02580f834a6cf8a7',
     'Qwen3-ForcedAligner-0.6B-bf16': '53c8c0e46733eec430e4b53dd6471d0e5dee45f8',
@@ -19,11 +18,6 @@ REVISIONS = {
 TOKENIZER_FILES = {'vocab.json', 'merges.txt', 'tokenizer_config.json'}
 MODEL_FILES = {'config.json', 'model.safetensors', 'preprocessor_config.json', 'generation_config.json'}
 POLICY = 'qwen3-pause28-context250-greedy1024-rawalign-v2'
-
-
-def get(url):
-    with urllib.request.urlopen(url, timeout=60) as response:
-        return response.read()
 
 
 def lock_files(repository, revision, metadata, names):
@@ -95,7 +89,7 @@ def main():
                 raise ValueError('Refusing to replace an existing pinned profile')
         else:
             catalog['models'].append(profile)
-    args.output.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + '\n')
+    write_catalog(args.output, catalog)
 
 
 if __name__ == '__main__':

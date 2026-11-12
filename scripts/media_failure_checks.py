@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """Real preparingAudio failures and stereo phase handling, with technical audio only."""
-import hashlib, json, math, pathlib, struct, subprocess, uuid, wave
+import argparse, hashlib, json, math, pathlib, struct, subprocess, uuid, wave
 root = pathlib.Path(__file__).resolve().parents[1]
 output = root/'TestResults/media-failures'; output.mkdir(parents=True, exist_ok=True)
-worker = root/'.build/out/Products/Release/LocalScribeWorker'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--worker', type=pathlib.Path)
+worker = parser.parse_args().worker
+if worker is None:
+    product = subprocess.check_output(['swift', 'build', '-c', 'release', '--show-bin-path'], cwd=root, text=True).strip()
+    worker = pathlib.Path(product) / 'LocalScribeWorker'
+worker = worker.resolve()
+if not worker.is_file():
+    parser.error(f"Worker executable not found: {worker}")
 rows = []
 for case in ('damaged', 'over-three-hours', 'antiphase'):
     folder = output/str(uuid.uuid4()); (folder/'source').mkdir(parents=True)

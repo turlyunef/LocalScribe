@@ -581,7 +581,10 @@ def context_from_baseline(args, output):
     if digest(REPO / planner) != old_hashes[planner]:
         raise ValueError("C window planner changed; fresh full-source comparison required")
     # Freeze the already evaluated v1, not new tuning on these controls.
-    frozen = read(REPO / "TestResults/asr-word-repair-payment-20261020-final/replay-environment.json")["algorithmSourceHashes"]
+    repair_environment = args.repair_environment or (REPO / "TestResults/asr-word-repair-payment-20261020-final/replay-environment.json")
+    if not repair_environment.is_file():
+        raise ValueError("Pass --repair-environment with the replay-environment.json from the validated word-repair run")
+    frozen = read(repair_environment)["algorithmSourceHashes"]
     for name in ("Sources/LocalScribeWorker/ASRWordRepair.swift", "Sources/LocalScribeWorker/ASRContextReview.swift"):
         if digest(REPO / name) != frozen[name]:
             raise ValueError("Prototype v1 changed before first control evaluation")
@@ -687,6 +690,7 @@ def main():
     parser.add_argument("--report-only", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
     parser.add_argument("--context-from-baseline", type=pathlib.Path, help="Reuse full frozen A/C and decode selected C contexts only")
+    parser.add_argument("--repair-environment", type=pathlib.Path, help="Word-repair replay-environment.json used by --context-from-baseline")
     parser.add_argument("--repair-replay", type=pathlib.Path, help="Propose word repairs on a copied completed E run; no new inference")
     parser.add_argument("--timeout", type=int, default=14400, help="Seconds per variant")
     parser.add_argument("--variants", nargs="+", choices=VARIANTS, default=DEFAULT_VARIANTS,

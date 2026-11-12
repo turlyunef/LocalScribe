@@ -3,9 +3,9 @@
 Only small metadata files are fetched; large LFS files use published SHA-256 hashes.
 Never used by the installed app or ordinary builds.
 """
-import concurrent.futures, hashlib, json, pathlib, time, urllib.request
+import concurrent.futures, hashlib, json
+from catalog_io import ROOT, get, write_catalog
 
-ROOT = pathlib.Path(__file__).resolve().parents[1]
 OUTPUT = ROOT / 'Resources/models.lock.json'
 existing = {m['id']: m for m in json.loads(OUTPUT.read_text())['models']} if OUTPUT.exists() else {}
 # id, role, display name, repository, subfolder, license, RAM GiB, working GiB, tokenizer
@@ -31,23 +31,6 @@ RANKS = {key: rank for keys in (
     ['asr-base', 'asr-small', 'asr-medium', 'asr-turbo', 'asr'],
     ['summary-2b', 'summary-4b', 'summary', 'summary-9b-8bit', 'summary-27b', 'summary-27b-6bit', 'summary-27b-8bit', 'summary-122b'],
 ) for rank, key in enumerate(keys, 1)}
-
-CACHE = ROOT / '.build/model-metadata'
-CACHE.mkdir(parents=True, exist_ok=True)
-def get(url):
-    cache = CACHE / hashlib.sha256(url.encode()).hexdigest()
-    # Cache immutable file URLs only; repository metadata must stay current.
-    immutable = '/resolve/' in url
-    if immutable and cache.exists(): return cache.read_bytes()
-    for attempt in range(4):
-        try:
-            with urllib.request.urlopen(url, timeout=30) as response:
-                data = response.read()
-            if immutable: cache.write_bytes(data)
-            return data
-        except Exception:
-            if attempt == 3: raise
-            time.sleep(1 + attempt)
 
 catalog = {'schemaVersion': 1, 'models': []}
 repos = {}
@@ -90,4 +73,4 @@ for key, role, name, repo, prefix, license, ram, working, tokenizer in profiles:
 # Keep separately reviewed backend profiles and their immutable dependencies.
 known = {m['id'] for m in catalog['models']}
 catalog['models'].extend(model for key, model in existing.items() if key not in known)
-OUTPUT.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + '\n')
+write_catalog(OUTPUT, catalog)

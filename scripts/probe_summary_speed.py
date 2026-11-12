@@ -42,7 +42,7 @@ def measure(worker, folder, run, models, output, label):
     started = time.monotonic()
     with (output / (label + '-events.jsonl')).open('w') as events:
         child = subprocess.Popen([str(worker)], stdin=subprocess.PIPE, stdout=events,
-                                 stderr=subprocess.DEVNULL, text=True)
+                                 stderr=subprocess.DEVNULL, text=True, start_new_session=True)
         try:
             # Keep stdin open: EOF is the real worker's cancellation command.
             child.stdin.write(json.dumps(command) + '\n')

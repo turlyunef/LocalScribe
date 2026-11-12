@@ -1,3 +1,4 @@
+import CryptoKit
 import Darwin
 import Foundation
 
@@ -6,8 +7,9 @@ import Foundation
 final class ImportSource {
     private let file: FileHandle
     let size: Int64
+    private let allowsAppendedBytes: Bool
 
-    init(_ url: URL) throws {
+    init(_ url: URL, allowsAppendedBytes: Bool = false) throws {
         // Nonblocking open lets us reject a FIFO without waiting for a writer.
         let descriptor = url.withUnsafeFileSystemRepresentation { path in
             path.map { Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NONBLOCK) } ?? -1
@@ -23,11 +25,37 @@ final class ImportSource {
         }
         self.file = file
         size = status.st_size
+        self.allowsAppendedBytes = allowsAppendedBytes
+    }
+
+    private func readPinnedBytes(_ consume: (Data) throws -> Void) throws {
+        func requireUnchangedSize() throws {
+            guard !allowsAppendedBytes else { return }
+            var status = stat()
+            guard fstat(file.fileDescriptor, &status) == 0, status.st_size == size else {
+                throw ScribeError.message("Размер исходного файла изменился во время импорта")
+            }
+        }
+        try requireUnchangedSize()
+        try file.seek(toOffset: 0)
+        var remaining = size
+        while remaining > 0 {
+            try Task.checkCancellation()
+            try autoreleasepool {
+                guard let bytes = try file.read(upToCount: Int(min(remaining, 4 * 1024 * 1024))), !bytes.isEmpty else {
+                    throw ScribeError.message("Размер исходного файла изменился во время импорта")
+                }
+                try consume(bytes)
+                remaining -= Int64(bytes.count)
+            }
+        }
+        try requireUnchangedSize()
     }
 
     func hash() throws -> String {
-        try file.seek(toOffset: 0)
-        return try Disk.hash(file, checkCancellation: true)
+        var hash = SHA256()
+        try readPinnedBytes { hash.update(data: $0) }
+        return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     func close() { try? file.close() }
@@ -44,14 +72,8 @@ final class ImportSource {
             try? output.close()
             if !verified { try? FileManager.default.removeItem(at: destination) }
         }
-        try file.seek(toOffset: 0)
-        while true {
-            try Task.checkCancellation()
-            guard let bytes = try file.read(upToCount: 4 * 1024 * 1024), !bytes.isEmpty else { break }
-            try output.write(contentsOf: bytes)
-        }
+        try readPinnedBytes { try output.write(contentsOf: $0) }
         try output.synchronize()
-        try output.close()
         guard try Disk.hash(destination, checkCancellation: true) == digest else {
             throw ScribeError.message("Не удалось проверить сохранённый оригинал")
         }

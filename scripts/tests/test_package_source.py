@@ -18,7 +18,8 @@ class PackageSourceTests(unittest.TestCase):
             included = ["Package.swift", "Package.resolved", "Sources/App.swift",
                         "ThirdParty/SpeakerKit/audio-memory.patch", "README.md"]
             excluded = [".git/config", "build/ffmpeg/config.h", ".build/output", ".swiftpm/cache",
-                        "Assets/large-model", "TestResults/private.txt", "dist/old.tar.gz", "trace.log"]
+                        "Assets/large-model", "TestResults/private.txt", "dist/old.tar.gz", "trace.log",
+                        "Vendor/ffmpeg-8.0.1.tar.xz", "Vendor/ffmpeg-8.0.1/configure", "Vendor/new-tool/cache"]
             for name in included + excluded:
                 target = root / name
                 target.parent.mkdir(parents=True, exist_ok=True)

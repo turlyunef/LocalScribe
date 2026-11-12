@@ -1,8 +1,16 @@
 #!/usr/bin/env python3
 """Exercise the actual worker preparation contract on every supported codec and 3h."""
-import json,pathlib,subprocess,sys
+import argparse,json,pathlib,subprocess,sys
 root=pathlib.Path(__file__).resolve().parents[1]
-worker=root/'.build/out/Products/Release/LocalScribeWorker'
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--worker', type=pathlib.Path)
+worker = parser.parse_args().worker
+if worker is None:
+    product = subprocess.check_output(['swift', 'build', '-c', 'release', '--show-bin-path'], cwd=root, text=True).strip()
+    worker = pathlib.Path(product) / 'LocalScribeWorker'
+worker = worker.resolve()
+if not worker.is_file():
+    parser.error(f"Worker executable not found: {worker}")
 files=[root/'Assets/probe/mixed.wav']+[root/'Assets/format-fixtures'/n for n in ['aac.m4a','alac.m4a','audio.flac','sample.mp3','sample-vorbis.ogg','sample-opus.ogg','sample.opus']]+[root/'Assets/probe/three-hours.wav']
 results=[]
 for file in files:

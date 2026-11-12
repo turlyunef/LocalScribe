@@ -41,7 +41,11 @@ final class ImportQueueTests: XCTestCase {
         try Data(name.utf8).write(to: url)
         return url
     }
-    private func defaults() -> UserDefaults { UserDefaults(suiteName: UUID().uuidString)! }
+    private func defaults() -> UserDefaults {
+        let suite = "ImportQueueTests." + UUID().uuidString
+        addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        return UserDefaults(suiteName: suite)!
+    }
     private func waitUntil(_ predicate: () -> Bool) async throws {
         let deadline = ContinuousClock.now + .seconds(5)
         while !predicate(), ContinuousClock.now < deadline { try await Task.sleep(for: .milliseconds(10)) }

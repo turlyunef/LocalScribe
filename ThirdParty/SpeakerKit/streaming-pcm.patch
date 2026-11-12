@@ -1,0 +1,269 @@
+diff --git a/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift b/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
+index 1ea3120..97a5ce5 100644
+--- a/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
++++ b/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift
+@@ -75,7 +75,18 @@ public final class PyannoteDiarizer: Diarizer, @unchecked Sendable {
+         options: (any DiarizationOptions)? = nil,
+         progressCallback: (@Sendable (Progress) -> Void)? = nil
+     ) async throws -> DiarizationResult {
+-        try await diarizerActor.diarize(audioArray: audioArray, options: options, progressCallback: progressCallback)
++        try await diarize(frameCount: audioArray.count, readFrames: { Array(audioArray[$0]) },
++                          options: options, progressCallback: progressCallback)
++    }
++
++    func diarize(
++        frameCount: Int,
++        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
++        options: (any DiarizationOptions)?,
++        progressCallback: (@Sendable (Progress) -> Void)?
++    ) async throws -> DiarizationResult {
++        try await diarizerActor.diarize(frameCount: frameCount, readFrames: readFrames,
++                                       options: options, progressCallback: progressCallback)
+     }
+ }
+
+@@ -140,7 +151,8 @@ actor PyannoteDiarizerActor {
+     }
+
+     func initialize(
+-        audioArray: [Float],
++        frameCount: Int,
++        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
+         options: PyannoteDiarizationOptions? = nil,
+         progressCallback: (@Sendable (Progress) -> Void)? = nil
+     ) async throws {
+@@ -149,10 +161,10 @@ actor PyannoteDiarizerActor {
+         timings.pipelineStart = CFAbsoluteTimeGetCurrent()
+
+         try await loadModels()
+-        audioLength = audioArray.count
++        audioLength = frameCount
+
+-        let seekClips = prepareSeekClips(contentFrames: audioArray.count, options: options)
+-        Logging.debug("[PyannoteDiarizer] audioArray: \(audioArray.count), seekClips: \(seekClips)")
++        let seekClips = prepareSeekClips(contentFrames: frameCount, options: options)
++        Logging.debug("[PyannoteDiarizer] frameCount: \(frameCount), seekClips: \(seekClips)")
+
+         let totalAudioSeconds = seekClips.reduce(0.0) { $0 + Double($1.1 - $1.0) / Double(WhisperKit.sampleRate) }
+
+@@ -183,7 +195,7 @@ actor PyannoteDiarizerActor {
+             let snap = try await Self.processClip(
+                 expectedChunks: expectedChunks, workerCount: embedderWorkerCount,
+                 produce: { send in
+-                    try await segmenterModel.predict(audioArray: audioArray, sendOutput: send, audioRange: clipRange)
++                    try await segmenterModel.predict(audioRange: clipRange, readFrames: readFrames, sendOutput: send)
+                 },
+                 embed: { output in try await embedderModel.embed(segmenterOutput: output) },
+                 consume: { embeddings in await clusterer.add(speakerEmbeddings: embeddings) },
+@@ -408,11 +420,16 @@ actor PyannoteDiarizerActor {
+         return DiarizationResult(binaryMatrix: binaryDiarization, diarizationFrameRate: diarizationFrameRate, speakerCentroidEmbeddings: speakerCentroids)
+     }
+
+-    func diarize(audioArray: [Float], options: (any DiarizationOptions)?, progressCallback: (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult {
++    func diarize(
++        frameCount: Int,
++        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
++        options: (any DiarizationOptions)?,
++        progressCallback: (@Sendable (Progress) -> Void)?
++    ) async throws -> DiarizationResult {
+         let opts = options as? PyannoteDiarizationOptions
+
+         guard let progressCallback else {
+-            try await initialize(audioArray: audioArray, options: opts, progressCallback: nil)
++            try await initialize(frameCount: frameCount, readFrames: readFrames, options: opts, progressCallback: nil)
+             var result = try await clusterSpeakers(with: config.clusterer, options: opts, progressCallback: nil)
+             if let minActiveOffset = opts?.minActiveOffset {
+                 result.updateSegments(minActiveOffset: minActiveOffset)
+@@ -425,7 +442,7 @@ actor PyannoteDiarizerActor {
+         let diarizationProgress = Progress(totalUnitCount: 100)
+         progressCallback(diarizationProgress)
+
+-        try await initialize(audioArray: audioArray, options: opts) { @Sendable child in
++        try await initialize(frameCount: frameCount, readFrames: readFrames, options: opts) { @Sendable child in
+             let value = Int64(child.fractionCompleted * 85)
+             if value > diarizationProgress.completedUnitCount {
+                 diarizationProgress.completedUnitCount = value
+diff --git a/Sources/SpeakerKit/Pyannote/SpeakerEmbedderModel.swift b/Sources/SpeakerKit/Pyannote/SpeakerEmbedderModel.swift
+index e577fdf..40b41e2 100644
+--- a/Sources/SpeakerKit/Pyannote/SpeakerEmbedderModel.swift
++++ b/Sources/SpeakerKit/Pyannote/SpeakerEmbedderModel.swift
+@@ -227,15 +227,16 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
+         let framesPerChunk = context.framesPerChunk
+         Logging.debug("[SpeakerEmbedder] Processing single chunk \(chunkIndex) with \(windowsCount) windows, \(framesPerChunk) frames per chunk")
+
+-        let chunkSpeakerMasks = try MLMultiArray(shape: [1, speakerDimensionForMasks(), NSNumber(value: framesPerChunk)], dataType: .float16)
+-
+         let speakersCount = context.speakersCount
+-        let totalSpeakers = windowsCount * speakersCount
+-        for i in 0..<totalSpeakers {
+-            for j in 0..<framesPerChunk {
+-                chunkSpeakerMasks[[0, i, j] as [NSNumber]] = 0 as NSNumber
+-            }
++        let (totalSpeakers, overflow) = windowsCount.multipliedReportingOverflow(by: speakersCount)
++        let embedderModel = try getModel()
++        guard !overflow, let maskShape = embedderModel.modelDescription.inputDescriptionsByName["speaker_masks"]?.multiArrayConstraint?.shape,
++              maskShape.count == 3, maskShape[0].intValue == 1,
++              maskShape[1].intValue >= totalSpeakers, maskShape[2].intValue == framesPerChunk else {
++            throw SpeakerKitError.invalidModelOutput("Invalid embedder speaker masks")
+         }
++        let chunkSpeakerMasks = try MLMultiArray(shape: maskShape, dataType: .float16)
++        chunkSpeakerMasks.dataPointer.initializeMemory(as: UInt16.self, repeating: 0, count: chunkSpeakerMasks.count)
+
+         let windowTimelinesForChunk = context.chunkIndices
+         let speakerIds = context.speakerIds
+@@ -250,7 +251,7 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
+             }
+
+             let timelineIndices = windowTimelinesForChunk[windowIdx]
+-            for speakerIdx in 0..<speakersCount {
++            for speakerIdx in activeSpeakersIndex {
+                 let chunkSpeakerIdx = windowIdx * speakersCount + speakerIdx
+                 for frameIdx in 0..<framesPerWindowCount {
+                     let speakerMaskValue = speakerIds[[windowIdx, frameIdx, speakerIdx] as [NSNumber]].floatValue
+@@ -259,9 +260,7 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
+                     let filteredValue = speakerMaskValue * (1 - overlappedActivity)
+
+                     let windowFrameIdx = timelineIndices[frameIdx]
+-                    if activeSpeakersIndex.contains(speakerIdx) {
+-                        chunkSpeakerMasks[[0, chunkSpeakerIdx, windowFrameIdx] as [NSNumber]] = filteredValue as NSNumber
+-                    }
++                    chunkSpeakerMasks[[0, chunkSpeakerIdx, windowFrameIdx] as [NSNumber]] = filteredValue as NSNumber
+                 }
+             }
+         }
+@@ -278,10 +277,12 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
+         }
+
+         let embedderInput = SpeakerEmbedderInput(speakerMasks: chunkSpeakerMasks, preprocessorOutput: preprocessorOutput)
+-        let embedderModel = try getModel()
+         let embedderFeatures = try await embedderModel.asyncPrediction(from: embedderInput, options: MLPredictionOptions())
+         let embedderOutput = SpeakerEmbedderOutput(features: embedderFeatures)
+         let embeddingsOutput = SpeakerEmbedderOutput.floatArrays(from: embedderOutput.speakerEmbeddings)
++        guard embeddingsOutput.count >= totalSpeakers else {
++            throw SpeakerKitError.invalidModelOutput("Incomplete speaker embeddings")
++        }
+
+         var pldaEmbeddingsOutput: [[Float]] = []
+         if pldaModel != nil, let speakerEmbeddings = embedderOutput.speakerEmbeddings {
+@@ -399,14 +400,6 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
+         )
+     }
+
+-    private func speakerDimensionForMasks() -> NSNumber {
+-        guard let shape = model?.modelDescription.inputDescriptionsByName["speaker_masks"]?.multiArrayConstraint?.shape,
+-              shape.count > 1 else {
+-            Logging.error("Failed to get speaker_masks shape for EmbedderModel")
+-            return 0
+-        }
+-        return shape[1]
+-    }
+ }
+
+ // MARK: - Embedder Model Input / Output
+diff --git a/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift b/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
+index a41211f..c7e2ee7 100644
+--- a/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
++++ b/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift
+@@ -144,6 +144,22 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
+         sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
+         windowPadding: Int = 0,
+         audioRange: Range<Int>? = nil
++    ) async throws {
++        let bounds = audioRange ?? audioArray.indices
++        guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count else {
++            throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
++        }
++        try await predict(audioRange: bounds, readFrames: { Array(audioArray[$0]) },
++                          sendOutput: sendOutput, windowPadding: windowPadding)
++    }
++
++    // LocalScribe: the same global chunk indices and overlap are used for
++    // in-memory samples and PCM read on demand from disk.
++    func predict(
++        audioRange: Range<Int>,
++        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
++        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
++        windowPadding: Int = 0
+     ) async throws {
+         guard let model else {
+             throw SpeakerKitError.modelUnavailable("Speaker segmenter model is unavailable")
+@@ -160,8 +176,8 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
+         let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
+         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+         let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
+-        try await predictChunks(audioArray: audioArray, sendOutput: sendOutput,
+-                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset, audioRange: audioRange) { index, waveform in
++        try await predictChunks(audioRange: audioRange, readFrames: readFrames, sendOutput: sendOutput,
++                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset) { index, waveform in
+             guard let audioSamples = AudioProcessor.padOrTrimAudio(
+                 fromArray: Self.reflectTail(waveform, toLength: maxChunkLength),
+                 startAt: 0, toLength: maxChunkLength
+@@ -187,11 +203,26 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
+         chunkStrideOffset: Int,
+         audioRange: Range<Int>? = nil,
+         predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
++    ) async throws {
++        let bounds = audioRange ?? audioArray.indices
++        guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count else {
++            throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
++        }
++        try await predictChunks(audioRange: bounds, readFrames: { Array(audioArray[$0]) }, sendOutput: sendOutput,
++                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset, predictChunk: predictChunk)
++    }
++
++    func predictChunks(
++        audioRange bounds: Range<Int>,
++        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
++        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
++        windowPadding: Int = 0,
++        chunkStrideOffset: Int,
++        predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
+     ) async throws {
+         guard (1...384_000).contains(sampleRate) else { throw SpeakerKitError.invalidModelOutput("Invalid audio sample rate") }
+         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
+-        let bounds = audioRange ?? audioArray.indices
+-        guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count,
++        guard bounds.lowerBound >= 0,
+               chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
+               windowPadding >= 0, windowPadding <= bounds.count else {
+             throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
+@@ -216,7 +247,11 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
+                     var completed = 0
+                     for await chunk in chunkStream {
+                         try Task.checkCancellation()
+-                        let output = try await predictChunk(chunk.index, Array(audioArray[chunk.range]))
++                        let waveform = try readFrames(chunk.range)
++                        guard waveform.count == chunk.range.count else {
++                            throw SpeakerKitError.invalidModelOutput("Incomplete diarization audio")
++                        }
++                        let output = try await predictChunk(chunk.index, waveform)
+                         try Task.checkCancellation()
+                         guard output.chunkIndex == chunk.index else {
+                             throw SpeakerKitError.invalidModelOutput("Segmenter returned the wrong chunk index")
+diff --git a/Sources/SpeakerKit/SpeakerKit.swift b/Sources/SpeakerKit/SpeakerKit.swift
+index 6522b4c..6bbf608 100644
+--- a/Sources/SpeakerKit/SpeakerKit.swift
++++ b/Sources/SpeakerKit/SpeakerKit.swift
+@@ -70,6 +70,22 @@ open class SpeakerKit: @unchecked Sendable {
+         return try await diarizer.diarize(audioArray: audioArray, options: options, progressCallback: progressCallback)
+     }
+
++    /// LocalScribe: read bounded 16 kHz mono PCM ranges while keeping a single
++    /// timeline and clustering pass. The reader must be safe for concurrent calls.
++    public func diarize(
++        frameCount: Int,
++        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float]
++    ) async throws -> DiarizationResult {
++        guard frameCount >= 0, let manager = diarizer as? SpeakerKitDiarizer,
++              let loader = manager.loader as? PyannoteModelLoader else {
++            throw SpeakerKitError.invalidConfiguration("Streaming diarization requires the Pyannote backend")
++        }
++        try await ensureModelsLoaded()
++        let pyannote = try loader.makeDiarizer()
++        return try await pyannote.diarize(frameCount: frameCount, readFrames: readFrames,
++                                          options: nil, progressCallback: nil)
++    }
++
+     /// Builds RTTM lines from a diarization result, optionally aligned to a transcription.
+     /// - Parameters:
+     ///   - diarizationResult: Result from `diarize(audioArray:options:)`.

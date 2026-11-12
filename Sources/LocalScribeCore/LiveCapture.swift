@@ -98,12 +98,17 @@ public enum CaptureIntegrity {
         }
     }
     public static func fragments(at folder: URL) throws -> [CaptureFragment] {
+        try fragmentURLs(at: folder).indices.map { try CaptureFragment.read(index: $0, folder: folder) }
+    }
+
+    static func fragmentURLs(at folder: URL) throws -> [URL] {
         let urls = try FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
-        return try urls.enumerated().map { index, url in
-            let fragment = try CaptureFragment.read(index: index, folder: folder)
-            guard url.lastPathComponent == fragment.filename else { throw ScribeError.message("Нарушен порядок фрагментов записи") }
-            return fragment
+        for (index, url) in urls.enumerated() {
+            guard url.lastPathComponent == String(format: "part-%06d.caf", index) else {
+                throw ScribeError.message("Нарушен порядок фрагментов записи")
+            }
         }
+        return urls
     }
 }

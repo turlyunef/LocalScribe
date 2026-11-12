@@ -1,0 +1,87 @@
+@startuml 04-worker-audio-pipeline
+title worker: обработка аудио — одна команда, один этап Pipeline
+
+start
+:чтение WorkerCommand из stdin (JSONL v1);
+:stdout SDK перенаправлен в stderr,\nпротокол — отдельный дескриптор;
+:CWorkerIsolation: запрет исходящих\nсоединений проверен ДО загрузки SDK;
+if (структура команды некорректна\nили неизвестный kind?) then (да)
+  :выход 64 без события;
+  stop
+endif
+:emit «started»;
+
+partition "Pipeline «actor»: приём задания" {
+  :чтение manifest.json и runs/<runId>/run.json;
+  if (schemaVersion, UUID каталога, длительность\n≤ 3 ч, соответствие задания?) then (нестыковка)
+    :emit «failed» (нейтральное сообщение),\nвыход 1;
+    stop
+  endif
+  if (liveCapture?) then (да)
+    :проверка capture-run.json: seal, fingerprint,\nзакреплённые модели, pendingRunId;
+  else (нет)
+    :sourceHash == manifest.sha256,\nsourceComplete, SHA оригинала сверен;
+  endif
+  if (стадия transcribing и pipelineVersion\nзадания не совпадает?) then (да)
+    :emit «failed» — контрольные точки\nнесовместимы, нужен новый run;
+    stop
+  endif
+  :pinned-профили из models.lock.json,\nсовместимость железа, размеры и SHA весов;
+}
+
+switch (stage)
+case (preparingAudio)
+  :FFmpeg: оригинал → work/audio.wav\n(mono PCM16, 16 кГц), проверка свободного места;
+  :prepared.json — fingerprint + pcmFrames;
+case (transcribing)
+  if (liveCapture?) then (да)
+    partition "LiveTranscriber" {
+      :только закрытые CAF;\nSHA каждого фрагмента и seal потока;
+      :части 30 c с контекстом, непрерывное\nпокрытие окон, исходная шкала времени;
+      :контрольная точка — после проверки\nприсоединения к оригиналу;
+    }
+  else (нет)
+    partition "offline ASR — части по 300 c" {
+      if (профиль ASR?) then (Whisper)
+        :окна core ≤ 28 c, вход SDK ≤ 30 c,\nвыбор пауз, prefix-retry начала,\nотклонение результата после отмены;
+      elseif (VibeVoice) then (да)
+        :окно ≤ 60 c + контекст ≤ 5 c,\nделение окон > 3,75 c при исчерпании\nлимита, граница 300 c на вызов;
+      else (Qwen3)
+        :единый SpeechRecognizer,\nмодель живёт весь этап ASR;
+      endif
+      :контрольные точки asr/part-N.json:\nfingerprint, индекс, границы части;\nсовпавшая точка переиспользуется;
+    }
+  endif
+  :полный transcript.json — только после\nуспеха и проверки всех частей;
+case (diarizing)
+  partition "SpeakerKit — один глобальный проход" {
+    :segmenter → ограниченный канал\n(не больше 3) → embedder → кластеризация;
+    :отражение неполного хвоста, реальные\nдлины, обрезка интервалов по оригиналу;
+    if (ошибка inference или отмена?) then (да)
+      :сброс без частичного результата —\nASR и прежний active run сохранены;
+      stop
+    endif
+  }
+  :сопоставление участников на уровне слов,\nреплики без word timings;
+case (summarizing)
+  partition "SummaryEngine «actor» — MLX LLM" {
+    :проверка fingerprint расшифровки;
+    :извлечение по разделам и языкам,\nхронологический контекст, бюджет 8192,\nthinking=false с проверкой суффикса;
+    :верификация оснований и дословных цитат,\nпоздние ответы — только явные,\nresolve-question контрольные точки\nв summary-parts/;
+    :summary.json + llm-audit.json\n+ metrics-summary.json;
+  }
+endswitch
+
+:metrics-<stage>.json (rusage, без текста встречи);
+:emit «completed»(artifact), штатный выход:\nотмена watchdog, оба cancellation handler,\nзатем закрытие протокола — выход 0;
+stop
+
+note right
+  GUI проверяет automaticSummaries при
+  переходе к этапу итогов; выключение не
+  отменяет уже запущенную LLM. Отмена
+  (EOF) — выход 72, ошибка — выход 1
+  с нейтральным сообщением; SDK stderr
+  дренируется и не сохраняется.
+end note
+@enduml

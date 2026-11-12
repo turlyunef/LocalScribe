@@ -77,7 +77,8 @@ public enum DiagramExport {
         lines.append("' " + plantumlSafe(title, warnings: &warnings))
         let sequence = result.kind == .sequence
         let declaration = sequence ? "participant" : "rectangle"
-        let aliases = Dictionary(uniqueKeysWithValues: result.nodes.enumerated().map { ($1.id, "n\($0)") })
+        let aliases = Dictionary(result.nodes.enumerated().map { ($1.id, "n\($0)") },
+                                 uniquingKeysWith: { first, _ in first })
         for (index, node) in result.nodes.enumerated() {
             let label = node.label.split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
                 .map { plantumlSafe(String($0), warnings: &warnings) }.joined(separator: "\\n")

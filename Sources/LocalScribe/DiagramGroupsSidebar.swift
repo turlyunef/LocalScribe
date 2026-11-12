@@ -351,6 +351,8 @@ struct DeleteDiagramsView: View {
                 Button(L10n.text("Отмена"), action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
                 Button(L10n.text("Удалить"), role: .destructive) {
+                    guard !workspace.model.deletingDiagramJobs,
+                          ids.contains(where: { workspace.model.diagram($0) != nil }) else { return }
                     dismiss()
                     Task { await workspace.deleteSelected(ids) }
                 }
@@ -374,16 +376,20 @@ struct DeleteDiagramGroupView: View {
                 Button(L10n.text("Отмена"), action: dismiss).keyboardShortcut(.cancelAction)
                 Spacer()
                 Button(L10n.text("Удалить только группу")) {
+                    guard !model.deletingDiagramJobs else { return }
                     dismiss()
                     Task { await workspace.deleteGroup(group.id, deleteDiagrams: false) }
                 }
+                .disabled(model.deletingDiagramJobs)
                 .accessibilityIdentifier("diagrams.groups.confirmDelete")
             }
             Button(L10n.text("Удалить группу и схемы"), role: .destructive) {
+                guard !model.deletingDiagramJobs else { return }
                 dismiss()
                 Task { await workspace.deleteGroup(group.id, deleteDiagrams: true) }
             }
             .foregroundStyle(.red)
+            .disabled(model.deletingDiagramJobs)
             .accessibilityIdentifier("diagrams.groups.confirmDeleteDiagrams")
         }.padding(24).frame(width: 540).onExitCommand(perform: dismiss)
     }

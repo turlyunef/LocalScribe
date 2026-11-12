@@ -26,7 +26,7 @@ final class TimedCaptureWriter {
         var systemAudio: Float = 0
     }
 
-    private let originHostTime: UInt64
+    private var originHostTime: UInt64?
     private let sources: Set<CaptureAudioSource>
     private let sink: CapturePCM16Sink
     private let output: AVAudioPCMBuffer
@@ -39,7 +39,7 @@ final class TimedCaptureWriter {
     var totalFrames: Int64 { sink.totalFrames }
     var reachedLimit: Bool { tracks.values.contains { $0.acceptedThrough >= sink.totalFrameLimit } }
 
-    init(folder: URL, originHostTime: UInt64, sources: Set<CaptureAudioSource>, maximumDuration: Double = 10_800) throws {
+    init(folder: URL, originHostTime: UInt64?, sources: Set<CaptureAudioSource>, maximumDuration: Double = 10_800) throws {
         guard !sources.isEmpty, let format = CapturePCM16Sink.format,
               let output = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: MicrophoneCaptureWriter.bufferCapacity) else {
             throw ScribeError.message("Не удалось подготовить сохранение звука")
@@ -61,6 +61,8 @@ final class TimedCaptureWriter {
               input.frameLength <= MicrophoneCaptureWriter.bufferCapacity else {
             throw ScribeError.message("Не удалось прочитать звуковой буфер")
         }
+        let originHostTime = self.originHostTime ?? hostTime
+        self.originHostTime = originHostTime
         let elapsed = hostTime >= originHostTime ? AVAudioTime.seconds(forHostTime: hostTime - originHostTime)
             : -AVAudioTime.seconds(forHostTime: originHostTime - hostTime)
         let start = elapsed * Self.sampleRate

@@ -422,6 +422,7 @@ public class Qwen3ForcedAlignerModel: Module {
         let configPath = modelDir.appendingPathComponent("config.json")
         let configData = try Data(contentsOf: configPath)
         let config = try JSONDecoder().decode(Qwen3ASRConfig.self, from: configData)
+        guard config.audioConfig.nWindow == 50 else { throw QwenRuntimeError.invalidAudio }
 
         let perLayerQuantization = config.perLayerQuantization
 

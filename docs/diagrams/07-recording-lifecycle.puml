@@ -1,0 +1,57 @@
+@startuml 07-recording-lifecycle
+title Жизненный цикл записи и схемы (RecordingStatus)
+
+skinparam state {
+  BackgroundColor<<active>> LemonChiffon
+}
+
+state "Идёт запись" as recording
+state "Сохранено" as recorded
+state "Ожидает модель" as waitingForModels
+state "В очереди" as queued
+state "Обработка (один последовательный worker)" as processing {
+  state "Подготавливаем аудио" as preparingAudio
+  state "Распознаём речь" as transcribing
+  state "Определяем участников" as diarizing
+  state "Составляем итоги" as summarizing
+  preparingAudio --> transcribing
+  transcribing --> diarizing
+  diarizing --> summarizing : automaticSummaries\n(выключение не отменяет\nзапущенную LLM)
+}
+state "Готово" as completed
+state "Готово с предупреждениями" as completedWithWarnings
+state "Прервано — можно продолжить" as interrupted
+state "Отменено" as cancelled
+state "Ошибка — можно повторить" as failed
+
+[*] --> recording : «Начать запись»\n(разрешение запрошено\nпосле фиксации параметров)
+[*] --> recorded : импорт файла\n(probe + SHA + копия)
+
+recording --> recorded : остановка: сборка оригинала,\nчисло сэмплов + SHA
+recorded --> waitingForModels : схема без модели .diagram\n(вне FIFO)
+waitingForModels --> queued : профиль схем установлен
+recorded --> queued : постановка в общую очередь\n(FIFO, составные ключи)
+queued --> processing : свободный слот worker
+processing --> completed : «completed»(artifact),\nпроверки пройдены
+processing --> completedWithWarnings : есть предупреждения запуска
+processing --> interrupted : пауза памяти или защиты\nмикрофона, сон — очередь сохранена
+interrupted --> queued : автоматическое продолжение
+processing --> cancelled : отмена: аудио и результаты\nсохранены; при записи меняется\nтолько captureProcessing
+processing --> failed : ошибка этапа —\nрезультаты прежних этапов целы
+failed --> queued : «Повторить» / «Обработать заново»\n(новый run) / «Продолжить»\n(pending run + pinned-модели)
+completed --> [*]
+completedWithWarnings --> [*]
+cancelled --> [*]
+
+note right of recording
+  Фоновое ASR (captureProcessing) идёт
+  параллельно записи и не останавливает
+  микрофон при ошибке модели.
+end note
+note right of queued
+  «Поднять на верх очереди» меняет
+  только порядок ожидающих заданий.
+  Отложенный enqueue не возвращает
+  отменённое задание после сна.
+end note
+@enduml

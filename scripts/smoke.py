@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Real engine probe on a user-supplied file. Never inserts fixture results in the app."""
 import argparse, hashlib, json, pathlib, subprocess, time, uuid, datetime, os, re
+ROOT = pathlib.Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser()
 p.add_argument('audio', type=pathlib.Path)
 p.add_argument('--worker', type=pathlib.Path, required=True)
-p.add_argument('--models', type=pathlib.Path, default=pathlib.Path('Assets/models'))
-p.add_argument('--tools', type=pathlib.Path, default=pathlib.Path('Assets/tools'))
-p.add_argument('--output', type=pathlib.Path, default=pathlib.Path('TestResults/smoke'))
+p.add_argument('--models', type=pathlib.Path, default=(ROOT / 'Assets/models'))
+p.add_argument('--tools', type=pathlib.Path, default=(ROOT / 'Assets/tools'))
+p.add_argument('--output', type=pathlib.Path, default=(ROOT / 'TestResults/smoke'))
 p.add_argument('--stages', default='preparingAudio,transcribing,diarizing,summarizing')
 p.add_argument('--resume', type=pathlib.Path)
 p.add_argument('--trace', action='store_true', help='Write model output only for technical-probe records')
@@ -16,7 +17,8 @@ source = args.audio.resolve(); tools = args.tools.resolve()
 probe = json.loads(subprocess.check_output([str(tools/'ffprobe'), '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(source)]))
 audio = next(s for s in probe['streams'] if s['codec_type'] == 'audio')
 duration = float(probe['format']['duration'])
-assert 0 < duration <= 10800
+if not 0 < duration <= 10800:
+    p.error('Audio duration must be positive and no longer than three hours')
 if args.resume:
     folder = args.resume.resolve()
     manifest = json.loads((folder/'manifest.json').read_text())

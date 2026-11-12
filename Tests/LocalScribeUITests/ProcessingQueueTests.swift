@@ -163,13 +163,13 @@ final class ProcessingQueueTests: XCTestCase {
         let (m, info, checkpoint) = try await interrupted(repo, model: model)
         try await waitUntil { model.transcript != nil }
         state.withLock { $0.enabled = true }
-        model.resume(m.id)
+        let resume = try XCTUnwrap(model.resume(m.id))
         try await waitUntil { state.withLock { $0.blocked } }
         let release = Task { @MainActor in gate.signal() }
         await model.pause(reason: "Audit sleep pause")
         _ = await release.value
-        try await waitUntil { !model.finalizingRecording }
-        try await Task.sleep(for: .milliseconds(300))
+        await resume.value
+        XCTAssertFalse(model.finalizingRecording)
         XCTAssertFalse(model.supervisor.running, "Pause must invalidate resume work that began before it")
         XCTAssertNil(model.queuePosition(for: m.id))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("events.jsonl").path))
@@ -195,7 +195,7 @@ final class ProcessingQueueTests: XCTestCase {
         try await waitUntil { (try? repo.load(active.id).state) == .interrupted }
         await model.enqueue(late.id)
         await pause.value
-        try await Task.sleep(for: .milliseconds(300))
+        await model.processQueue()
         let saved = try repo.load(late.id)
         XCTAssertEqual(saved.state, .interrupted)
         XCTAssertEqual(saved.lastError, "Audit sleep pause")
@@ -1260,8 +1260,7 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertFalse(model.busy)
         XCTAssertFalse(model.supervisor.running)
         XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(m.id).path))
-        model.resumeAfterMemoryPressure()
-        try await Task.sleep(for: .milliseconds(200))
+        await model.resumeAfterMemoryPressure().value
         XCTAssertNil(model.queuePosition(for: m.id))
         XCTAssertFalse(model.busy)
         await model.shutdown()

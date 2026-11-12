@@ -1,0 +1,105 @@
+@startuml 01-architecture
+title LocalScribe — процессы, модули и границы изоляции
+
+skinparam defaultTextAlignment center
+skinparam componentStyle rectangle
+skinparam nodesep 40
+skinparam ranksep 50
+
+package "Процесс GUI — LocalScribe.app (App Sandbox, без network.client)" as GUIProc {
+  package "LocalScribe — интерфейс (SwiftUI/AppKit)" {
+    [ContentView / SettingsWindow /\nсайдбары записей и схем] as UI
+    [AppModel — @MainActor\nочередь заданий, оба архива] as AppModel
+    [WorkerSupervisor — @MainActor\nзапуск и контроль worker] as Supervisor
+    [ImportQueue — FIFO импорта файлов\n(один активный слот)] as ImportQueue
+    [ModelDownloadClient —\nзагрузка моделей, прогресс по requestID] as ModelDownload
+    [Захват звука: MicrophoneRecorder,\nMicrophoneDevices, SystemAudioCapture,\nBluetoothMicrophoneCapture, TimedCaptureWriter] as Capture
+    [ResultPresentation / ResultEditorView —\nтекст и ссылки вне MainActor] as Presentation
+  }
+  package "LocalScribeCore — акторы хранения (в процессе GUI)" {
+    [RecordingCoordinator «actor» —\nединственный писатель архива записей] as RecCoord
+    [DiagramCoordinator «actor» —\nтранзакции архива схем] as DiagCoord
+    [Repository / ResultReading /\nResultEditing / Export] as Repo
+  }
+}
+
+package "Процесс worker — LocalScribeWorker (наследует sandbox, сеть запрещена)" as WorkerProc {
+  [Worker — разбор команды JSONL v1,\nкоды выхода 0 / 1 / 64 / 72] as WorkerMain
+  [CWorkerIsolation — проверка\nзапрета сети до загрузки SDK] as Isolation
+  [Pipeline «actor» — стадии аудио:\nprepare, ASR, диаризация, итоги] as Pipeline
+  [LiveTranscriber — фоновое ASR\nпо закрытым CAF] as Live
+  [ASR-движки по pinned-профилю:\nWhisperKit, Qwen3, VibeVoice\n(ASREngineFactory)] as ASR
+  [SpeakerKit 1.1.1 (снимок) —\nглобальная диаризация] as SpeakerKit
+  [SummaryEngine «actor» —\nMLX LLM Qwen35] as Summary
+  [DiagramEngine — MLXVLM Qwen3-VL,\nотдельная ветка схем] as DiagramEngine
+  [FFmpeg / ffprobe — дочерние\nпроцессы в группе worker] as FFmpeg
+}
+
+package "XPC-сервис — LocalScribeModelService (единственный с network.client)" as XPCProc {
+  [Service — загрузка закреплённых\nфайлов из каталога моделей] as XPC
+}
+
+package "LocalScribeCore — общая библиотека (без GUI и ML SDK)" as CoreLib {
+  [Contracts / DiagramContracts:\nManifest, RunInfo, Transcript, Summary,\nWorkerCommand, WorkerEvent] as Contracts
+}
+
+package "Диск" {
+  database "Архив записей\nmanifest.json, groups.json v1,\nindex.json, runs/…, caf/" as RecordStore
+  database "Архив схем\nсвой groups.json v1, runs/…" as DiagramStore
+  database "Каталог моделей\nmodels.lock.json, models/<id>,\nselection.json, .partial" as ModelStore
+}
+
+cloud "Интернет — источники моделей" as Net
+
+UI --> AppModel
+AppModel --> Supervisor
+AppModel --> RecCoord
+AppModel --> DiagCoord
+AppModel --> ImportQueue
+AppModel --> ModelDownload
+AppModel --> Presentation
+
+Supervisor --> WorkerMain : stdin — WorkerCommand (JSONL v1)
+WorkerMain --> Supervisor : протокольный stdout — WorkerEvent\nSDK stdout перенаправлен в stderr и\nдренируется без сохранения
+Supervisor ..> Supervisor : EOF отменяет процесс и его группу
+
+WorkerMain --> Isolation
+WorkerMain --> Pipeline
+WorkerMain --> DiagramEngine
+Pipeline --> ASR
+Pipeline --> SpeakerKit
+Pipeline --> Summary
+Pipeline --> Live
+Pipeline --> FFmpeg
+
+Capture --> RecordStore : закрытые CAF по 10 c
+RecCoord --> RecordStore : атомарные транзакции manifest,\nснимки с монотонной ревизией
+Repo --> RecordStore
+DiagCoord --> DiagramStore
+DiagramEngine --> DiagramStore : артефакты runs
+Pipeline --> RecordStore : артефакты runs\n(manifest не пишет)
+
+ModelDownload --> XPC : ID профиля и индекс файла
+XPC --> Net
+XPC --> ModelDownload : открытый файловый дескриптор
+ModelDownload --> ModelStore : поток в .partial,\nпроверка размера и SHA-256 всего комплекта
+ASR --> ModelStore : только проверенные локальные веса
+SpeakerKit --> ModelStore
+Summary --> ModelStore
+DiagramEngine --> ModelStore
+
+GUIProc ..> CoreLib
+WorkerProc ..> CoreLib
+
+note bottom of XPCProc
+  XPC не получает архив, аудио или транскрипцию —
+  только ID профиля и индекс файла; дескриптор
+  устраняет необходимость делить доступ к данным.
+end note
+
+note bottom of WorkerProc
+  Один последовательный worker на всё приложение:
+  и аудио, и схемы. Отмена (EOF/SIGTERM) завершает
+  всю сохранённую группу процессов, включая FFmpeg.
+end note
+@enduml

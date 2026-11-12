@@ -115,6 +115,13 @@ import LocalScribeCore
     }
 
     func windowDidResize(_ notification: Notification) {
+        guard window?.inLiveResize != true else { return }
+        saveWindowSize()
+    }
+
+    func windowDidEndLiveResize(_ notification: Notification) { saveWindowSize() }
+
+    private func saveWindowSize() {
         guard let window, window.isVisible, !window.isMiniaturized else { return }
         let size = window.contentRect(forFrameRect: window.frame).size
         defaults.set(NSStringFromSize(size), forKey: "settingsWindowSize")

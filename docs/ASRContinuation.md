@@ -226,7 +226,7 @@
   `contextReview`; старые метрики остаются читаемыми, текста в них нет.
 - `Tests/LocalScribeDiarizationTests/ASRMatrixProbeTests.swift`: opt-in
   модельный прогон и replay без модели. Остальные ASR-тесты рядом;
-  планировщик дополнительно проверяется в `Tests/LocalScribeTests/ASRWindowTests.swift`.
+  планировщик дополнительно проверяется в [ASRWindowTests.swift](../Tests/LocalScribeDiarizationTests/ASRWindowTests.swift).
 - `Tests/LocalScribeDiarizationTests/ASRFrozenBaselineProbeTests.swift`:
   добавленный в сессии 1 режим новых выборочных контекстных вызовов из
   фиксированного C; полный PCM, реальные окна и исходные таймкоды.

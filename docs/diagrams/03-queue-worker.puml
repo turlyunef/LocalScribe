@@ -1,0 +1,69 @@
+@startuml 03-queue-worker
+title Очередь заданий и жизненный цикл worker (AppModel + WorkerSupervisor)
+
+autonumber
+
+actor "Пользователь / UI" as User
+participant "AppModel @MainActor\n(допуск заданий)" as App
+queue "FIFO «queued»\n[QueueJobID:\nrecording(id) / diagram(id)]" as FIFO
+participant "WorkerSupervisor\n@MainActor" as Sup
+participant "Процесс worker" as Worker
+participant "RecordingCoordinator /\nDiagramCoordinator (actors)" as Coord
+participant "UI:\nActivityIndicators" as UI
+
+User -> App : запись завершена / импорт готов / схема
+App -> App : enqueue с уникальным requestID,\nсоставные ключи двух архивов не смешиваются
+note right of App
+  Барьеры допуска: queuePauses (память,
+  защита микрофона, сон), deletingJobIDs,
+  queueGeneration, установка/проверка моделей.
+  Отложенный enqueue сверяет generation и
+  admission — отменённое задание не возвращается.
+end note
+alt схема без установленной модели
+  App --> User : «Ожидает модель» — вне FIFO\n(профиль .diagram закрепляется при постановке)
+end
+App -> FIFO : постановка (или moveToFront —\nтолько порядок ожидающих)
+
+loop пока очередь не пуста и нет пауз
+  FIFO -> App : первый ожидающий (enqueuing == nil)
+  App -> Sup : run(WorkerCommand)\n(слот один — «Другой этап ещё работает»)
+  Sup -> Sup : Process + 3 pipe, своя группа процессов,\nHF_HUB_OFFLINE=1, фоновый приоритет при записи
+  Sup -> Worker : stdin — команда JSONL v1\n(audio: stage / diagram: kind="diagram")
+  activate Worker
+  Worker --> Sup : «started»
+  Sup --> UI : статус этапа
+
+  loop ход этапа
+    Worker --> Sup : «progress» / «warning»
+    Sup --> UI : meter / elapsed / status\n(частые обновления — ActivityIndicators)
+  end
+
+  alt успешное завершение этапа
+    Worker --> Sup : «completed»(artifact), выход 0
+    Sup --> App : событие
+    App -> App : ResultReading: schemaVersion, UUID,\nfingerprint, таймкоды, ссылки
+    App -> Coord : транзакция manifest — атомарный\nDisk.write, снимок с монотонной ревизией,\nбатч-обновление index.json
+    App --> UI : переключение activeRunId\nпосле проверок
+  else ошибка этапа
+    Worker --> Sup : «failed»(нейтральное сообщение),\nвыход 1 — результаты прежних этапов сохранены
+    App --> User : «Ошибка — можно повторить»
+  else отмена (AppModel.cancel)
+    App -> Sup : EOF по stdin
+    Sup -> Worker : SIGTERM группе — FFmpeg вместе с worker
+    Worker --> Sup : «cancelled», выход 72
+    App --> User : аудио и результаты сохранены;\nпри активной записи меняется только\ncaptureProcessing
+  else некорректная команда
+    Worker --> Sup : выход 64 без события
+  end
+  deactivate Worker
+  FIFO -> App : следующий (слот освободился)
+end
+
+note over App, FIFO
+  Очередь общая для записей и схем (FIFO один),
+  но отмена/удаление одного вида не трогают другой.
+  Диаграммное задание без модели стоит вне FIFO
+  в «Ожидает модель» и входит после установки.
+end note
+@enduml

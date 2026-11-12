@@ -137,6 +137,15 @@ public actor RecordingCoordinator {
         publish(manifest)
         return manifest
     }
+    public func appendWarning(_ warning: String, to id: String) throws -> Bool {
+        initialize()
+        var manifest = try repository.load(id)
+        guard !manifest.warnings.contains(warning) else { return false }
+        manifest.warnings.append(warning)
+        try repository.save(manifest)
+        publish(manifest)
+        return true
+    }
     public func rename(_ id: String, title: String) throws {
         initialize()
         try repository.rename(id, title: title)

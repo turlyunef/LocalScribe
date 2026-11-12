@@ -424,5 +424,6 @@
   "сигнал %1$@": "signal %1$@",
   "схема": "Diagram",
   "схемы": "diagram",
-  "этап": "Stage"
+  "этап": "Stage",
+  "Не удалось вовремя завершить сохранение. Повторите выход, чтобы завершить приложение при следующем таймауте.": "Saving did not finish in time. Quit again to exit if the next attempt times out."
 }

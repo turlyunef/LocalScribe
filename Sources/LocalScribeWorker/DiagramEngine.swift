@@ -176,6 +176,9 @@ actor DiagramEngine {
             result = try await recognizeWholeImage(original)
         }
         try Task.checkCancellation()
+        guard try Disk.hash(original, checkCancellation: true) == info.sourceHash else {
+            throw ScribeError.message("Исходное изображение схемы изменилось")
+        }
         try Disk.write(result, to: run.appendingPathComponent("result.json"))
         if result.nodes.contains(where: { $0.uncertain }) { emit("warning", "Часть подписей схемы нечитаема — проверьте распознанные узлы", nil) }
         if result.edges.contains(where: { $0.uncertain }) { emit("warning", "Некоторые связи схемы не удалось подтвердить — проверьте их вручную", nil) }

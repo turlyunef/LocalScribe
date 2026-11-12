@@ -75,7 +75,18 @@ public final class PyannoteDiarizer: Diarizer, @unchecked Sendable {
         options: (any DiarizationOptions)? = nil,
         progressCallback: (@Sendable (Progress) -> Void)? = nil
     ) async throws -> DiarizationResult {
-        try await diarizerActor.diarize(audioArray: audioArray, options: options, progressCallback: progressCallback)
+        try await diarize(frameCount: audioArray.count, readFrames: { Array(audioArray[$0]) },
+                          options: options, progressCallback: progressCallback)
+    }
+
+    func diarize(
+        frameCount: Int,
+        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
+        options: (any DiarizationOptions)?,
+        progressCallback: (@Sendable (Progress) -> Void)?
+    ) async throws -> DiarizationResult {
+        try await diarizerActor.diarize(frameCount: frameCount, readFrames: readFrames,
+                                       options: options, progressCallback: progressCallback)
     }
 }
 
@@ -140,7 +151,8 @@ actor PyannoteDiarizerActor {
     }
 
     func initialize(
-        audioArray: [Float],
+        frameCount: Int,
+        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
         options: PyannoteDiarizationOptions? = nil,
         progressCallback: (@Sendable (Progress) -> Void)? = nil
     ) async throws {
@@ -149,10 +161,10 @@ actor PyannoteDiarizerActor {
         timings.pipelineStart = CFAbsoluteTimeGetCurrent()
 
         try await loadModels()
-        audioLength = audioArray.count
+        audioLength = frameCount
 
-        let seekClips = prepareSeekClips(contentFrames: audioArray.count, options: options)
-        Logging.debug("[PyannoteDiarizer] audioArray: \(audioArray.count), seekClips: \(seekClips)")
+        let seekClips = prepareSeekClips(contentFrames: frameCount, options: options)
+        Logging.debug("[PyannoteDiarizer] frameCount: \(frameCount), seekClips: \(seekClips)")
 
         let totalAudioSeconds = seekClips.reduce(0.0) { $0 + Double($1.1 - $1.0) / Double(WhisperKit.sampleRate) }
 
@@ -183,7 +195,7 @@ actor PyannoteDiarizerActor {
             let snap = try await Self.processClip(
                 expectedChunks: expectedChunks, workerCount: embedderWorkerCount,
                 produce: { send in
-                    try await segmenterModel.predict(audioArray: audioArray, sendOutput: send, audioRange: clipRange)
+                    try await segmenterModel.predict(audioRange: clipRange, readFrames: readFrames, sendOutput: send)
                 },
                 embed: { output in try await embedderModel.embed(segmenterOutput: output) },
                 consume: { embeddings in await clusterer.add(speakerEmbeddings: embeddings) },
@@ -408,11 +420,16 @@ actor PyannoteDiarizerActor {
         return DiarizationResult(binaryMatrix: binaryDiarization, diarizationFrameRate: diarizationFrameRate, speakerCentroidEmbeddings: speakerCentroids)
     }
 
-    func diarize(audioArray: [Float], options: (any DiarizationOptions)?, progressCallback: (@Sendable (Progress) -> Void)?) async throws -> DiarizationResult {
+    func diarize(
+        frameCount: Int,
+        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
+        options: (any DiarizationOptions)?,
+        progressCallback: (@Sendable (Progress) -> Void)?
+    ) async throws -> DiarizationResult {
         let opts = options as? PyannoteDiarizationOptions
 
         guard let progressCallback else {
-            try await initialize(audioArray: audioArray, options: opts, progressCallback: nil)
+            try await initialize(frameCount: frameCount, readFrames: readFrames, options: opts, progressCallback: nil)
             var result = try await clusterSpeakers(with: config.clusterer, options: opts, progressCallback: nil)
             if let minActiveOffset = opts?.minActiveOffset {
                 result.updateSegments(minActiveOffset: minActiveOffset)
@@ -425,7 +442,7 @@ actor PyannoteDiarizerActor {
         let diarizationProgress = Progress(totalUnitCount: 100)
         progressCallback(diarizationProgress)
 
-        try await initialize(audioArray: audioArray, options: opts) { @Sendable child in
+        try await initialize(frameCount: frameCount, readFrames: readFrames, options: opts) { @Sendable child in
             let value = Int64(child.fractionCompleted * 85)
             if value > diarizationProgress.completedUnitCount {
                 diarizationProgress.completedUnitCount = value

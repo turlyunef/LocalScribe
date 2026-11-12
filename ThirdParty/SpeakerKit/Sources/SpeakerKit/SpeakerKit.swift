@@ -70,6 +70,22 @@ open class SpeakerKit: @unchecked Sendable {
         return try await diarizer.diarize(audioArray: audioArray, options: options, progressCallback: progressCallback)
     }
 
+    /// LocalScribe: read bounded 16 kHz mono PCM ranges while keeping a single
+    /// timeline and clustering pass. The reader must be safe for concurrent calls.
+    public func diarize(
+        frameCount: Int,
+        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float]
+    ) async throws -> DiarizationResult {
+        guard frameCount >= 0, let manager = diarizer as? SpeakerKitDiarizer,
+              let loader = manager.loader as? PyannoteModelLoader else {
+            throw SpeakerKitError.invalidConfiguration("Streaming diarization requires the Pyannote backend")
+        }
+        try await ensureModelsLoaded()
+        let pyannote = try loader.makeDiarizer()
+        return try await pyannote.diarize(frameCount: frameCount, readFrames: readFrames,
+                                          options: nil, progressCallback: nil)
+    }
+
     /// Builds RTTM lines from a diarization result, optionally aligned to a transcription.
     /// - Parameters:
     ///   - diarizationResult: Result from `diarize(audioArray:options:)`.

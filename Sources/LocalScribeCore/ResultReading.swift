@@ -93,7 +93,7 @@ extension RecordingRepository {
                                availableMs: saved.readEndMs, fragments: saved.fragments)
             return saved
         }
-        guard Set(saved.map { $0.part.index }).count == saved.count else { throw invalidResult() }
+        guard saved.map({ $0.part.index }).sorted() == Array(0..<saved.count) else { throw invalidResult() }
         guard let duration = saved.map(\.readEndMs).max() else { return nil }
         let transcript = Analysis.mergeParts(saved.map(\.part), fingerprint: info.fingerprint)
         try transcript.validate(durationMs: duration)

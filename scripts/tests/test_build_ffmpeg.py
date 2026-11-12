@@ -176,10 +176,15 @@ exec {shlex.quote(real_tar)} "$@"
         self.env['TEST_DOWNLOAD_ARCHIVE'] = str(downloaded)
         self.run_build()
         self.assert_outputs()
-        self.assertEqual((self.root / 'curl-args').read_text().splitlines(),
+        arguments = (self.root / 'curl-args').read_text().splitlines()
+        self.assertEqual(arguments[:-1],
                          ['--fail', '--location', '--retry', '3',
                           f'https://ffmpeg.org/releases/ffmpeg-{VERSION}.tar.xz',
-                          '-o', f'Vendor/ffmpeg-{VERSION}.tar.xz'])
+                          '-o'])
+        target = pathlib.Path(arguments[-1])
+        self.assertEqual(target.parent.parent, self.root / 'build')
+        self.assertFalse(target.exists())
+        self.assertEqual(self.archive.read_bytes(), downloaded.read_bytes())
 
     def test_corrupt_download_is_rejected(self):
         downloaded = self.root / 'download.tar.xz'
@@ -188,6 +193,7 @@ exec {shlex.quote(real_tar)} "$@"
         self.env['TEST_DOWNLOAD_ARCHIVE'] = str(downloaded)
         self.run_build(expected=1)
         self.assert_build_not_started()
+        self.assertFalse(self.archive.exists())
 
     def test_extraction_failure_cleans_only_its_staging_directory(self):
         self.archive.write_bytes(b'not a tar archive')

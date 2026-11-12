@@ -1,0 +1,62 @@
+@startuml 02-capture-recording
+title Запись: захват звука, диск и фоновое ASR (LiveCapture)
+
+autonumber
+
+actor "Пользователь" as User
+participant "AppModel\n@MainActor" as App
+participant "macOS TCC\n(разрешения)" as TCC
+participant "MicrophoneRecorder +\nMicrophoneDevices\n(вход закреплён по UID)" as Mic
+participant "SystemAudioCapture /\nBluetoothMicrophoneCapture" as Alt
+queue "Общий ограниченный пул буферов\n+ serial writerQueue\n(одна блокировка на приём и постановку)" as Pool
+participant "TimedCaptureWriter\nmono PCM16, 16 кГц" as Writer
+database "Каталог записи\ncaf/part-NNNNNN.caf (по 10 c)" as CAF
+participant "worker: LiveTranscriber\n(состояние captureProcessing)" as Live
+participant "RecordingCoordinator\n(actor)" as Coord
+
+User -> App : «Начать запись»
+App -> App : фиксация источников, входа и группы\nДО запроса разрешения
+alt режим с микрофоном
+  App -> TCC : запрос доступа к микрофону
+  TCC --> App : результат
+  note right of App : отказ — показ ошибки,\nзапись не публикуется
+end
+App -> Mic : старт захвата
+App -> Alt : старт (если выбраны источники)
+App -> Coord : публикация записи (после старта захвата)
+
+par поток аудио обоих источников
+  loop каждый входной пакет
+    Mic -> Pool : буфер из общего пула
+    Alt -> Pool : буфер из общего пула
+    Pool -> Writer : копия сэмплов,\nпостановка в последовательную writerQueue
+    Writer -> CAF : закрытие очередных 10 c CAF\nвне callback, общая шкала при\nпропусках и смене входа
+  end
+else фоновое ASR (если включено)
+  App -> Live : фоновый запуск — captureProcessing\n(микрофон продолжает писать)
+  loop новые закрытые CAF
+    Live -> CAF : чтение только закрытых фрагментов
+    Live -> Live : часть 30 c + контекст,\nSHA фрагментов, непрерывное покрытие окон,\nисходная шкала времени
+    Live -> CAF : контрольные точки joined\nатомарными JSON
+  end
+else показ состояния
+  App -> App : meter / elapsed / status\nчерез ActivityIndicators
+end
+
+User -> App : «Остановить»
+App -> Writer : close — seal завершённого потока
+App -> Coord : сборка оригинала:\nчисло сэмплов + SHA-256
+App -> Live : дождаться выхода worker и\nпроверенного присоединения контрольных точек
+App -> Coord : финализация, статус «Сохранено»\nи постановка в очередь
+note over CAF, Live
+  Фрагменты CAF удаляются только после проверки
+  SHA оригинала и присоединения контрольных точек
+  ASR (без фонового ASR — после сборки).
+end note
+note over App
+  Ошибка модели не останавливает микрофон.
+  Новая запись сохраняет FIFO и не прерывает
+  текущий worker. Сон и выход отменяют ожидающий
+  запуск; поздние callbacks проверяют ID записи.
+end note
+@enduml

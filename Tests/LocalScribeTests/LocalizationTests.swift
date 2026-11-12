@@ -27,6 +27,19 @@ final class LocalizationTests: XCTestCase {
         )
     }
 
+    func testAllPackagedTranslationsPreserveTheirArguments() {
+        for name in ["Interface.en", "Messages.en"] {
+            let catalog = L10n.loadCatalog(name)
+            XCTAssertFalse(catalog.isEmpty)
+            for (key, translation) in catalog {
+                let arguments = Set(L10n.placeholders(in: key).map { L10n.argumentIndex($0, in: key as NSString) })
+                let translated = Set(L10n.placeholders(in: translation).map { L10n.argumentIndex($0, in: translation as NSString) })
+                XCTAssertEqual(translated, arguments, "\(name): \(key)")
+                XCTAssertFalse(translation.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty, key)
+            }
+        }
+    }
+
     func testNestedModelDiagnosticLocalizesNameButPreservesFilename() {
         let message = "Не удалось продолжить: Модель Токенизатор Whisper large-v3 / turbo: отсутствует или повреждён Скопировано. Задание и контрольные точки сохранены. Для создания нового задания с выбранными моделями нажмите «Обработать заново»."
         XCTAssertTrue(L10n.englishMessages.translate(message).contains("Whisper large-v3 / turbo tokenizer: Скопировано is missing or damaged."))

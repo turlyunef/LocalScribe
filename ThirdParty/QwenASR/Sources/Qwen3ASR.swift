@@ -1294,8 +1294,11 @@ public class Qwen3ASRModel: Module {
         }
         """
 
-        let tokenizerData = try JSONSerialization.jsonObject(with: Data(tokenizerJSON.utf8)) as! [NSString: Any]
-        let configData = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenizerConfigURL)) as! [NSString: Any]
+        // LocalScribe: reject malformed local tokenizer resources as an error.
+        guard let tokenizerData = try JSONSerialization.jsonObject(with: Data(tokenizerJSON.utf8)) as? [NSString: Any],
+              let configData = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenizerConfigURL)) as? [NSString: Any] else {
+            throw QwenRuntimeError.missingTokenizer
+        }
         return try AutoTokenizer.from(tokenizerConfig: Config(configData), tokenizerData: Config(tokenizerData))
     }
     public static func fromModelDirectory(_ modelDir: URL, tokenizerDirectory: URL, weightFiles: [String] = ["model.safetensors"]) throws -> Qwen3ASRModel {
@@ -1303,6 +1306,8 @@ public class Qwen3ASRModel: Module {
         let configPath = modelDir.appendingPathComponent("config.json")
         let configData = try Data(contentsOf: configPath)
         let config = try JSONDecoder().decode(Qwen3ASRConfig.self, from: configData)
+        // LocalScribe: the feature-length formula uses 100 mel frames per window.
+        guard config.audioConfig.nWindow == 50 else { throw QwenRuntimeError.invalidAudio }
 
         // Get per-layer quantization
         let perLayerQuantization = config.perLayerQuantization

@@ -1,5 +1,3 @@
-import CryptoKit
-import Darwin
 import Foundation
 import ImageIO
 import UniformTypeIdentifiers
@@ -16,7 +14,6 @@ public struct DiagramRepository: Sendable {
     public static let maxBytes: Int64 = 31_457_280 // 30 MiB
     public static let maxPixels: Int64 = 24_000_000 // 24 megapixels
     public static let maxSide = 8192
-    static let chunk = 4 * 1024 * 1024
 
     public let root: URL
     public var groupsURL: URL { root.appendingPathComponent("groups.json") }
@@ -132,7 +129,7 @@ public struct DiagramRepository: Sendable {
                             beforePublish: (DiagramManifest) throws -> Void = { _ in }) throws -> DiagramManifest {
         try Task.checkCancellation()
         let fm = FileManager.default
-        let input = try PinnedImageSource(source)
+        let input = try ImportSource(source, allowsAppendedBytes: true)
         defer { input.close() }
         guard input.size > 0 else { throw ScribeError.message("Файл изображения пуст") }
         guard input.size <= Self.maxBytes else {
@@ -262,83 +259,6 @@ public struct DiagramRepository: Sendable {
             throw ScribeError.message("Задание схемы не найдено")
         }
         try data.write(to: runFolder.appendingPathComponent("result.json"), options: .atomic)
-    }
-}
-
-/// Pins an open regular-file descriptor before hashing so a later path or
-/// symlink change cannot alter the input of the copy (ImportSource pattern).
-/// All reads are bounded by the size observed at open time: a file that grows
-/// afterwards is rejected instead of being read past its declared size.
-struct PinnedImageSource {
-    private let file: FileHandle
-    let size: Int64
-
-    init(_ url: URL) throws {
-        // Nonblocking open lets us reject a FIFO without waiting for a writer.
-        let descriptor = url.withUnsafeFileSystemRepresentation { path in
-            path.map { Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NONBLOCK) } ?? -1
-        }
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        let file = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        var status = stat()
-        guard fstat(descriptor, &status) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        guard status.st_mode & S_IFMT == S_IFREG else { throw ScribeError.message("Для импорта выберите обычный файл") }
-        self.file = file
-        size = status.st_size
-    }
-
-    func close() { try? file.close() }
-
-    /// SHA-256 of exactly the pinned byte range.
-    func hash() throws -> String {
-        try file.seek(toOffset: 0)
-        var hash = SHA256()
-        var count: Int64 = 0
-        while count < size {
-            try Task.checkCancellation()
-            let limit = min(DiagramRepository.chunk, Int(size - count))
-            let hasBytes = try autoreleasepool {
-                guard let bytes = try file.read(upToCount: limit), !bytes.isEmpty else { return false }
-                hash.update(data: bytes)
-                count += Int64(bytes.count)
-                return true
-            }
-            if !hasBytes { throw ScribeError.message("Размер исходного файла изменился во время импорта") }
-        }
-        return hash.finalize().map { String(format: "%02x", $0) }.joined()
-    }
-
-    func copy(to destination: URL, verifying digest: String) throws {
-        // Always create a fresh regular file, never follow an existing destination.
-        let descriptor = destination.withUnsafeFileSystemRepresentation { path in
-            path.map { Darwin.open($0, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) } ?? -1
-        }
-        guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        let output = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
-        var verified = false
-        defer {
-            try? output.close()
-            if !verified { try? FileManager.default.removeItem(at: destination) }
-        }
-        try file.seek(toOffset: 0)
-        var count: Int64 = 0
-        // Reads never pass the size observed at open time: bytes appended to a
-        // growing file are not part of the pinned, hashed image and are ignored.
-        while count < size {
-            try Task.checkCancellation()
-            let limit = min(DiagramRepository.chunk, Int(size - count))
-            guard let bytes = try file.read(upToCount: limit), !bytes.isEmpty else {
-                throw ScribeError.message("Размер исходного файла изменился во время импорта")
-            }
-            try output.write(contentsOf: bytes)
-            count += Int64(bytes.count)
-        }
-        try output.synchronize()
-        try output.close()
-        guard try Disk.hash(destination, checkCancellation: true) == digest else {
-            throw ScribeError.message("Не удалось проверить сохранённый оригинал")
-        }
-        verified = true
     }
 }
 

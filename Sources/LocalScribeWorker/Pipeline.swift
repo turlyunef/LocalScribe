@@ -22,7 +22,7 @@ actor Pipeline {
         manifest = try Disk.read(Manifest.self, at: recording.appendingPathComponent("manifest.json"))
         info = try Disk.read(RunInfo.self, at: run.appendingPathComponent("run.json"))
         guard manifest.schemaVersion == 1, (0...Manifest.maximumDurationMs).contains(manifest.durationMs),
-              info.schemaVersion == 1, UUID(uuidString: command.jobId) != nil,
+              info.schemaVersion == 1,
               recording.lastPathComponent == command.jobId, command.jobId == manifest.id, command.runId == info.id else {
             throw ScribeError.message("Некорректное задание обработки")
         }
@@ -180,8 +180,8 @@ actor Pipeline {
     nonisolated private static func inferSpeakers(modelFolder: URL, wave: URL, durationMs: Int) async throws -> [VoiceInterval] {
         let config = PyannoteConfig(modelFolder: modelFolder.path, download: false, load: true, verbose: false, logLevel: .none, concurrentSegmenterWorkers: 1, concurrentEmbedderWorkers: 1)
         let kit = try await SpeakerKit(config)
-        let samples = try Media.samples(wave)
-        let result = try await kit.diarize(audioArray: samples)
+        let pcm = try Media.PCMFrameReader(wave)
+        let result = try await kit.diarize(frameCount: pcm.frameCount) { try pcm.read($0) }
         return result.segments.compactMap { s -> VoiceInterval? in
             guard let id = s.speaker.speakerId else { return nil }
             return VoiceInterval.clipped(startSeconds: Double(s.startTime), endSeconds: Double(s.endTime),

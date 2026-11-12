@@ -29,7 +29,7 @@
 
 **Группа:** корректность ML, качество. **Доказательство:** по коду.
 
-**Где:** [SpeakerSegmenterModel.swift:199](/Users/eugene/VibeProjects/meetings_AI/ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift:199), [PyannoteDiarizer.swift:195](/Users/eugene/VibeProjects/meetings_AI/ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift:195), [Pipeline.swift:92](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeWorker/Pipeline.swift:92).
+**Где:** [SpeakerSegmenterModel.swift:199](../ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift#L199), [PyannoteDiarizer.swift:195](../ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift#L195), [Pipeline.swift:92](../Sources/LocalScribeWorker/Pipeline.swift#L92).
 
 **Что не так и когда проявляется.** Исключение segmenter заменяется `NoOpMLFeatureProvider`; исключение embedder перехватывается и только логируется. Ошибка одного блока не прерывает этап. Если другие блоки дали хотя бы один интервал, проверка `!intervals.isEmpty` проходит и публикуется `transcript.json` с `diarized=true`. `Analysis.assignSpeakers` не помечает область технического сбоя как неопределённую. Внешне успешный результат может потерять участников на части встречи без предупреждения.
 
@@ -43,7 +43,7 @@
 
 **Группа:** сохранность данных. **Доказательство:** исполнено на текущих исходниках Core.
 
-**Где:** [Repository.swift:39](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Repository.swift:39), [Repository.swift:48](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Repository.swift:48).
+**Где:** [Repository.swift:39](../Sources/LocalScribeCore/Repository.swift#L39), [Repository.swift:48](../Sources/LocalScribeCore/Repository.swift#L48).
 
 **Что не так.** `Disk.hash(source)` следует ссылке, а `FileManager.copyItem` копирует сам symlink. Абсолютная ссылка остаётся рабочей после переноса в архив, поэтому повторный hash совпадает и импорт считается успешным. `source/original.*` при этом продолжает указывать наружу. Удаление или изменение внешнего файла уничтожает доступность/неизменность архивного оригинала; после снятия security scope возможна и ошибка доступа. Относительная ссылка часто отклоняется проверкой, но это не защищает от абсолютной.
 
@@ -57,7 +57,7 @@
 
 **Группа:** целостность, устойчивость к повреждению архива. **Доказательство:** исполнено; дополнительный риск арифметики установлен по коду.
 
-**Где:** [Repository.swift:125](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Repository.swift:125), [AppModel.swift:138](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/AppModel.swift:138).
+**Где:** [Repository.swift:125](../Sources/LocalScribeCore/Repository.swift#L125), [AppModel.swift:138](../Sources/LocalScribe/AppModel.swift#L138).
 
 **Что не так.** `results` сразу возвращает декодированные transcript/summary. На этом пути не проверяются `RunInfo`, fingerprint, диапазоны времени и ссылки summary. `loadResult` применяет данные после проверки актуальности выбора, но содержимое уже не валидирует. Проверки при завершении worker не защищают последующее чтение изменённого или повреждённого архива.
 
@@ -71,7 +71,7 @@
 
 **Группа:** процессы, освобождение ресурсов, доступность. **Доказательство:** исполнено субагентом.
 
-**Где:** [WorkerSupervisor.swift:84](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/WorkerSupervisor.swift:84), ожидание каналов — [WorkerSupervisor.swift:65](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/WorkerSupervisor.swift:65).
+**Где:** [WorkerSupervisor.swift:84](../Sources/LocalScribe/WorkerSupervisor.swift#L84), ожидание каналов — [WorkerSupervisor.swift:65](../Sources/LocalScribe/WorkerSupervisor.swift#L65).
 
 **Что не так.** Если leader уже вышел, `cancel` посылает группе SIGTERM и сразу возвращает. SIGKILL применяется только при живом leader. Потомок, который игнорирует SIGTERM и держит stdout/stderr, оставляет pipe readers в ожидании EOF. `run`, очередь и shutdown не завершаются. Такой потомок возможен при зависании медиапроцесса; это не утверждение, что обычный FFmpeg всегда ведёт себя так.
 
@@ -85,7 +85,7 @@
 
 **Группа:** память, производительность. **Доказательство:** по коду; фактический peak RSS не измерен.
 
-**Где:** [PyannoteDiarizer.swift:187](/Users/eugene/VibeProjects/meetings_AI/ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift:187), содержимое output — [SpeakerSegmenterModel.swift:189](/Users/eugene/VibeProjects/meetings_AI/ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift:189).
+**Где:** [PyannoteDiarizer.swift:187](../ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift#L187), содержимое output — [SpeakerSegmenterModel.swift:189](../ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift#L189).
 
 **Что не так.** `AsyncStream.makeStream` использует неограниченную буферизацию; `yield` не ждёт embedder. Если производитель быстрее, в очереди растут `SpeakerSegmenterOutput`, удерживающие audioChunk и большие ML outputs, включая waveform/masks. Один concurrent worker не ограничивает число накопленных результатов. На длинной встрече это добавляет memory pressure к памяти моделей и может приводить к отмене анализа.
 
@@ -97,7 +97,7 @@
 
 **Группа:** память, производительность. **Доказательство:** по коду и расчёту размеров.
 
-**Где:** [Media.swift:98](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Media.swift:98), [Pipeline.swift:85](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeWorker/Pipeline.swift:85), [PyannoteDiarizer.swift:177](/Users/eugene/VibeProjects/meetings_AI/ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift:177), [SpeakerSegmenterModel.swift:144](/Users/eugene/VibeProjects/meetings_AI/ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift:144).
+**Где:** [Media.swift:98](../Sources/LocalScribeCore/Media.swift#L98), [Pipeline.swift:85](../Sources/LocalScribeWorker/Pipeline.swift#L85), [PyannoteDiarizer.swift:177](../ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/PyannoteDiarizer.swift#L177), [SpeakerSegmenterModel.swift:144](../ThirdParty/SpeakerKit/Sources/SpeakerKit/Pyannote/SpeakerSegmenterModel.swift#L144).
 
 **Что не так.** Весь WAV читается в AVAudioPCMBuffer и копируется в `[Float]`; полный seek clip вновь материализуется через `Array`; segmenter заранее создаёт массивы всех перекрывающихся chunks. Один трёхчасовой mono/16 kHz массив Float занимает **691200000 байт ≈ 659 MiB**. Время жизни копий частично перекрывается, а overlap chunks увеличивает объём: порядок гигабайтов может расходоваться ещё до ML outputs и весов. Это конечные лишние выделения, а не доказанная постоянная утечка.
 
@@ -109,7 +109,7 @@
 
 **Группа:** возобновление, воспроизводимость, лишние вычисления. **Доказательство:** по коду.
 
-**Где:** [AppModel.swift:495](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/AppModel.swift:495), [Repository.swift:64](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Repository.swift:64).
+**Где:** [AppModel.swift:495](../Sources/LocalScribe/AppModel.swift#L495), [Repository.swift:64](../Sources/LocalScribeCore/Repository.swift#L64).
 
 **Сценарий.** Обычный run с моделью A прерван; после опустошения очереди пользователь выбирает B и нажимает продолжение. Coordinator сравнивает `info.profileHash` с текущим выбором, вызывает `beginRun` и заменяет pendingRunId/модели. Старые checkpoints остаются на диске, но продолжение ими не пользуется; анализ начинается заново на другом комплекте. Для liveCapture эта конкретная проверка пропускается.
 
@@ -121,7 +121,7 @@
 
 **Группа:** отзывчивость UI, CPU, временные аллокации. **Доказательство:** по коду; задержки не измерены.
 
-**Где:** [ContentView.swift:107](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/ContentView.swift:107), [AppModel.swift:340](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/AppModel.swift:340), [Export.swift:65](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Export.swift:65).
+**Где:** [ContentView.swift:107](../Sources/LocalScribe/ContentView.swift#L107), [AppModel.swift:340](../Sources/LocalScribe/AppModel.swift#L340), [Export.swift:65](../Sources/LocalScribeCore/Export.swift#L65).
 
 **Что не так.** View наблюдает весь AppModel и в `body` синхронно вызывает полный `renderedResult`. Meter/elapsed обновляются примерно 10 раз в секунду, status/progress тоже вызывают обновления. Каждый пересчёт снова собирает текст, UTF-16 offsets и ссылки; для каждого finding сканируется весь transcript. Проверка равенства в AppKit coordinator выполняется уже после построения результата. Особенно затратный сценарий — открыть старую длинную встречу во время новой записи.
 
@@ -133,7 +133,7 @@
 
 **Группа:** качество итогов. **Доказательство:** по коду; проявление зависит от extraction модели.
 
-**Где:** [SummaryEngine.swift:73](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeWorker/SummaryEngine.swift:73), [SummaryEngine.swift:99](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeWorker/SummaryEngine.swift:99), [SummaryAnalysis.swift:15](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/SummaryAnalysis.swift:15).
+**Где:** [SummaryEngine.swift:73](../Sources/LocalScribeWorker/SummaryEngine.swift#L73), [SummaryEngine.swift:99](../Sources/LocalScribeWorker/SummaryEngine.swift#L99), [SummaryAnalysis.swift:15](../Sources/LocalScribeCore/SummaryAnalysis.swift#L15).
 
 **Что не так.** Extraction исключает вопросы, отвеченные внутри текущего passage. Финальный ledger объединяет openQuestions всех групп. Последующая проверка поздних уточнений работает только для decisions/tasks. Вопрос из первой группы и явный ответ далеко за её границами могут остаться «открытым вопросом» готового документа. Структурная валидация этого не обнаружит.
 
@@ -145,7 +145,7 @@
 
 **Группа:** корректность LLM-конвейера, устойчивость. **Доказательство:** по коду.
 
-**Где:** [SummaryAnalysis.swift:84](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/SummaryAnalysis.swift:84), [SummaryAnalysis.swift:107](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/SummaryAnalysis.swift:107), [SummaryEngine.swift:215](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeWorker/SummaryEngine.swift:215).
+**Где:** [SummaryAnalysis.swift:84](../Sources/LocalScribeCore/SummaryAnalysis.swift#L84), [SummaryAnalysis.swift:107](../Sources/LocalScribeCore/SummaryAnalysis.swift#L107), [SummaryEngine.swift:215](../Sources/LocalScribeWorker/SummaryEngine.swift#L215).
 
 **Что не так.** Группировка допускает реплику до 3499 токенов. `evidenceContext` без общего бюджета собирает ±2 реплики вокруг каждого evidence ID. Пять соседних реплик по 2000 токенов уже превышают лимит 8192, хотя extraction каждой группы допустим. `checkEvidence` только выбрасывает ошибку при превышении, без адаптации. Весь summary останавливается после уже проделанной extraction. Риск выше после ручных длинных правок и при нескольких отдалённых основаниях. Amendment prompt аналогично складывает несколько источников без предварительного общего планирования.
 
@@ -157,7 +157,7 @@
 
 **Группа:** доступность, дисковое пространство, лишний I/O. **Доказательство:** по коду.
 
-**Где:** [Models.swift:160](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Models.swift:160), [Models.swift:182](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Models.swift:182), [Models.swift:213](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Models.swift:213), [Service.swift:33](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeModelService/Service.swift:33).
+**Где:** [Models.swift:160](../Sources/LocalScribeCore/Models.swift#L160), [Models.swift:182](../Sources/LocalScribeCore/Models.swift#L182), [Models.swift:213](../Sources/LocalScribeCore/Models.swift#L213), [Service.swift:33](../Sources/LocalScribeModelService/Service.swift#L33).
 
 **Что не так.** Место резервируется по `ModelFile.size`, но копирование читает фактический источник целиком. Размер и SHA проверяются после записи. XPC downloader тоже не знает предел ожидаемого body. Например, папка иной квантизации содержит 30-ГБ файл с нужным именем вместо ожидаемых 5 ГБ: предварительная проверка на 8 ГБ свободного места проходит, затем копирование заполняет диск. Слишком большой сетевой ответ имеет тот же недостаток. Это не обход SHA: публикация неправильной модели должна быть отклонена, но поздно.
 
@@ -171,7 +171,7 @@
 
 **Группа:** производительность хранилища и UI. **Доказательство:** по коду; время на большом архиве не измерено.
 
-**Где:** [Repository.swift:12](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Repository.swift:12), [Repository.swift:197](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Repository.swift:197), [AppModel.swift:128](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/AppModel.swift:128).
+**Где:** [Repository.swift:12](../Sources/LocalScribeCore/Repository.swift#L12), [Repository.swift:197](../Sources/LocalScribeCore/Repository.swift#L197), [AppModel.swift:128](../Sources/LocalScribe/AppModel.swift#L128).
 
 **Что не так.** `save` после manifest вызывает `list` и записывает полный index. `reload` повторно читает все manifests. Эти операции встречаются на MainActor при сменах этапа и предупреждениях. В `recover` N прерванных записей дают N сохранений, каждое сканирует N записей: O(N²) чтений плюс полная перезапись index на каждом шаге. Индекс вспомогательный, поэтому такая стоимость не нужна для сохранности manifest.
 
@@ -183,7 +183,7 @@
 
 **Группа:** CPU, время возобновления. **Доказательство:** по коду.
 
-**Где:** [SummaryEngine.swift:33](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeWorker/SummaryEngine.swift:33), [SummaryEngine.swift:148](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeWorker/SummaryEngine.swift:148).
+**Где:** [SummaryEngine.swift:33](../Sources/LocalScribeWorker/SummaryEngine.swift#L33), [SummaryEngine.swift:148](../Sources/LocalScribeWorker/SummaryEngine.swift#L148).
 
 **Что не так.** Token counts всех реплик уже вычислены в начале. `verify` заново вызывает tokenizer через actor для поздней речи каждой задачи/решения: до O(F×S) повторной работы. Это происходит и при готовых amendment checkpoints, и при пустом accepted; проверка пустоты стоит только на следующем цикле.
 
@@ -195,7 +195,7 @@
 
 **Группа:** процессы, I/O, ресурсы. **Доказательство:** по коду.
 
-**Где:** [ContentView.swift:125](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/ContentView.swift:125), [AppModel.swift:297](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/AppModel.swift:297).
+**Где:** [ContentView.swift:125](../Sources/LocalScribe/ContentView.swift#L125), [AppModel.swift:297](../Sources/LocalScribe/AppModel.swift#L297).
 
 **Что не так.** Каждый provider вызывает отдельный `importURLs([url])` и создаёт собственный Task с detached probe/hash/copy. Последовательный цикл внутри одного importURLs не ограничивает разные вызовы. Сброс десятков файлов создаёт конкурирующие ffprobe/копирования; проверки места не учитывают общий одновременно записываемый объём. Это конкурирует с записью микрофона и worker.
 
@@ -207,7 +207,7 @@
 
 **Группа:** укрепление файловых границ. **Доказательство:** исполнено субагентом с оговоркой ниже.
 
-**Где:** [Models.swift:158](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Models.swift:158), [Models.swift:169](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Models.swift:169), [Models.swift:213](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribeCore/Models.swift:213).
+**Где:** [Models.swift:158](../Sources/LocalScribeCore/Models.swift#L158), [Models.swift:169](../Sources/LocalScribeCore/Models.swift#L169), [Models.swift:213](../Sources/LocalScribeCore/Models.swift#L213).
 
 **Что не так.** Проверка относительного localPath не проверяет реальные компоненты файловой системы. При `test.partial/nested -> outside` файл `nested/file.bin` удаляется/пишется в outside, затем symlink сохраняется в опубликованном final.
 
@@ -221,7 +221,7 @@
 
 **Группа:** разработческие инструменты, восстановление. **Доказательство:** исполнено субагентом без загрузки весов.
 
-**Где:** [download_models.py:39](/Users/eugene/VibeProjects/meetings_AI/scripts/download_models.py:39).
+**Где:** [download_models.py:39](../scripts/download_models.py#L39).
 
 **Что не так.** Профиль исключается из загрузки по одному `exists(final)` без проверки файлов. Затем публикуется catalog.json. Пустая папка `summary-4b` дала код выхода 0, ноль файлов весов и созданный каталог. Повторный запуск не восстанавливает комплект. GUI ModelLibrary такую папку отбракует: обход проверки модели при inference не установлен.
 
@@ -233,7 +233,7 @@
 
 **Группа:** воспроизводимость и доверие к сборке. **Доказательство:** по коду.
 
-**Где:** [build_ffmpeg.sh:7](/Users/eugene/VibeProjects/meetings_AI/scripts/build_ffmpeg.sh:7).
+**Где:** [build_ffmpeg.sh:7](../scripts/build_ffmpeg.sh#L7).
 
 **Что не так.** Скрипт проверяет закреплённый SHA архива, но не извлекает его заново при существовании `Vendor/ffmpeg-8.0.1`. `./configure` и сборка используют прежнее дерево, включая локальную порчу/изменения. Успешная SHA-проверка поэтому не означает сборку из проверенных исходников. Для злонамеренного сценария нужен доступ к build workspace.
 
@@ -243,7 +243,7 @@
 
 ## Что требует измерений, но пока не является установленной утечкой
 
-1. **Аллокации writerQueue микрофона.** [MicrophoneRecorder.swift:152](/Users/eugene/VibeProjects/meetings_AI/Sources/LocalScribe/MicrophoneRecorder.swift:152) создаёт дополнительный PCM buffer при записи, а вычисление peak через map — временный массив. Проверить Allocations; рассмотреть прямую запись pooled buffer, если он целиком помещается в CAF, reusable scratch для разрезания и один проход peak без массива. Приёмка — побитовое равенство PCM, число кадров и корректные границы CAF. Это оптимизация очереди записи, не доказательство утечки или потери аудио.
+1. **Аллокации writerQueue микрофона.** [MicrophoneRecorder.swift:152](../Sources/LocalScribe/MicrophoneRecorder.swift#L152) создаёт дополнительный PCM buffer при записи, а вычисление peak через map — временный массив. Проверить Allocations; рассмотреть прямую запись pooled buffer, если он целиком помещается в CAF, reusable scratch для разрезания и один проход peak без массива. Приёмка — побитовое равенство PCM, число кадров и корректные границы CAF. Это оптимизация очереди записи, не доказательство утечки или потери аудио.
 2. **Core ML/MLX/AVFoundation на длинных сериях.** Проверить RSS после прогрева и после одинаковых циклов записи/анализа/отмены, Allocations/Leaks и Metal memory. Высокий RSS сам по себе не доказывает leak: отделять кэши SDK, живые веса, очереди и недостижимые объекты.
 3. **Повторные SHA больших моделей.** Измерить время валидации по этапам. Удалять SHA-проверки ради ускорения нельзя. Возможное направление — один проверенный immutable snapshot на жизненный цикл задания с повторной проверкой при изменении файлов, а не доверие только размеру/mtime.
 

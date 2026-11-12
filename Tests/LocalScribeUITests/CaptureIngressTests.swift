@@ -7,28 +7,91 @@ final class CaptureIngressTests: XCTestCase {
     @MainActor func testStoppedStartupEngineRequiresNewMicrophonePacketAfterRestart() async throws {
         let ingress = CaptureIngress(meter: { _ in }, failure: { XCTFail($0) }, pressure: {})
         let token = try XCTUnwrap(ingress.beginMicrophoneAttempt())
+        let oldTap = try XCTUnwrap(ingress.replaceMicrophoneTap(token))
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1))
         let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024))
         buffer.frameLength = 1024
         try XCTUnwrap(buffer.floatChannelData?[0]).update(repeating: 0, count: 1024)
-        func submitSilence() {
+        func submitSilence(from tap: UUID) {
             ingress.submitMicrophone(buffer.audioBufferList, format: format, frameCount: 1024,
-                                     hostTime: AudioGetCurrentHostTime(), token: token)
+                                     hostTime: AudioGetCurrentHostTime(), token: token, tap: tap)
         }
 
         // The old engine can send one packet and then stop before activation.
-        submitSilence()
+        submitSilence(from: oldTap)
         var restarts = 0
         try await MicrophoneRecorder.waitForFirstMicrophonePacket(until: .now + .seconds(2), ingress: ingress, token: token) {
             restarts > 0
         } restart: {
             restarts += 1
+            let restartedTap = try XCTUnwrap(ingress.replaceMicrophoneTap(token))
+            submitSilence(from: oldTap)
             XCTAssertNil(ingress.lastMicrophoneCallbackHostTime(for: token))
             XCTAssertFalse(ingress.activateMicrophone(token))
-            submitSilence()
+            submitSilence(from: restartedTap)
         }
         XCTAssertEqual(restarts, 1)
         XCTAssertTrue(ingress.activateMicrophone(token))
+    }
+
+    func testSystemAudioStartsWhileMicrophoneIsStillPending() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let ingress = CaptureIngress(meter: { _ in }, failure: { XCTFail($0) }, pressure: {})
+        try await ingress.start(folder: folder, sources: [.microphone, .systemAudio], originAtFirstPacket: true)
+        let microphone = try XCTUnwrap(ingress.beginMicrophoneAttempt())
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let input = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600))
+        input.frameLength = 1600
+        try XCTUnwrap(input.floatChannelData?[0]).update(repeating: 0.25, count: 1600)
+        ingress.submitSystemAudio(input.audioBufferList, format: format.streamDescription.pointee,
+                                  hostTime: AudioGetCurrentHostTime())
+        XCTAssertFalse(ingress.activateMicrophone(microphone))
+        let frames = try await ingress.finish()
+        XCTAssertEqual(frames, 1600)
+        let file = try AVAudioFile(forReading: folder.appendingPathComponent("part-000000.caf"))
+        let probe = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 1))
+        try file.read(into: probe)
+        XCTAssertEqual(try XCTUnwrap(probe.floatChannelData?[0][0]), 0.25, accuracy: 0.001)
+    }
+
+    func testParallelProbeDoesNotInterruptCurrentMicrophone() async throws {
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: folder) }
+        let ingress = CaptureIngress(meter: { _ in }, failure: { XCTFail($0) }, pressure: {})
+        try await ingress.start(folder: folder, sources: [.microphone], originAtFirstPacket: true)
+        let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1))
+        let input = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1600))
+        input.frameLength = 1600
+        let samples = try XCTUnwrap(input.floatChannelData?[0])
+        let origin = AudioGetCurrentHostTime()
+        func submit(_ token: UUID, sample: Float, offset: Double) {
+            samples.update(repeating: sample, count: 1600)
+            ingress.submitMono(.microphone, list: input.audioBufferList, sampleRate: 16_000,
+                               hostTime: origin + AVAudioTime.hostTime(forSeconds: offset), microphoneToken: token)
+        }
+        let active = try XCTUnwrap(ingress.beginMicrophoneAttempt())
+        submit(active, sample: 0, offset: 0)
+        XCTAssertTrue(ingress.activateMicrophone(active))
+        let failed = try XCTUnwrap(ingress.beginMicrophoneAttempt(whileActive: true))
+        XCTAssertFalse(ingress.activateMicrophone(failed))
+        submit(active, sample: 0.25, offset: 0)
+        ingress.suspendMicrophone(failed)
+        let replacement = try XCTUnwrap(ingress.beginMicrophoneAttempt(whileActive: true))
+        submit(replacement, sample: 0.9, offset: 0.1)
+        submit(active, sample: 0.25, offset: 0.1)
+        XCTAssertTrue(ingress.activateMicrophone(replacement))
+        submit(active, sample: 0.9, offset: 0.2)
+        submit(replacement, sample: -0.5, offset: 0.2)
+        let frames = try await ingress.finish()
+        XCTAssertEqual(frames, 4800)
+        let file = try AVAudioFile(forReading: folder.appendingPathComponent("part-000000.caf"))
+        let probe = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 1))
+        for (offset, expected) in [(800, Float(0.25)), (2400, 0.25), (4000, -0.5)] {
+            file.framePosition = Int64(offset)
+            try file.read(into: probe)
+            XCTAssertEqual(try XCTUnwrap(probe.floatChannelData?[0][0]), expected, accuracy: 0.001)
+        }
     }
 
     @MainActor func testRunningEngineWithoutPacketsStillTimesOut() async throws {

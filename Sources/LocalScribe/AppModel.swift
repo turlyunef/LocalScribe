@@ -15,7 +15,7 @@ struct QueueJobID: Hashable, Sendable {
 }
 
 @MainActor final class AppModel: ObservableObject {
-    @Published private(set) var recordingGroups = RecordingGroups() { didSet { recordingSearch.update(recordings, groups: recordingGroups) } }
+    @Published private(set) var recordingGroups = RecordingGroups()
     let recordingSearch = RecordingSearch()
     private var recordingsByID: [String: Manifest] = [:]
     // Diagram archive state: an independent snapshot pipeline fed by DiagramCoordinator.
@@ -23,11 +23,11 @@ struct QueueJobID: Hashable, Sendable {
     private var diagramsByID: [String: DiagramManifest] = [:]
     @Published private(set) var diagrams: [DiagramManifest] = [] {
         didSet {
-            diagramsByID = Dictionary(uniqueKeysWithValues: diagrams.map { ($0.id, $0) })
+            diagramsByID = Dictionary(diagrams.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             diagramSearch.update(diagrams.map { RecordingSearch.TitleSearchEntry(id: $0.id, title: $0.displayTitle, date: $0.createdAt) }, groups: diagramGroups)
         }
     }
-    @Published private(set) var diagramGroups = RecordingGroups() { didSet { diagramSearch.update(diagrams.map { RecordingSearch.TitleSearchEntry(id: $0.id, title: $0.displayTitle, date: $0.createdAt) }, groups: diagramGroups) } }
+    @Published private(set) var diagramGroups = RecordingGroups()
     let diagramRepository: DiagramRepository?
     let diagramArchive: DiagramCoordinator?
     private var diagramArchiveRevision: UInt64 = 0
@@ -46,7 +46,7 @@ struct QueueJobID: Hashable, Sendable {
     private var startingGroupID: String?
     @Published var recordings: [Manifest] = [] {
         didSet {
-            recordingsByID = Dictionary(uniqueKeysWithValues: recordings.map { ($0.id, $0) })
+            recordingsByID = Dictionary(recordings.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
             recordingSearch.update(recordings, groups: recordingGroups)
             refreshPresentation()
         }
@@ -70,6 +70,12 @@ struct QueueJobID: Hashable, Sendable {
     private(set) var copyTask: Task<Void, Never>?
     private var exportTasks: [UUID: Task<Void, Never>] = [:]
     var status: String { get { indicators.status } set { indicators.status = newValue } }
+    private var queueStatus: String?
+    private func showQueueStatus(_ message: String) {
+        let localized = L10n.message(message)
+        queueStatus = localized
+        status = localized
+    }
     @Published var settingsTab: SettingsTab = .recordings
     lazy var settingsWindow = SettingsWindow(model: self, defaults: userDefaults)
     @Published var modelsStatus = L10n.text("Проверяем модели…")
@@ -118,7 +124,20 @@ struct QueueJobID: Hashable, Sendable {
     var elapsed: Double { get { indicators.elapsed } set { indicators.elapsed = newValue } }
     var level: Double { get { indicators.level } set { indicators.level = newValue } }
     var soundNotice: String? { get { indicators.soundNotice } set { indicators.soundNotice = newValue } }
-    @Published var busy = false
+    @Published var busy = false {
+        didSet {
+            if !busy {
+                let waiters = queueIdleWaiters
+                queueIdleWaiters.removeAll()
+                for waiter in waiters { waiter.resume() }
+            }
+        }
+    }
+    private var queueIdleWaiters: [CheckedContinuation<Void, Never>] = []
+    private func waitUntilQueueIdle() async {
+        guard busy else { return }
+        await withCheckedContinuation { queueIdleWaiters.append($0) }
+    }
     @Published var shuttingDown = false
     @Published private(set) var preparingStorage = true
     @Published var tab: ExportPart = .transcript { didSet { refreshPresentation() } }
@@ -179,7 +198,7 @@ struct QueueJobID: Hashable, Sendable {
     }
     private var resultSignature = ""
     private var resultLoadID = UUID()
-    var selected: Manifest? { recordings.first { $0.id == selection } }
+    var selected: Manifest? { selection.flatMap { recordingsByID[$0] } }
     var resultTabs: [ExportPart] { selected?.warnings.isEmpty == false ? [.transcript, .summary, .warnings] : [.transcript, .summary] }
     var exportParts: [ExportPart] { resultTabs + [.all] }
     var tools: URL { resources.appendingPathComponent("tools") }
@@ -233,7 +252,7 @@ struct QueueJobID: Hashable, Sendable {
             }
         }
         Task {
-            status = "Восстанавливаем локальное хранилище…"
+            status = L10n.message("Восстанавливаем локальное хранилище…")
             if let archive {
                 do { applySnapshot(try await archive.recover()) }
                 catch {
@@ -251,8 +270,8 @@ struct QueueJobID: Hashable, Sendable {
                 }
             }
             preparingStorage = false
-            if status == "Восстанавливаем локальное хранилище…" { status = "" }
-            await verifyModels()
+            if status == L10n.message("Восстанавливаем локальное хранилище…") { status = "" }
+            await verifyModels(verifyContents: false)
         }
         if CommandLine.arguments.contains("--self-check") { Task { await sandboxSelfCheck() } }
         if CommandLine.arguments.contains("--self-check-microphone") { Task { await microphoneSelfCheck() } }
@@ -266,8 +285,8 @@ struct QueueJobID: Hashable, Sendable {
         guard snapshot.revision >= archiveRevision else { return }
         if snapshot.revision != archiveRevision {
             archiveRevision = snapshot.revision
-            recordings = snapshot.manifests
             recordingGroups = snapshot.groups
+            recordings = snapshot.manifests
             var retained = sidebarSelection
             retained.retain(Set(recordings.map(\.id)))
             if let selection, !recordings.contains(where: { $0.id == selection }) {
@@ -342,15 +361,19 @@ struct QueueJobID: Hashable, Sendable {
         resultLoadID = UUID(); resultSignature = ""
         if resultEdit?.id == draft.id { resultEdit = nil }
         await reload()
-        status = "Изменения сохранены"
+        status = L10n.message("Изменения сохранены")
     }
-    func verifyModels() async {
+    func verifyModels(verifyContents: Bool = true) async {
         guard let catalog, let repository, canManageModels else { return }
-        verifyingModels = true; modelsStatus = L10n.text("Проверяем целостность моделей…")
+        verifyingModels = true
+        modelsStatus = verifyContents ? L10n.text("Проверяем целостность моделей…") : L10n.text("Проверяем модели…")
         defer { verifyingModels = false; if !queued.isEmpty { Task { await processQueue() } } }
         do {
             let hardware = hardware
-            modelLibrary = try await Task.detached(priority: .utility) { try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware) }.value
+            modelLibrary = try await Task.detached(priority: .utility) {
+                try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware,
+                                      verifyContents: verifyContents)
+            }.value
             updateModelsStatus()
         } catch { modelsReady = false; modelsStatus = L10n.text("Не удалось проверить модели"); errorHandler.report(error) }
     }
@@ -513,7 +536,7 @@ struct QueueJobID: Hashable, Sendable {
     }
     @discardableResult
     func importProviders(_ providers: [NSItemProvider], groupID: String? = nil) -> Bool {
-        guard !preparingStorage, !shuttingDown, let archive, !providers.isEmpty else { return false }
+        guard !preparingStorage, !shuttingDown, archive != nil, !providers.isEmpty else { return false }
         let destination = groupID ?? recordingGroups.defaultID
         for provider in providers {
             // Provider loading must start inside the synchronous drop callback;
@@ -550,7 +573,10 @@ struct QueueJobID: Hashable, Sendable {
                     }
                 } catch { errorHandler.report(error) }
             }
-        } catch { errorHandler.report(error) }
+        } catch {
+            onDiscard()
+            errorHandler.report(error)
+        }
     }
     func completeImport(_ manifest: Manifest) async {
         // Import may finish while a result sheet owns an unsaved local draft.
@@ -655,6 +681,7 @@ struct QueueJobID: Hashable, Sendable {
         openingCapture = true
         let capture = makeRecordingCapture(microphoneDevices)
         var startupMicrophoneStatus: CaptureMicrophoneStatus?
+        var startupMeter: CaptureMeterReading?
         capture.onMicrophoneStatus = { [weak self] status in
             guard let self, !self.stopping else { return }
             if self.recordingID == id {
@@ -664,7 +691,11 @@ struct QueueJobID: Hashable, Sendable {
             }
         }
         capture.onMeter = { [weak self] reading in
-            guard let self, self.recordingID == id, !self.stopping else { return }
+            guard let self, !self.stopping else { return }
+            guard self.recordingID == id else {
+                if self.startingRecordingID == id { startupMeter = reading }
+                return
+            }
             self.level = reading.level
             self.elapsed = reading.elapsed
             self.soundNotice = reading.soundNotice
@@ -693,23 +724,29 @@ struct QueueJobID: Hashable, Sendable {
         }
 
         let folder = repository.folder(id)
+        let captureFolder = folder.appendingPathComponent("capture")
+        var published = manifest
+        published.state = .recording
+        published.recordedAt = Date()
+        var registered = false
         do {
-            try await capture.start(folder: folder.appendingPathComponent("capture"), microphone: microphone, systemAudio: systemAudio)
+            // A crash after the first closed CAF must leave a recoverable recording.
+            try await archive.createRecording(published, groupID: groupID)
+            registered = true
+            try Task.checkCancellation()
+            try await capture.start(folder: captureFolder, microphone: microphone, systemAudio: systemAudio)
             try Task.checkCancellation()
             if let startupStopReason { throw ScribeError.message(startupStopReason) }
-            var published = manifest
-            published.state = .recording
-            published.recordedAt = Date()
-            published.warnings = pendingCaptureWarnings
-            try await archive.createRecording(published, groupID: groupID)
+            let warnings = pendingCaptureWarnings
+            if !warnings.isEmpty { try await archive.update(id) { $0.warnings = warnings } }
 
             recorder = capture
             selection = id
-            elapsed = 0
-            level = 0
-            soundNotice = nil
+            elapsed = startupMeter?.elapsed ?? 0
+            level = startupMeter?.level ?? 0
+            soundNotice = startupMeter?.soundNotice
             indicators.microphoneStatus = startupMicrophoneStatus
-            indicators.waitingForSystemAudio = systemAudio
+            indicators.waitingForSystemAudio = startupMeter?.waitingForSystemAudio ?? systemAudio
             indicators.captureWarnings = []
             supervisor.recordingActive = true
             recordingID = id
@@ -725,7 +762,25 @@ struct QueueJobID: Hashable, Sendable {
             await revealRecording(id, whileCapturing: true)
         } catch {
             _ = try? await capture.stop()
-            await archive.perform { _ in try? FileManager.default.removeItem(at: folder) }
+            if registered {
+                let hasFragments = await archive.perform { _ in
+                    guard FileManager.default.fileExists(atPath: captureFolder.path) else { return false }
+                    // Preserve unknown contents for recovery if the directory cannot be read.
+                    guard let contents = try? FileManager.default.contentsOfDirectory(atPath: captureFolder.path) else { return true }
+                    return contents.contains { $0.hasPrefix("part-") && $0.hasSuffix(".caf") && !$0.contains(".partial.") }
+                }
+                if hasFragments {
+                    let reason = startInterruption ?? startupStopReason ?? error.localizedDescription
+                    _ = try? await archive.update(id) {
+                        $0.state = .interrupted
+                        $0.lastError = reason
+                    }
+                } else {
+                    do { try await archive.delete(published) }
+                    catch { errorHandler.report(error) }
+                }
+                await reload()
+            }
             if !Task.isCancelled { errorHandler.report(error) }
         }
     }
@@ -779,7 +834,7 @@ struct QueueJobID: Hashable, Sendable {
     func stopRecording(warning: String? = nil) async {
         guard let id = recordingID, let archive, !stopping else { return }
         finalizingRecordingID = id
-        stopping = true; finalizingRecording = true; status = "Сохраняем аудио…"
+        stopping = true; finalizingRecording = true; status = L10n.message("Сохраняем аудио…")
         if let warning { recordCaptureWarning(warning, id: id) }
         defer {
             finalizingRecordingID = nil
@@ -790,7 +845,7 @@ struct QueueJobID: Hashable, Sendable {
             stopping = false; finalizingRecording = false; supervisor.recordingActive = false
             captureLimited = false; resourcesPaused = memoryLimited
             updateResourcePausePresentation()
-            if status == "Сохраняем аудио…" { status = "" }
+            if status == L10n.message("Сохраняем аудио…") { status = "" }
             Task { await processQueue() }
         }
         do {
@@ -867,12 +922,12 @@ struct QueueJobID: Hashable, Sendable {
             }
         }
     }
-    func resume(_ id: String) {
-        guard !preparingStorage, !shuttingDown, !finalizingRecording, queuePauses.isEmpty, !deletingJobIDs.contains(.recording(id)), id != recordingID, activeJob != .recording(id) else { return }
+    @discardableResult func resume(_ id: String) -> Task<Void, Never>? {
+        guard !preparingStorage, !shuttingDown, !finalizingRecording, queuePauses.isEmpty, !deletingJobIDs.contains(.recording(id)), id != recordingID, activeJob != .recording(id) else { return nil }
         let generation = queueGeneration, admission = jobAdmission[.recording(id), default: 0]
         finalizingRecordingID = id
         finalizingRecording = true
-        Task {
+        return Task {
             defer { finalizingRecording = false; finalizingRecordingID = nil }
             do {
                 if let archive {
@@ -989,11 +1044,18 @@ struct QueueJobID: Hashable, Sendable {
     }
     func processQueue() async {
         guard deletingGroupID == nil, !deletingSidebarRecordings, !deletingDiagramJobs, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
-              let repository, let archive, let catalog else { return }
-        busy = true; defer { busy = false; activeJob = nil; processingJob = nil; status = "" }
+              repository != nil, let archive, catalog != nil else { return }
+        busy = true
+        defer {
+            activeJob = nil
+            processingJob = nil
+            if queueStatus == status { status = "" }
+            queueStatus = nil
+            busy = false
+        }
         while deletingGroupID == nil && !deletingSidebarRecordings && !deletingDiagramJobs && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
-                status = "Обработка ожидает охлаждения Mac"
+                showQueueStatus("Обработка ожидает охлаждения Mac")
                 try? await Task.sleep(for: .seconds(2)); continue
             }
             let job = queued.removeFirst(); activeJob = job; processingJob = job
@@ -1015,8 +1077,7 @@ struct QueueJobID: Hashable, Sendable {
                         errorHandler.report(message: message)
                     }
                 }
-                if !(resourcesPaused && queued.contains(job)) {
-                    let ownsJob = activeJob == job
+                if activeJob == job, !(resourcesPaused && queued.contains(job)) {
                     if job.isRecording {
                         let isMicrophone = recordingID == job.id
                         _ = try? await archive.update(job.id) { m in
@@ -1025,16 +1086,16 @@ struct QueueJobID: Hashable, Sendable {
                             guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
                             if isMicrophone || !m.sourceComplete && m.state == .recording {
                                 // Processing failure never changes microphone ownership/state.
-                                m.captureProcessing = ownsJob ? .failed : .interrupted
+                                m.captureProcessing = .failed
                             } else if m.state.processing || m.state == .queued || m.state == .recorded {
-                                m.state = ownsJob ? .failed : .interrupted
+                                m.state = .failed
                             }
                             m.lastError = message
                         }
                     } else if let diagramArchive {
                         _ = try? await diagramArchive.update(job.id) { m in
                             guard m.state != .cancelled else { return }
-                            if m.state.processing || m.state == .queued { m.state = ownsJob ? .failed : .interrupted }
+                            if m.state.processing || m.state == .queued { m.state = .failed }
                             m.lastError = message
                         }
                     }
@@ -1101,8 +1162,11 @@ struct QueueJobID: Hashable, Sendable {
                     let role: ModelRole? = stage == .transcribing ? .asr : stage == .diarizing ? .diarization : stage == .summarizing ? .summary : nil
                     if let role { try requireHardware(for: role, info: info, catalog: catalog) }
                     guard activeJob == job else { throw CancellationError() }
+                    guard let state = JobState(rawValue: stage.rawValue) else {
+                        throw ScribeError.message("Некорректный этап обработки")
+                    }
                     m = try await archive.update(id) {
-                        $0.state = JobState(rawValue: stage.rawValue)!
+                        $0.state = state
                         $0.lastError = nil
                     }
                     await reload()
@@ -1152,7 +1216,7 @@ struct QueueJobID: Hashable, Sendable {
         // The manifest still describes the previous validated result during a retry.
         var warnings: [String] = []
         try await supervisor.run(command, executable: worker) { event in
-            if event.type == "progress" { self.status = event.message }
+            if event.type == "progress" { self.showQueueStatus(event.message) }
             if event.type == "warning", !warnings.contains(event.message) { warnings.append(event.message) }
         }
         guard activeJob == job else { throw CancellationError() }
@@ -1163,22 +1227,20 @@ struct QueueJobID: Hashable, Sendable {
     }
     private func runWorker(_ command: WorkerCommand) async throws {
         try await supervisor.run(command, executable: worker) { event in
-            if event.type == "progress" { self.status = event.message }
+            if event.type == "progress" { self.showQueueStatus(event.message) }
             if event.type == "checkpoint" {
                 self.resultSignature = ""; self.loadResult()
             }
-            if event.type == "warning", let archive = self.archive {
-                _ = try? await archive.update(command.jobId) { current in
-                    if !current.warnings.contains(event.message) { current.warnings.append(event.message) }
-                }
+            if event.type == "warning", let archive = self.archive,
+               (try? await archive.appendWarning(event.message, to: command.jobId)) == true {
                 await self.reload()
             }
         }
     }
-    func resumeAfterMemoryPressure() {
+    @discardableResult func resumeAfterMemoryPressure() -> Task<Void, Never> {
         memoryLimited = false; resourcesPaused = captureLimited
         updateResourcePausePresentation()
-        Task { await resourcePauseTask?.value; await processQueue() }
+        return Task { await resourcePauseTask?.value; await processQueue() }
     }
     func pauseForCaptureResources(memoryPressure: Bool = false) {
         if memoryPressure { memoryLimited = true } else { captureLimited = true }
@@ -1202,7 +1264,7 @@ struct QueueJobID: Hashable, Sendable {
                     }
                 }
                 await supervisor.cancel()
-                while busy { try? await Task.sleep(for: .milliseconds(50)) }
+                await waitUntilQueueIdle()
             }
             resourcePauseTask = nil
             await reload()
@@ -1270,7 +1332,7 @@ struct QueueJobID: Hashable, Sendable {
             }
         }
         await supervisor.cancel()
-        while busy { try? await Task.sleep(for: .milliseconds(50)) }
+        await waitUntilQueueIdle()
         await reload()
         await reloadDiagrams()
     }
@@ -1286,7 +1348,7 @@ struct QueueJobID: Hashable, Sendable {
         if activeJob == .recording(id) || processingJob == .recording(id) {
             suspendingQueue = true; activeJob = nil
             await supervisor.cancel()
-            while busy { try? await Task.sleep(for: .milliseconds(50)) }
+            await waitUntilQueueIdle()
             suspendingQueue = false
             Task { await processQueue() }
         }
@@ -1329,7 +1391,7 @@ struct QueueJobID: Hashable, Sendable {
     }
     func canDeleteSidebarRecordings(_ ids: Set<String>) -> Bool {
         !ids.isEmpty && deletingGroupID == nil && !deletingSidebarRecordings
-            && Set([recordingID, finalizingRecordingID].compactMap { $0 }).isDisjoint(with: ids)
+            && Set([recordingID, startingRecordingID, finalizingRecordingID].compactMap { $0 }).isDisjoint(with: ids)
     }
     /// The confirmation view freezes the IDs; selection may change while it is open.
     func deleteSidebarRecordings(_ ids: Set<String>) async {
@@ -1478,8 +1540,8 @@ struct QueueJobID: Hashable, Sendable {
     private func applyDiagramSnapshot(_ snapshot: DiagramCoordinator.Snapshot?) {
         guard let snapshot, snapshot.revision >= diagramArchiveRevision, snapshot.revision != diagramArchiveRevision else { return }
         diagramArchiveRevision = snapshot.revision
-        diagrams = snapshot.manifests
         diagramGroups = snapshot.groups
+        diagrams = snapshot.manifests
         if snapshot.unreadableDiagramIDs != reportedUnreadableDiagramIDs {
             reportedUnreadableDiagramIDs = snapshot.unreadableDiagramIDs
             if !snapshot.unreadableDiagramIDs.isEmpty {
@@ -1581,7 +1643,7 @@ struct QueueJobID: Hashable, Sendable {
         if activeJob == .diagram(id) || processingJob == .diagram(id) {
             suspendingQueue = true; activeJob = nil
             await supervisor.cancel()
-            while busy { try? await Task.sleep(for: .milliseconds(50)) }
+            await waitUntilQueueIdle()
             suspendingQueue = false
             Task { await processQueue() }
         }
@@ -1598,7 +1660,10 @@ struct QueueJobID: Hashable, Sendable {
         }
     }
     private func withDiagramDeletion(_ operation: () async throws -> Void) async {
-        guard !deletingDiagramJobs else { return }
+        guard !deletingDiagramJobs else {
+            errorHandler.report(message: "Дождитесь удаления схем")
+            return
+        }
         deletingDiagramJobs = true
         defer {
             deletingDiagramJobs = false
@@ -1680,7 +1745,7 @@ struct QueueJobID: Hashable, Sendable {
                 try Task.checkCancellation()
                 guard !shuttingDown else { return }
                 NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
-                status = "Скопировано"
+                status = L10n.message("Скопировано")
             } catch { errorHandler.report(error) }
         }
     }
@@ -1748,7 +1813,7 @@ struct QueueJobID: Hashable, Sendable {
         capture.onMeter = { lastElapsed = $0.elapsed }
         do {
             guard await AVCaptureDevice.requestAccess(for:.audio) else { throw ScribeError.message("Доступ к микрофону не разрешён") }
-            status = "Техническая проверка микрофона: 12 секунд, звук будет удалён"
+            status = L10n.message("Техническая проверка микрофона: 12 секунд, звук будет удалён")
             let microphone = try microphoneDevices.resolve(.builtIn)
             try await capture.start(folder: captureFolder,
                                     microphone: MicrophoneCaptureRequest(selection: .builtIn, initial: microphone),
@@ -1786,6 +1851,13 @@ struct QueueJobID: Hashable, Sendable {
         var testModels: URL?
         var events: [String] = []
         do {
+            let probeProfiles = try ModelRole.audioRoles.map { role in
+                guard let profile = catalog.models.first(where: { $0.id == role.rawValue && $0.purpose == role }) else {
+                    throw ScribeError.message("Не удалось прочитать закреплённый каталог моделей")
+                }
+                return profile
+            }
+            let probeCatalog = ModelCatalog(models: probeProfiles)
             var manifest = Manifest(sourceType:full ? "technical-probe" : "diagnostic",title:"Sandbox probe",filename:full ? "probe.wav" : "original.caf")
             let folder = diagnostics.appendingPathComponent(manifest.id), source = folder.appendingPathComponent(manifest.originalRelativePath)
             try Disk.directory(source.deletingLastPathComponent())
@@ -1795,7 +1867,9 @@ struct QueueJobID: Hashable, Sendable {
                 let bundledModels = resources.appendingPathComponent("ProbeModels")
                 // A separate developer probe bundle supplies read-only public weights. The
                 // shipping app never embeds them or gains access to arbitrary external paths.
-                for profile in catalog.models where ModelRole(rawValue: profile.id) != nil { try await installer.install(profile,root:modelRoot,localSource:bundledModels.appendingPathComponent(profile.id)) { _ in } }
+                for profile in probeProfiles {
+                    try await installer.install(profile, root: modelRoot, localSource: bundledModels.appendingPathComponent(profile.id)) { _ in }
+                }
                 try FileManager.default.copyItem(at:resources.appendingPathComponent("probe.wav"),to:source)
                 let audio = try Media.probe(source,tools:tools)
                 manifest.durationMs = Int((audio.duration*1000).rounded()); manifest.sampleRate = audio.sampleRate; manifest.channels = audio.channels
@@ -1805,7 +1879,8 @@ struct QueueJobID: Hashable, Sendable {
                 manifest.durationMs = 500; manifest.sampleRate = 16000; manifest.channels = 1
             }
             manifest.sourceComplete = true; manifest.sha256 = try Disk.hash(source)
-            let info = RunInfo(sourceHash: manifest.sha256, profileHash: catalog.fingerprint)
+            let info = RunInfo(sourceHash: manifest.sha256, profileHash: probeCatalog.fingerprint)
+            _ = try catalog.pinned(to: info)
             let run = folder.appendingPathComponent("runs/\(info.id)")
             try Disk.write(manifest, to: folder.appendingPathComponent("manifest.json")); try Disk.write(info, to: run.appendingPathComponent("run.json"))
             let stages: [Stage] = full ? [.preparingAudio,.transcribing,.diarizing,.summarizing] : [.preparingAudio]
@@ -1813,7 +1888,7 @@ struct QueueJobID: Hashable, Sendable {
                 let command = WorkerCommand(jobId:manifest.id,runId:info.id,stage:stage,recordingPath:folder.path,modelsPath:modelRoot.path,toolsPath:tools.path)
                 try await supervisor.run(command,executable:worker,diagnosticURL:full ? run.appendingPathComponent("\(stage.rawValue).stderr") : nil) { event in
                     events.append(stage.rawValue+":"+event.type)
-                    self.status = event.message
+                    self.status = L10n.message(event.message)
                     try? Disk.write(["stage":stage.rawValue,"event":event.type,"message":event.message],to:diagnostics.appendingPathComponent("sandbox-probe-progress.json"))
                 }
             }

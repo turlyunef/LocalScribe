@@ -59,11 +59,17 @@ public enum L10n {
     static let englishInterface = loadCatalog("Interface.en")
     static let englishMessages = MessageCatalog(loadCatalog("Messages.en"))
 
-    private static func loadCatalog(_ name: String) -> [String: String] {
-        guard let url = Bundle.module.url(forResource: name, withExtension: "json"),
-              let data = try? Data(contentsOf: url),
-              let catalog = try? JSONDecoder().decode([String: String].self, from: data) else { return [:] }
-        return catalog
+    static func loadCatalog(_ name: String) -> [String: String] {
+        let logger = Logger(subsystem: "local.localscribe.mac", category: "localization")
+        do {
+            guard let url = Bundle.module.url(forResource: name, withExtension: "json") else {
+                throw CocoaError(.fileNoSuchFile)
+            }
+            return try JSONDecoder().decode([String: String].self, from: Data(contentsOf: url))
+        } catch {
+            logger.error("Could not load localization catalog \(name, privacy: .public): \(error.localizedDescription, privacy: .private)")
+            return [:]
+        }
     }
 
     private static let placeholder = try! NSRegularExpression(pattern: #"%([1-9][0-9]?)\$@"#)

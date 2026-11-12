@@ -44,9 +44,9 @@ public final class VibeVoiceASRModel: Module {
     }
     func prepareAudio(_ audio: MLXArray) throws -> MLXArray {
         guard audio.size <= 300 * sampleRate else { throw VibeVoiceError.contextLimit }
-        precondition(
-            (audio.ndim == 1 || audio.ndim == 2) && audio.size > 0,
-            "Expected nonempty mono or time-major audio")
+        guard audio.size > 0, audio.ndim == 1 || (audio.ndim == 2 && audio.dim(0) > 1) else {
+            throw VibeVoiceError.configuration("Expected nonempty mono or time-major audio")
+        }
         var mono = (audio.ndim == 2 ? audio.mean(axis: -1) : audio).asType(.float32)
         if config.normalizeAudio {
             mono = mono * (pow(Float(10), -25 / 20) / (sqrt(mean(mono * mono)) + 1e-6))
@@ -183,8 +183,11 @@ public final class VibeVoiceASRModel: Module {
             }
         }
         try model.update(parameters: ModuleParameters.unflattened(weights), verify: .all)
-        let tokenizerConfig = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenizerDirectory.appendingPathComponent("tokenizer_config.json"))) as! [NSString: Any]
-        let tokenizerData = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenizerDirectory.appendingPathComponent("tokenizer.json"))) as! [NSString: Any]
+        // LocalScribe: loading malformed tokenizer JSON must not crash the worker.
+        guard let tokenizerConfig = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenizerDirectory.appendingPathComponent("tokenizer_config.json"))) as? [NSString: Any],
+              let tokenizerData = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenizerDirectory.appendingPathComponent("tokenizer.json"))) as? [NSString: Any] else {
+            throw VibeVoiceError.configuration("Invalid tokenizer JSON")
+        }
         model.tokenizer = try AutoTokenizer.from(tokenizerConfig: Config(tokenizerConfig), tokenizerData: Config(tokenizerData))
         try model.prepareTokenizer()
         model.train(false)

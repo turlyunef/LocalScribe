@@ -135,6 +135,7 @@ struct PinnedMicrophone: Equatable, Sendable {
     private let loadRoute: (AudioDeviceID) -> HALInputRoute?
     private var inventoryObservation: HALPropertyObservation?
     private var deviceObservation: HALPropertyObservation?
+    private var refreshTask: Task<Void, Never>?
     private let observeChanges: Bool
 
     init(observeChanges: Bool = true, loadSnapshot: (() -> MicrophoneDevicesSnapshot)? = nil,
@@ -146,9 +147,18 @@ struct PinnedMicrophone: Equatable, Sendable {
             inventoryObservation = HALPropertyObservation([
                 HALInput.systemProperty(kAudioHardwarePropertyDevices),
                 HALInput.systemProperty(kAudioHardwarePropertyDefaultInputDevice)
-            ]) { [weak self] in self?.refresh() }
+            ]) { [weak self] in self?.scheduleRefresh() }
         }
         if observeChanges || loadSnapshot != nil { refresh() }
+    }
+
+    private func scheduleRefresh() {
+        guard refreshTask == nil else { return }
+        refreshTask = Task { [weak self] in
+            do { try await Task.sleep(for: .milliseconds(40)) } catch { return }
+            self?.refreshTask = nil
+            self?.refresh()
+        }
     }
 
     func refresh() {
@@ -161,7 +171,7 @@ struct PinnedMicrophone: Equatable, Sendable {
             [HALInput.globalProperty(device.deviceID, kAudioDevicePropertyDeviceIsAlive),
              HALInput.globalProperty(device.deviceID, kAudioObjectPropertyName),
              HALInput.inputProperty(device.deviceID, kAudioDevicePropertyStreamConfiguration)]
-        }) { [weak self] in self?.refresh() }
+        }) { [weak self] in self?.scheduleRefresh() }
     }
 
     func resolve(_ selection: MicrophoneSelection) throws -> PinnedMicrophone {

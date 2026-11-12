@@ -13,8 +13,13 @@ public enum Disk {
         try encoder.encode(value).write(to: url, options: .atomic)
     }
     public static func read<T: Decodable>(_ type: T.Type, at url: URL) throws -> T {
+        let maximumBytes = 64 * 1024 * 1024
+        let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
+        guard size.map({ $0 <= maximumBytes }) == true else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
+        let data = try Data(contentsOf: url, options: .mappedIfSafe)
+        guard data.count <= maximumBytes else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-        return try decoder.decode(type, from: Data(contentsOf: url))
+        return try decoder.decode(type, from: data)
     }
     public static func hash(_ url: URL, checkCancellation: Bool = false) throws -> String {
         let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
@@ -95,7 +100,7 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public static let currentPipelineVersion = "1.0.0-audio2-asr12-live1-diarization4-summary16"
+    public static let currentPipelineVersion = "1.0.0-audio2-asr12-live1-diarization4-summary17"
     public var pipelineVersion = RunInfo.currentPipelineVersion
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
@@ -190,7 +195,8 @@ public struct Summary: Codable, Sendable, Equatable {
     /// Only manual result revisions may contain findings without source links.
     /// Generated summaries continue to require evidence by default.
     public func validate(against transcript: Transcript, allowingUnlinkedFindings: Bool = false) throws {
-        let ids = Set(transcript.segments.map(\.id)), speakers = Set(transcript.segments.compactMap(\.speakerId))
+        let segmentsByID = Dictionary(grouping: transcript.segments, by: \.id)
+        let ids = Set(segmentsByID.keys), speakers = Set(transcript.segments.compactMap(\.speakerId))
         guard schemaVersion == 1, ["ru", "en"].contains(language) else { throw ScribeError.message("Некорректная версия или язык итогов") }
         for f in overview + decisions + tasks + openQuestions {
             let unlinked = allowingUnlinkedFindings && f.evidenceSegmentIds.isEmpty
@@ -200,10 +206,11 @@ public struct Summary: Codable, Sendable, Equatable {
                   f.ownerName == nil || !f.ownerName!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
                   f.dueText == nil || !f.dueText!.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ScribeError.message("Итоги не прошли проверку ссылок и полей") }
             if unlinked { continue }
-            if let owner = f.ownerSpeakerId, !transcript.segments.contains(where:{ f.evidenceSegmentIds.contains($0.id) && $0.speakerId == owner }) { throw ScribeError.message("Спикер ответственного отсутствует в основании") }
-            if let name = f.ownerName, name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !f.evidenceSegmentIds.contains(where: { id in transcript.segments.contains { $0.id == id && $0.text.localizedCaseInsensitiveContains(name) } }) { throw ScribeError.message("Имя ответственного отсутствует в основании") }
-            if let due = f.dueText, due.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !f.evidenceSegmentIds.contains(where: { id in transcript.segments.contains { $0.id == id && $0.text.localizedCaseInsensitiveContains(due) } }) { throw ScribeError.message("Срок отсутствует в основании") }
-            if f.evidenceSegmentIds.contains(where: { id in transcript.segments.contains { $0.id == id && $0.uncertain } }) && !f.uncertain { throw ScribeError.message("Неопределённость исходной реплики потеряна") }
+            let evidence = f.evidenceSegmentIds.flatMap { segmentsByID[$0] ?? [] }
+            if let owner = f.ownerSpeakerId, !evidence.contains(where: { $0.speakerId == owner }) { throw ScribeError.message("Спикер ответственного отсутствует в основании") }
+            if let name = f.ownerName, !evidence.contains(where: { $0.text.localizedCaseInsensitiveContains(name) }) { throw ScribeError.message("Имя ответственного отсутствует в основании") }
+            if let due = f.dueText, !evidence.contains(where: { $0.text.localizedCaseInsensitiveContains(due) }) { throw ScribeError.message("Срок отсутствует в основании") }
+            if !f.uncertain, evidence.contains(where: \.uncertain) { throw ScribeError.message("Неопределённость исходной реплики потеряна") }
         }
     }
     /// Reject unsupported optional claims conservatively, without rewriting the fact text,

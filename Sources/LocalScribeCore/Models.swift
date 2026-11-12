@@ -58,11 +58,15 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
         !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\") && !value.contains("\0")
     }
     public func validate(at root: URL) throws {
+        try validateFiles(at: root, verifyContents: true)
+    }
+    func validateFiles(at root: URL, verifyContents: Bool) throws {
         try validatePaths()
         for f in files {
             let url = root.appendingPathComponent(id).appendingPathComponent(f.localPath)
-            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, Int64(size) == f.size,
-                  try Disk.hash(url) == f.sha256 else { throw ScribeError.message("Модель \(catalogName): отсутствует или повреждён \(f.localPath)") }
+            let invalid = ScribeError.message("Модель \(catalogName): отсутствует или повреждён \(f.localPath)")
+            guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, Int64(size) == f.size else { throw invalid }
+            if verifyContents, try Disk.hash(url) != f.sha256 { throw invalid }
         }
     }
 }

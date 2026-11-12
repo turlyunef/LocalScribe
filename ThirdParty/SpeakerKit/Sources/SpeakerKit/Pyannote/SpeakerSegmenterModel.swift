@@ -145,6 +145,22 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         windowPadding: Int = 0,
         audioRange: Range<Int>? = nil
     ) async throws {
+        let bounds = audioRange ?? audioArray.indices
+        guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count else {
+            throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
+        }
+        try await predict(audioRange: bounds, readFrames: { Array(audioArray[$0]) },
+                          sendOutput: sendOutput, windowPadding: windowPadding)
+    }
+
+    // LocalScribe: the same global chunk indices and overlap are used for
+    // in-memory samples and PCM read on demand from disk.
+    func predict(
+        audioRange: Range<Int>,
+        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
+        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
+        windowPadding: Int = 0
+    ) async throws {
         guard let model else {
             throw SpeakerKitError.modelUnavailable("Speaker segmenter model is unavailable")
         }
@@ -160,8 +176,8 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         let chunkStrideOffset = useFullRedundancy ? modelChunkStrideOffset : 0
         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
         let chunkStride = Int(Float(maxChunkLength - chunkStrideOffset) / sampleRateFloat)
-        try await predictChunks(audioArray: audioArray, sendOutput: sendOutput,
-                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset, audioRange: audioRange) { index, waveform in
+        try await predictChunks(audioRange: audioRange, readFrames: readFrames, sendOutput: sendOutput,
+                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset) { index, waveform in
             guard let audioSamples = AudioProcessor.padOrTrimAudio(
                 fromArray: Self.reflectTail(waveform, toLength: maxChunkLength),
                 startAt: 0, toLength: maxChunkLength
@@ -188,10 +204,25 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
         audioRange: Range<Int>? = nil,
         predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
     ) async throws {
+        let bounds = audioRange ?? audioArray.indices
+        guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count else {
+            throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
+        }
+        try await predictChunks(audioRange: bounds, readFrames: { Array(audioArray[$0]) }, sendOutput: sendOutput,
+                                windowPadding: windowPadding, chunkStrideOffset: chunkStrideOffset, predictChunk: predictChunk)
+    }
+
+    func predictChunks(
+        audioRange bounds: Range<Int>,
+        readFrames: @escaping @Sendable (Range<Int>) throws -> [Float],
+        sendOutput: @escaping @Sendable (SpeakerSegmenterOutput) async throws -> Void,
+        windowPadding: Int = 0,
+        chunkStrideOffset: Int,
+        predictChunk: @escaping @Sendable (Int, [Float]) async throws -> SpeakerSegmenterOutput
+    ) async throws {
         guard (1...384_000).contains(sampleRate) else { throw SpeakerKitError.invalidModelOutput("Invalid audio sample rate") }
         let maxChunkLength = Int(Self.chunkLengthInSeconds) * sampleRate
-        let bounds = audioRange ?? audioArray.indices
-        guard bounds.lowerBound >= 0, bounds.upperBound <= audioArray.count,
+        guard bounds.lowerBound >= 0,
               chunkStrideOffset >= 0, chunkStrideOffset < maxChunkLength,
               windowPadding >= 0, windowPadding <= bounds.count else {
             throw SpeakerKitError.invalidModelOutput("Invalid segmenter chunk bounds")
@@ -216,7 +247,11 @@ public class SpeakerSegmenterModel: @unchecked Sendable {
                     var completed = 0
                     for await chunk in chunkStream {
                         try Task.checkCancellation()
-                        let output = try await predictChunk(chunk.index, Array(audioArray[chunk.range]))
+                        let waveform = try readFrames(chunk.range)
+                        guard waveform.count == chunk.range.count else {
+                            throw SpeakerKitError.invalidModelOutput("Incomplete diarization audio")
+                        }
+                        let output = try await predictChunk(chunk.index, waveform)
                         try Task.checkCancellation()
                         guard output.chunkIndex == chunk.index else {
                             throw SpeakerKitError.invalidModelOutput("Segmenter returned the wrong chunk index")

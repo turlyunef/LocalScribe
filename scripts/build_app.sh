@@ -4,7 +4,10 @@ cd "$(dirname "$0")/.."
 ROOT="$PWD"
 IDENTITY="${LOCALSCRIBE_SIGN_IDENTITY:--}"
 bash scripts/build_icon.sh
-if [ ! -x Assets/tools/ffmpeg ] || [ ! -x Assets/tools/ffprobe ]; then bash scripts/build_ffmpeg.sh; fi
+if [ ! -x Assets/tools/ffmpeg ] || [ ! -x Assets/tools/ffprobe ]; then
+    echo "Bundled audio tools are missing. Building FFmpeg may download its pinned source archive." >&2
+    bash scripts/build_ffmpeg.sh
+fi
 for tool in Assets/tools/ffmpeg Assets/tools/ffprobe; do
     "$tool" -v quiet -demuxers | awk '$1 == "D" && $2 == "aac" { found=1 } END { exit !found }' || { echo "Rebuild bundled AAC audio tools: bash scripts/build_ffmpeg.sh" >&2; exit 1; }
 done
@@ -15,10 +18,20 @@ done
 swift package resolve --force-resolved-versions
 swift build -c release -j 4 --force-resolved-versions
 BIN="$(swift build -c release --show-bin-path)"
-APP="$ROOT/dist/LocalScribe.app"
-# Rebuild from scratch: renamed/removed SwiftPM bundles and Metal libraries must
-# not survive inside an existing .app and ship stale in the distribution.
-rm -rf "$APP"
+DESTINATION="$ROOT/dist/LocalScribe.app"
+mkdir -p "$ROOT/dist"
+STAGING="$(mktemp -d "$ROOT/dist/.localscribe-app.XXXXXX")"
+APP="$STAGING/LocalScribe.app"
+PREVIOUS="$STAGING/previous.app"
+cleanup() {
+    if [ -e "$PREVIOUS" ] && [ ! -e "$DESTINATION" ]; then
+        mv "$PREVIOUS" "$DESTINATION" || return
+    fi
+    rm -rf -- "$STAGING"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Helpers" "$APP/Contents/Resources/tools" "$APP/Contents/Resources/Licenses"
 SERVICE="$APP/Contents/XPCServices/LocalScribeModelService.xpc"
 mkdir -p "$SERVICE/Contents/MacOS" "$SERVICE/Contents/Resources"
@@ -64,4 +77,6 @@ touch "$APP"
 mkdir -p build
 cp Package.resolved build/Package.resolved
 { xcodebuild -version; swift --version; sw_vers; shasum -a 256 Package.resolved Resources/models.lock.json; } > build/build-environment.txt
-echo "$APP"
+if [ -e "$DESTINATION" ]; then mv "$DESTINATION" "$PREVIOUS"; fi
+mv "$APP" "$DESTINATION"
+echo "$DESTINATION"

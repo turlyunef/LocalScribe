@@ -2,6 +2,7 @@ import SwiftUI
 import AppKit
 import UniformTypeIdentifiers
 import Combine
+import ImageIO
 import LocalScribeCore
 
 enum DiagramExportFormat: String, Sendable {
@@ -75,11 +76,12 @@ struct DiagramExportRequest: Sendable {
     @Published private(set) var resultTab: DiagramExportPart = .nodes
     @Published private(set) var resultError: String?
     private var previewLoadID = UUID()
+    private var previewTask: Task<Void, Never>?
     private var resultLoadID = UUID()
     private var resultSignature = ""
 
     var search: RecordingSearch { model.diagramSearch }
-    var selected: DiagramManifest? { model.diagrams.first { $0.id == selection } }
+    var selected: DiagramManifest? { selection.flatMap(model.diagram) }
     var result: DiagramResult? { presentation?.result }
     var resultTabs: [DiagramExportPart] {
         DiagramExportPart.sections(includingWarnings: selected?.warnings.isEmpty == false)
@@ -102,17 +104,27 @@ struct DiagramExportRequest: Sendable {
     // MARK: - Preview and result loading
 
     func loadPreview() {
-        guard let selected, let repository = model.diagramRepository else { preview = nil; previewError = nil; return }
-        let id = selected.id
+        let previous = previewTask
+        previous?.cancel()
         preview = nil; previewError = nil
         let loadID = UUID(); previewLoadID = loadID
+        guard let selected, let repository = model.diagramRepository else { return }
         let url = repository.originalURL(selected)
-        Task.detached(priority: .userInitiated) {
-            let image = NSImage(contentsOf: url)
-            await MainActor.run {
-                guard self.previewLoadID == loadID, self.selection == id else { return }
-                if let image { self.preview = image } else { self.previewError = L10n.text("Не удалось открыть оригинальное изображение") }
+        previewTask = Task { [weak self] in
+            await previous?.value
+            guard !Task.isCancelled else { return }
+            let decode = Task.detached(priority: .userInitiated) {
+                guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil as CGImage? }
+                return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                    kCGImageSourceCreateThumbnailFromImageAlways: true,
+                    kCGImageSourceCreateThumbnailWithTransform: true,
+                    kCGImageSourceThumbnailMaxPixelSize: 4_096
+                ] as CFDictionary)
             }
+            let image = await decode.value
+            guard !Task.isCancelled, let self, self.previewLoadID == loadID else { return }
+            if let image { self.preview = NSImage(cgImage: image, size: .zero) }
+            else { self.previewError = L10n.text("Не удалось открыть оригинальное изображение") }
         }
     }
 
@@ -294,10 +306,12 @@ struct DiagramExportRequest: Sendable {
         else { await model.changeDiagramGroups { $0.setAllExpanded(expanded) } }
     }
     func saveGroupName(_ name: String, id: String? = nil) async throws {
-        try await model.changeDiagramGroups { groups in
+        guard let archive = model.diagramArchive else { throw ScribeError.message("Хранилище схем недоступно") }
+        try await archive.editGroups { groups in
             if let id { try groups.rename(id, name: name) }
             else { try groups.create(name: name) }
         }
+        await model.reloadDiagrams()
     }
     func revealDiagram(_ id: String, revealThroughSearch: Bool = false) async {
         await model.reloadDiagrams()

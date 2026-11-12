@@ -197,8 +197,9 @@ struct WorkerFailureError: LocalizedError, Sendable {
             // Group lifetime is independent of the leader: an orphan may retain
             // both pipes and ignore TERM. Stop targeting a group once it is gone.
             let signalledGroup = group.map { kill(-$0, SIGTERM) == 0 } ?? false
-            if p.isRunning { p.terminate() }
-            try? await Task.sleep(for: .milliseconds(300))
+            let leaderRunning = p.isRunning
+            if leaderRunning { p.terminate() }
+            if signalledGroup || leaderRunning { try? await Task.sleep(for: .milliseconds(300)) }
             if signalledGroup, let group { kill(-group, SIGKILL) }
             if p.isRunning { kill(p.processIdentifier, SIGKILL) }
             await stop?()

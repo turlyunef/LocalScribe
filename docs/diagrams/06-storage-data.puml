@@ -1,0 +1,104 @@
+@startuml 06-storage-data
+title Данные на диске и акторы хранения (manifest — источник истины)
+
+skinparam classAttributeIconSize 0
+skinparam nodesep 30
+skinparam ranksep 40
+
+package "Архив записей" {
+  class Manifest {
+    id : UUID
+    sha256 : исходник
+    durationMs (≤ 3 ч)
+    sourceComplete
+    pendingRunId / activeRunId
+    status : RecordingStatus
+  }
+  class "groups.json (v1)\nавторитетный каталог групп\n«Без темы» всегда последняя" as Groups
+  class "index.json\nвспомогательный индекс" as Index
+  class RunInfo {
+    pipelineVersion
+    fingerprint
+    modelIDs / auxiliaryModelIDs
+    sourceHash
+    manualEdits
+    summaryLanguage
+    transcriptSourceRunID
+  }
+  package "runs/<runId>" as RunDir {
+    class "run.json (RunInfo)" as RunJson
+    class "prepared.json\nfingerprint + pcmFrames" as Prepared
+    class "asr/part-N.json\nконтрольные точки 300 c" as AsrParts
+    class "transcript.json\n(после проверки всех частей)" as Transcript
+    class "summary.json" as SummaryFile
+    class "summary-parts/…\nresolve-question контрольные точки" as SummaryParts
+    class "capture-seal.json\n+ caf/part-*.caf" as Capture
+    class "metrics-*.json,\nllm-audit.json" as Metrics
+    class "work/audio.wav\nmono PCM16 16 кГц" as Wave
+  }
+  Manifest "1" *-- "0..*" RunDir
+}
+
+package "Архив схем (параллельная ветка)" {
+  class DiagramManifest {
+    id : UUID
+    sha256 изображения
+    pendingRunId / activeRunId
+  }
+  class DiagramResult {
+    kind : graph / sequence / state
+    nodes / edges / generalizations
+    предупреждения запуска
+  }
+  class "DiagramRunInfo\nверсии pipeline / prompt /\npreprocessing" as DiagRunInfo
+  class "groups.json (v1) схем" as DiagGroups
+  DiagramManifest "1" *-- "0..*" DiagRunInfo
+  DiagRunInfo --> DiagramResult : артефакт runs
+}
+
+package "Акторы GUI (LocalScribeCore)" {
+  class "RecordingCoordinator\n«actor» — единственный писатель GUI" as RecCoord {
+    сериализация транзакций без приостановки\nмежду чтением и публикацией manifest
+    атомарный Disk.write, ISO 8601
+    снимки с монотонной ревизией
+    батч-обновление index.json
+  }
+  class RecordingRepository {
+    список и восстановление архива
+    результаты через ResultReading
+  }
+  class ResultReading {
+    schemaVersion, UUID, SHA, fingerprint,
+    таймкоды и ссылки; повреждённый финальный
+    JSON не скрывается контрольной точкой
+  }
+  class ResultEditing {
+    черновик → полный новый run →\nтолько затем переключение activeRunId
+  }
+  class "DiagramCoordinator\n«actor»" as DiagCoord
+  RecordingRepository --> RecCoord : тяжёлый I/O вне MainActor
+}
+
+RecCoord --> Manifest : транзакции
+RecCoord --> Groups : версии каталога
+RecCoord --> Index : батч
+RecordingRepository ..> Manifest : чтение
+RecordingRepository ..> Groups
+ResultReading ..> RunDir : проверка перед показом
+ResultEditing --> RunDir : новый run
+RecCoord ..> DiagramManifest
+DiagCoord --> DiagramManifest : транзакции
+DiagCoord --> DiagGroups
+
+note bottom of RunDir
+  Worker пишет артефакты только в runs/
+  и никогда не переписывает manifest;
+  состояние очереди и manifest меняет GUI.
+end note
+note bottom of Manifest
+  activeRunId и pendingRunId раздельны:
+  неудачный повтор не уничтожает прошлый
+  результат; «Продолжить» работает с pending run
+  и его pinned-моделями.
+end note
+@enduml

@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Explicit technical probe: local synthetic audio and models, no user archive."""
 import pathlib, subprocess, json, uuid, hashlib, time, selectors, wave, re
 repo = pathlib.Path(__file__).resolve().parents[1]

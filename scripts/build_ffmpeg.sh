@@ -6,16 +6,26 @@ VERSION=8.0.1
 ARCHIVE_SHA256=05ee0b03119b45c0bdb4df654b96802e909e0a752f72e4fe3794f487229e5a41
 mkdir -p Vendor Assets/tools build
 ARCHIVE="Vendor/ffmpeg-$VERSION.tar.xz"
-if [ ! -f "$ARCHIVE" ]; then curl --fail --location --retry 3 "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$ARCHIVE"; fi
 # Only remove the private directory created by this invocation. In particular,
 # never reuse or delete a user's existing Vendor/ffmpeg-$VERSION tree.
 STAGING="$(mktemp -d "$ROOT/build/ffmpeg-$VERSION.XXXXXX")"
-trap 'rm -rf -- "$STAGING"' EXIT
+DOWNLOAD=
+trap 'rm -rf -- "$STAGING"; if [ -n "$DOWNLOAD" ]; then rm -f -- "$DOWNLOAD"; fi' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 # Verify and extract the same private snapshot, even if the cached archive changes.
-cp "$ARCHIVE" "$STAGING/source.tar.xz"
+if [ -f "$ARCHIVE" ]; then
+    cp "$ARCHIVE" "$STAGING/source.tar.xz"
+else
+    curl --fail --location --retry 3 "https://ffmpeg.org/releases/ffmpeg-$VERSION.tar.xz" -o "$STAGING/source.tar.xz"
+fi
 echo "$ARCHIVE_SHA256  $STAGING/source.tar.xz" | shasum -a 256 -c -
+if [ ! -f "$ARCHIVE" ]; then
+    DOWNLOAD="$(mktemp "$ARCHIVE.XXXXXX")"
+    cp "$STAGING/source.tar.xz" "$DOWNLOAD"
+    mv "$DOWNLOAD" "$ARCHIVE"
+    DOWNLOAD=
+fi
 tar -xf "$STAGING/source.tar.xz" -C "$STAGING"
 cd "$STAGING/ffmpeg-$VERSION"
 ./configure --prefix="$ROOT/Assets/ffmpeg" --arch=arm64 --target-os=darwin \

@@ -6,12 +6,13 @@ public struct ModelLibrary: Codable, Sendable {
     public private(set) var installedAt: [String: Date] = [:]
     public private(set) var selectedByRole: [String: String] = [:]
     public init() {}
-    public static func load(at root: URL, catalog: ModelCatalog, hardware: ModelHardware? = nil) throws -> ModelLibrary {
+    public static func load(at root: URL, catalog: ModelCatalog, hardware: ModelHardware? = nil,
+                            verifyContents: Bool = true) throws -> ModelLibrary {
         let url = root.appendingPathComponent("selection.json")
         var library = FileManager.default.fileExists(atPath: url.path) ? try Disk.read(Self.self, at: url) : Self()
         var verified: [String: Date] = [:]
         for profile in catalog.models {
-            if (try? profile.validate(at: root)) != nil {
+            if (try? profile.validateFiles(at: root, verifyContents: verifyContents)) != nil {
                 let modified = try? root.appendingPathComponent(profile.id).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
                 verified[profile.id] = library.installedAt[profile.id] ?? modified ?? .distantPast
             }

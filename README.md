@@ -2,7 +2,7 @@
 
 Нативное локальное приложение для Apple Silicon, macOS 26+. Запись микрофона, системного звука или обоих источников, импорт AAC (ADTS)/MP3/M4A/WAV/FLAC/OGG/OPUS, Whisper на выбор, SpeakerKit OSS, Qwen3.5 через MLX. Результаты только для чтения, копирование, MD/TXT. Редактора, серверов и облачного анализа нет.
 
-**Текущая версия — 2.11.1.** Версия задаётся явно; автоматического пересчёта при сборке нет.
+**Текущая версия — 2.11.2.** Версия задаётся явно; автоматического пересчёта при сборке нет.
 
 **В версии 0.1.1** исправлена немедленная остановка записи; [проверка микрофона](docs/MicrophoneFix.md).
 
@@ -45,7 +45,7 @@ python3 --version
 bash scripts/package_source.sh
 ```
 
-Скопируйте `dist/LocalScribe-source.tar.gz` на новый Mac. Архив включает изменённые и ещё не добавленные в Git исходники, в том числе локальные реализации из `ThirdParty/`. История Git, сборочные кэши, `Assets/`, `build/`, `dist/` и `TestResults/` в него не входят. Для примера ниже положите архив в Downloads; целевая папка `meetings_AI` ещё не должна существовать:
+Скопируйте `dist/LocalScribe-source.tar.gz` на новый Mac. Архив включает изменённые и ещё не добавленные в Git исходники, в том числе локальные реализации из `ThirdParty/`. История Git, сборочные кэши, `Vendor/`, `Assets/`, `build/`, `dist/` и `TestResults/` в него не входят. Для примера ниже положите архив в Downloads; целевая папка `meetings_AI` ещё не должна существовать:
 
 ```sh
 mkdir -p "$HOME/VibeProjects"
@@ -121,16 +121,22 @@ open dist/LocalScribe.app
 
 После аварии модели сами не запускаются. «Продолжить» использует подходящие контрольные точки, с проверкой исходного SHA, ревизий и версии pipeline. Диаризация повторяется целиком, ASR заново не нужен. При повторной обработке прежний успешный результат показывается до готовности нового. При ошибке диаризации остаётся промежуточный текст, при ошибке LLM — готовая расшифровка. Удаление записи требует подтверждения и затрагивает только её каталог; экспортированные файлы и внешние оригиналы остаются.
 
+Импорт аудиофайлов запускается внутри LocalScribe.
+
 ## Проверки разработчика
 
+`bash scripts/verify.sh` запускает проверку plist, Python-тесты и релизные XCTest.
+Флаг `--static` запускает проверки без Swift-сборки.
+
 ```sh
-swift test -c release -j 4
+swift test -c release -j 4 --force-resolved-versions
 python3 -m unittest discover -s scripts/tests -v  # bootstrap и сборка FFmpeg: локальные фикстуры без весов и сети
 python3 scripts/format_checks.py         # декодирование, включая AAC ADTS; нужны Assets/tools и локальные аудиофикстуры
 python3 scripts/download_models.py       # только bootstrap разработчика, те же SHA-256
 python3 scripts/download_models.py --model asr-small --model summary-4b --model diarization
-python3 scripts/smoke.py /path/to/audio.wav --worker .build/out/Products/Release/LocalScribeWorker
-python3 scripts/fault_checks.py TestResults/smoke/RECORDING_UUID --worker .build/out/Products/Release/LocalScribeWorker
+worker="$(swift build -c release --show-bin-path)/LocalScribeWorker"
+python3 scripts/smoke.py /path/to/audio.wav --worker "$worker"
+python3 scripts/fault_checks.py TestResults/smoke/RECORDING_UUID --worker "$worker"
 bash scripts/package_source.sh
 ```
 
@@ -142,4 +148,4 @@ Bootstrap проверяет размеры и SHA-256 файлов даже в 
 
 Для разработческой проверки подписанного sandbox используются `open -n dist/LocalScribe.app --args --self-check --self-check-download` и, при наличии локальных моделей/технического аудио, `bash scripts/signed_probe.sh`. Второй скрипт создаёт отдельную диагностическую .app с копиями публичных весов; она не входит в поставку. Отчёт находится в Application Support её отдельного контейнера. Синтетический звук не попадает в пользовательский архив.
 
-Установленную сборку нужно отдельно проверить после перезагрузки с отключённой сетью, на 3 часах реальной речи и в условиях давления памяти. Встроенное декодирование согласованных кодеков уже проверено, но GUI-импорт, запись микрофона и качество на эталонных встречах требуют отдельной приёмки. Матрица — в `docs/Acceptance.md`, пошаговый оставшийся прогон — в `docs/MacAcceptance.md`, измеренные факты — в `docs/Measurements.json`.
+Установленную сборку нужно отдельно проверить после перезагрузки с отключённой сетью, на 3 часах реальной речи и в условиях давления памяти. Встроенное декодирование согласованных кодеков уже проверено, но GUI-импорт, запись микрофона и качество на эталонных встречах требуют отдельной приёмки. Матрица — в `docs/Acceptance.md`, пошаговый оставшийся прогон — в `docs/MacAcceptance.md`, измеренные факты — в `docs/Measurements.json`. Другие материалы собраны в [указателе документации](docs/README.md).

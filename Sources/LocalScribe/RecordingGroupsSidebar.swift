@@ -402,6 +402,7 @@ struct DeleteRecordingGroupView: View {
                 }
             }
             Button(L10n.text("Да, удалить записи"), role: .destructive) {
+                guard model.canDeleteRecordings(in: group.id) else { return }
                 dismiss(); Task { await model.deleteGroup(group.id, deleteRecordings: true) }
             }
             .foregroundStyle(.red)

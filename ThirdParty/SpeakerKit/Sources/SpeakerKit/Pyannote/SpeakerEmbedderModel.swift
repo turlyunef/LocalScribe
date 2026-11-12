@@ -227,15 +227,16 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
         let framesPerChunk = context.framesPerChunk
         Logging.debug("[SpeakerEmbedder] Processing single chunk \(chunkIndex) with \(windowsCount) windows, \(framesPerChunk) frames per chunk")
 
-        let chunkSpeakerMasks = try MLMultiArray(shape: [1, speakerDimensionForMasks(), NSNumber(value: framesPerChunk)], dataType: .float16)
-
         let speakersCount = context.speakersCount
-        let totalSpeakers = windowsCount * speakersCount
-        for i in 0..<totalSpeakers {
-            for j in 0..<framesPerChunk {
-                chunkSpeakerMasks[[0, i, j] as [NSNumber]] = 0 as NSNumber
-            }
+        let (totalSpeakers, overflow) = windowsCount.multipliedReportingOverflow(by: speakersCount)
+        let embedderModel = try getModel()
+        guard !overflow, let maskShape = embedderModel.modelDescription.inputDescriptionsByName["speaker_masks"]?.multiArrayConstraint?.shape,
+              maskShape.count == 3, maskShape[0].intValue == 1,
+              maskShape[1].intValue >= totalSpeakers, maskShape[2].intValue == framesPerChunk else {
+            throw SpeakerKitError.invalidModelOutput("Invalid embedder speaker masks")
         }
+        let chunkSpeakerMasks = try MLMultiArray(shape: maskShape, dataType: .float16)
+        chunkSpeakerMasks.dataPointer.initializeMemory(as: UInt16.self, repeating: 0, count: chunkSpeakerMasks.count)
 
         let windowTimelinesForChunk = context.chunkIndices
         let speakerIds = context.speakerIds
@@ -250,7 +251,7 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
             }
 
             let timelineIndices = windowTimelinesForChunk[windowIdx]
-            for speakerIdx in 0..<speakersCount {
+            for speakerIdx in activeSpeakersIndex {
                 let chunkSpeakerIdx = windowIdx * speakersCount + speakerIdx
                 for frameIdx in 0..<framesPerWindowCount {
                     let speakerMaskValue = speakerIds[[windowIdx, frameIdx, speakerIdx] as [NSNumber]].floatValue
@@ -259,9 +260,7 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
                     let filteredValue = speakerMaskValue * (1 - overlappedActivity)
 
                     let windowFrameIdx = timelineIndices[frameIdx]
-                    if activeSpeakersIndex.contains(speakerIdx) {
-                        chunkSpeakerMasks[[0, chunkSpeakerIdx, windowFrameIdx] as [NSNumber]] = filteredValue as NSNumber
-                    }
+                    chunkSpeakerMasks[[0, chunkSpeakerIdx, windowFrameIdx] as [NSNumber]] = filteredValue as NSNumber
                 }
             }
         }
@@ -278,10 +277,12 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
         }
 
         let embedderInput = SpeakerEmbedderInput(speakerMasks: chunkSpeakerMasks, preprocessorOutput: preprocessorOutput)
-        let embedderModel = try getModel()
         let embedderFeatures = try await embedderModel.asyncPrediction(from: embedderInput, options: MLPredictionOptions())
         let embedderOutput = SpeakerEmbedderOutput(features: embedderFeatures)
         let embeddingsOutput = SpeakerEmbedderOutput.floatArrays(from: embedderOutput.speakerEmbeddings)
+        guard embeddingsOutput.count >= totalSpeakers else {
+            throw SpeakerKitError.invalidModelOutput("Incomplete speaker embeddings")
+        }
 
         var pldaEmbeddingsOutput: [[Float]] = []
         if pldaModel != nil, let speakerEmbeddings = embedderOutput.speakerEmbeddings {
@@ -399,14 +400,6 @@ public final class SpeakerEmbedderModel: @unchecked Sendable {
         )
     }
 
-    private func speakerDimensionForMasks() -> NSNumber {
-        guard let shape = model?.modelDescription.inputDescriptionsByName["speaker_masks"]?.multiArrayConstraint?.shape,
-              shape.count > 1 else {
-            Logging.error("Failed to get speaker_masks shape for EmbedderModel")
-            return 0
-        }
-        return shape[1]
-    }
 }
 
 // MARK: - Embedder Model Input / Output

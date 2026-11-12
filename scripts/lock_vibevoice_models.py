@@ -5,7 +5,8 @@ Run only after the local checkpoint probe passes. No weight download.
 import argparse
 import json
 from pathlib import Path
-from lock_qwen_models import ROOT, get, lock_files
+from catalog_io import ROOT, get, write_catalog
+from lock_qwen_models import lock_files
 
 MODEL_REPO = 'mlx-community/VibeVoice-ASR-4bit'
 MODEL_REVISION = 'a1a15cb6c7b70f76b588af7e12f6fab34d5ab654'
@@ -45,7 +46,7 @@ def main():
                 raise ValueError('Refusing to replace an existing pinned profile')
         else:
             catalog['models'].append(profile)
-    args.output.write_text(json.dumps(catalog, ensure_ascii=False, indent=2) + '\n')
+    write_catalog(args.output, catalog)
 
 
 if __name__ == '__main__':

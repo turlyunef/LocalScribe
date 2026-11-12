@@ -106,13 +106,14 @@ public actor DiagramCoordinator {
     /// Publish what actually remains, whether or not a removal failed.
     public func delete(_ ids: Set<String>) throws {
         initialize()
-        var firstFailure: (any Error)?
-        for id in ids.sorted() {
-            do { try removeItem(repository, id) }
-            catch { firstFailure = error; break }
+        do {
+            for id in ids.sorted() { try removeItem(repository, id) }
+        } catch {
+            replace(readListing())
+            throw error
         }
-        replace(readListing())
-        if let firstFailure { throw firstFailure }
+        unreadableDiagramIDs.removeAll { ids.contains($0) }
+        replace(manifests.filter { !ids.contains($0.id) })
     }
 
     // MARK: - Runs
@@ -168,6 +169,7 @@ public actor DiagramCoordinator {
     @discardableResult public func cancel(_ id: String, onlyPending: Bool = false) throws -> DiagramManifest {
         initialize()
         var manifest = try repository.load(id)
+        guard manifest.state != .completed, manifest.state != .completedWithWarnings else { return manifest }
         guard !onlyPending || manifest.state.processing || manifest.state == .queued else { return manifest }
         manifest.state = .cancelled
         try repository.save(manifest)

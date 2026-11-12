@@ -90,17 +90,10 @@ public struct RecordingGroups: Codable, Equatable, Sendable {
 
 extension RecordingRepository {
     public func loadGroups() throws -> RecordingGroups {
-        let url = root.appendingPathComponent("groups.json")
-        // Only ENOENT is a legacy archive. Permission/decoding errors must not reset metadata.
-        do {
-            let groups = try Disk.read(RecordingGroups.self, at: url)
-            try groups.validate()
-            return groups
-        } catch let error as CocoaError where error.code == .fileReadNoSuchFile { return RecordingGroups() }
+        try RecordingGroups.loadCatalog(at: root.appendingPathComponent("groups.json"))
     }
     public func saveGroups(_ groups: RecordingGroups) throws {
-        try groups.validate()
-        try Disk.write(groups, to: root.appendingPathComponent("groups.json"))
+        try RecordingGroups.writeCatalog(groups, at: root.appendingPathComponent("groups.json"))
     }
 }
 

@@ -48,9 +48,24 @@ enum CaptureMicrophoneStatus: Equatable {
         var physicalRouteChanged = false
     }
 
+    @MainActor private final class InputSession {
+        let token: UUID
+        var engine: AVAudioEngine?
+        var bluetooth: BluetoothMicrophoneCapture?
+        var tapInstalled = false
+        var restartTimes: [Date] = []
+
+        init(token: UUID) { self.token = token }
+
+        func stop() {
+            bluetooth?.stop()
+            if tapInstalled { engine?.inputNode.removeTap(onBus: 0) }
+            engine?.stop()
+        }
+    }
+
     private let devices: MicrophoneDevices
-    private var engine: AVAudioEngine?
-    private var bluetoothMicrophone: BluetoothMicrophoneCapture?
+    private var activeInput: InputSession?
     private var systemCapture: SystemAudioCapture?
     private var ingress: CaptureIngress?
     private var sources: Set<CaptureAudioSource> = []
@@ -71,7 +86,7 @@ enum CaptureMicrophoneStatus: Equatable {
     private var durationLimit: Task<Void, Never>?
     private var microphoneRequest: MicrophoneCaptureRequest?
     private var microphone: PinnedMicrophone?
-    private var microphoneToken: UUID?
+    private var microphoneToken: UUID? { activeInput?.token }
     private var microphoneWasMuted = false
     private var awaitingFallbackConsent = false
     private var microphoneStatus: CaptureMicrophoneStatus? {
@@ -79,9 +94,6 @@ enum CaptureMicrophoneStatus: Equatable {
             if let microphoneStatus, microphoneStatus != oldValue { onMicrophoneStatus?(microphoneStatus) }
         }
     }
-    private var expectedInput: CaptureInputConfiguration?
-    private var restartTimes: [Date] = []
-    private var tapInstalled = false
     private(set) var configurationEventCount = 0
     private(set) var engineRestartCount = 0
 
@@ -93,6 +105,17 @@ enum CaptureMicrophoneStatus: Equatable {
 
     init(devices: MicrophoneDevices) {
         self.devices = devices
+    }
+
+    isolated deinit {
+        inventoryObservation?.cancel()
+        routingTask?.cancel()
+        recoveryTimeout?.cancel()
+        recoveryRetry?.cancel()
+        durationLimit?.cancel()
+        ingress?.closeAdmission()
+        stopMicrophone()
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
     }
 
     func start(folder: URL, microphone: MicrophoneCaptureRequest?, systemAudio: Bool) async throws {
@@ -108,9 +131,11 @@ enum CaptureMicrophoneStatus: Equatable {
         )
         self.ingress = ingress
         do {
-            // The tap can trigger a permission prompt. Start it before opening
-            // the microphone and before admitting PCM to the shared timeline.
+            // Prepare admission before HAL can deliver the first system packet.
+            // The first packet sets the origin, excluding time in the permission dialog.
             if systemAudio {
+                try await ingress.start(folder: folder, sources: sources, originAtFirstPacket: true)
+                try Task.checkCancellation()
                 let capture = SystemAudioCapture()
                 systemCapture = capture
                 do {
@@ -128,7 +153,7 @@ enum CaptureMicrophoneStatus: Equatable {
             try Task.checkCancellation()
             if let microphone { try await openInitialMicrophone(microphone) }
             if let startupFailure { throw ScribeError.message(startupFailure) }
-            try await ingress.start(folder: folder, sources: sources)
+            if !systemAudio { try await ingress.start(folder: folder, sources: sources) }
             try Task.checkCancellation()
             if let startupFailure { throw ScribeError.message(startupFailure) }
             if self.microphone == nil, !sources.contains(.systemAudio) {
@@ -138,6 +163,7 @@ enum CaptureMicrophoneStatus: Equatable {
                 options: [.userInitiated, .idleSystemSleepDisabled], reason: L10n.text("Запись LocalScribe")
             )
             durationLimit = Task { [weak self] in
+                // A packet-based limit also applies during mixed-source startup.
                 do { try await Task.sleep(for: .seconds(10_800)) } catch { return }
                 if ingress.closeAdmission() { self?.onStopNeeded?("Достигнут предел 3 часа. Запись сохранена.") }
             }
@@ -167,7 +193,6 @@ enum CaptureMicrophoneStatus: Equatable {
                 try await startMicrophone(candidate, deadline: .now + .seconds(4))
                 return
             } catch {
-                stopMicrophone()
                 try Task.checkCancellation()
                 if (try? devices.refreshFormat(of: candidate)) != nil {
                     failedInputs[candidate.uid] = FailedInput(deviceID: candidate.deviceID)
@@ -185,42 +210,55 @@ enum CaptureMicrophoneStatus: Equatable {
     private func startMicrophone(_ microphone: PinnedMicrophone, deadline: ContinuousClock.Instant) async throws {
         try Task.checkCancellation()
         let microphone = try devices.refreshFormat(of: microphone)
-        guard let ingress, let token = ingress.beginMicrophoneAttempt() else { throw CancellationError() }
-        microphoneToken = token
+        guard let ingress, let token = ingress.beginMicrophoneAttempt(whileActive: activeInput != nil) else {
+            throw CancellationError()
+        }
+        let session = InputSession(token: token)
+        var promoted = false
+        defer {
+            if !promoted {
+                ingress.suspendMicrophone(token)
+                session.stop()
+            }
+        }
         if BluetoothMicrophoneCapture.supports(deviceID: microphone.deviceID) {
             // AirPods can expose 24 kHz through HAL while the engine input
             // bus still reports 48 kHz, even after the engine starts.
             let capture = BluetoothMicrophoneCapture(deviceID: microphone.deviceID)
-            bluetoothMicrophone = capture
+            session.bluetooth = capture
             try capture.start { list, rate, time in
                 ingress.submitMono(.microphone, list: list, sampleRate: rate, hostTime: time, microphoneToken: token)
             }
         } else {
-            try startEngineMicrophone(microphone, ingress: ingress, token: token)
+            try startEngineMicrophone(microphone, ingress: ingress, session: session)
         }
 
         try await Self.waitForFirstMicrophonePacket(until: deadline, ingress: ingress, token: token) {
-            guard self.microphoneToken == token else { throw CancellationError() }
-            return self.engine?.isRunning != false
+            session.engine?.isRunning != false
         } restart: {
-            guard let engine = self.engine, let expectedInput = self.expectedInput else { throw CancellationError() }
+            guard let engine = session.engine else { throw CancellationError() }
             let pinned = try self.devices.refreshFormat(of: microphone)
-            let current = try self.validateEngineInput(for: pinned)
-            _ = try self.restartEngineMicrophone(engine, microphone: pinned, previous: expectedInput,
-                                                  current: current, ingress: ingress, token: token)
+            _ = try self.restartEngineMicrophone(engine, microphone: pinned, ingress: ingress, session: session)
         }
+        try Task.checkCancellation()
+        guard sources.contains(.microphone), !awaitingFallbackConsent, !microphoneWasMuted else { throw CancellationError() }
         let negotiated = try devices.refreshFormat(of: microphone)
-        if let engine {
-            expectedInput = try validateEngineInput(for: negotiated)
+        if let engine = session.engine {
+            _ = try validateEngineInput(for: negotiated, engine: engine)
+        } else {
+            try session.bluetooth?.updateFormat()
+        }
+        guard ingress.activateMicrophone(token) else { throw CancellationError() }
+        stopMicrophone()
+        activeInput = session
+        promoted = true
+        if let engine = session.engine {
             changeObserver = NotificationCenter.default.addObserver(
                 forName: .AVAudioEngineConfigurationChange, object: engine, queue: nil
             ) { [weak self] _ in
                 Task { @MainActor [weak self] in self?.scheduleConfigurationCheck(token) }
             }
-        } else {
-            try bluetoothMicrophone?.updateFormat()
         }
-        guard ingress.activateMicrophone(token) else { throw CancellationError() }
         self.microphone = negotiated
         if let request = microphoneRequest, !request.selection.allowsAutomaticFallback, request.initial == nil {
             microphoneRequest = MicrophoneCaptureRequest(selection: request.selection, initial: negotiated)
@@ -239,7 +277,7 @@ enum CaptureMicrophoneStatus: Equatable {
                 }
             }
         }
-        if engine?.isRunning == false { scheduleConfigurationCheck(token) }
+        if session.engine?.isRunning == false { scheduleConfigurationCheck(token) }
     }
 
     static func waitForFirstMicrophonePacket(
@@ -260,7 +298,6 @@ enum CaptureMicrophoneStatus: Equatable {
                 stoppedSince = nil
             } else if let since = stoppedSince {
                 if since.duration(to: now) >= .milliseconds(100) {
-                    ingress.clearPendingMicrophonePacket(token)
                     try restart()
                     stoppedSince = nil
                 }
@@ -273,9 +310,9 @@ enum CaptureMicrophoneStatus: Equatable {
         }
     }
 
-    private func startEngineMicrophone(_ microphone: PinnedMicrophone, ingress: CaptureIngress, token: UUID) throws {
+    private func startEngineMicrophone(_ microphone: PinnedMicrophone, ingress: CaptureIngress, session: InputSession) throws {
         let engine = AVAudioEngine()
-        self.engine = engine
+        session.engine = engine
         let input = engine.inputNode
         var deviceID = microphone.deviceID
         guard let unit = input.audioUnit,
@@ -285,35 +322,36 @@ enum CaptureMicrophoneStatus: Equatable {
         }
         let hardware = input.inputFormat(forBus: 0)
         guard hardware.sampleRate > 0, hardware.channelCount > 0,
-              let configuration = currentInput(), configuration.deviceID == microphone.deviceID,
+              let configuration = currentInput(engine), configuration.deviceID == microphone.deviceID,
               supportsMicrophone(configuration) else {
             throw ScribeError.message("Выбранный микрофон недоступен или имеет неподдерживаемый формат.")
         }
-        try installMicrophoneTap(input, sampleRate: configuration.sampleRate, ingress: ingress, token: token)
-        expectedInput = configuration
+        try installMicrophoneTap(input, sampleRate: configuration.sampleRate, ingress: ingress, session: session)
         engine.prepare()
         try engine.start()
     }
 
-    private func installMicrophoneTap(_ input: AVAudioInputNode, sampleRate: Double, ingress: CaptureIngress, token: UUID) throws {
+    private func installMicrophoneTap(_ input: AVAudioInputNode, sampleRate: Double, ingress: CaptureIngress, session: InputSession) throws {
+        let token = session.token
+        guard let tap = ingress.replaceMicrophoneTap(token) else { throw CancellationError() }
         // Passing a preflight format to the tap can throw an Objective-C
         // exception if Bluetooth changes rate during device activation.
         if #available(macOS 27.0, *) {
-            let frames = AVAudioFrameCount((sampleRate / 5).rounded(.up))
+            let frames = AVAudioFrameCount(min(8192, max(512, (sampleRate / 5).rounded(.up))))
             try input.installAudioTap(onBus: 0, bufferSize: frames, format: nil) { buffer, time in
                 guard time.isHostTimeValid else { return }
                 buffer.withUnsafeAudioBufferList { list in
-                    ingress.submitMicrophone(list, format: buffer.format, frameCount: buffer.frameLength, hostTime: time.hostTime, token: token)
+                    ingress.submitMicrophone(list, format: buffer.format, frameCount: buffer.frameLength, hostTime: time.hostTime, token: token, tap: tap)
                 }
             }
         } else {
             input.installTap(onBus: 0, bufferSize: 1024, format: nil) { buffer, time in
                 guard time.isHostTimeValid else { return }
                 ingress.submitMicrophone(buffer.audioBufferList, format: buffer.format,
-                                         frameCount: Int(buffer.frameLength), hostTime: time.hostTime, token: token)
+                                         frameCount: Int(buffer.frameLength), hostTime: time.hostTime, token: token, tap: tap)
             }
         }
-        tapInstalled = true
+        session.tapInstalled = true
     }
 
     private func observeInput(_ microphone: PinnedMicrophone, token: UUID) {
@@ -345,8 +383,8 @@ enum CaptureMicrophoneStatus: Equatable {
                                          formatFlags: stream.mFormatFlags)
     }
 
-    private func currentInput() -> CaptureInputConfiguration? {
-        guard let engine, let unit = engine.inputNode.audioUnit else { return nil }
+    private func currentInput(_ engine: AVAudioEngine) -> CaptureInputConfiguration? {
+        guard let unit = engine.inputNode.audioUnit else { return nil }
         var current = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         guard AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
@@ -365,11 +403,11 @@ enum CaptureMicrophoneStatus: Equatable {
     }
 
     private func checkConfiguration(_ token: UUID) {
-        guard microphoneToken == token, let microphone else { return }
+        guard let session = activeInput, session.token == token, let microphone else { return }
         let negotiated: PinnedMicrophone
         do {
             negotiated = try devices.refreshFormat(of: microphone)
-            try bluetoothMicrophone?.updateFormat()
+            try session.bluetooth?.updateFormat()
         } catch {
             microphoneLost(token, warning: error.localizedDescription)
             return
@@ -378,8 +416,8 @@ enum CaptureMicrophoneStatus: Equatable {
         self.microphone = negotiated
         updateMute(negotiated, token: token)
         if !microphoneWasMuted { scheduleRouting() }
-        guard let expectedInput, let engine, let ingress else { return }
-        guard let current = currentInput(), supportsMicrophone(current) else {
+        guard let engine = session.engine, let ingress else { return }
+        guard let current = currentInput(engine), supportsMicrophone(current) else {
             microphoneLost(token, warning: "Выбранный микрофон стал недоступен.")
             return
         }
@@ -387,12 +425,10 @@ enum CaptureMicrophoneStatus: Equatable {
             microphoneLost(token, warning: "Вход или формат выбранного микрофона изменился.")
             return
         }
-        self.expectedInput = current
         guard !engine.isRunning else { return }
 
         do {
-            let updated = try restartEngineMicrophone(engine, microphone: negotiated, previous: expectedInput,
-                                                      current: current, ingress: ingress, token: token)
+            let updated = try restartEngineMicrophone(engine, microphone: negotiated, ingress: ingress, session: session)
             if updated != negotiated { observeInput(updated, token: token) }
             self.microphone = updated
             onWarning?("Аудиодвижок перезапущен с прежним микрофоном; возможен короткий пропуск звука.")
@@ -401,8 +437,8 @@ enum CaptureMicrophoneStatus: Equatable {
         }
     }
 
-    private func validateEngineInput(for microphone: PinnedMicrophone) throws -> CaptureInputConfiguration {
-        guard let current = currentInput(), current.deviceID == microphone.deviceID,
+    private func validateEngineInput(for microphone: PinnedMicrophone, engine: AVAudioEngine) throws -> CaptureInputConfiguration {
+        guard let current = currentInput(engine), current.deviceID == microphone.deviceID,
               supportsMicrophone(current) else {
             throw ScribeError.message("Вход или формат выбранного микрофона изменился.")
         }
@@ -410,26 +446,26 @@ enum CaptureMicrophoneStatus: Equatable {
     }
 
     private func restartEngineMicrophone(_ engine: AVAudioEngine, microphone: PinnedMicrophone,
-                                         previous: CaptureInputConfiguration, current: CaptureInputConfiguration,
-                                         ingress: CaptureIngress, token: UUID) throws -> PinnedMicrophone {
+                                         ingress: CaptureIngress, session: InputSession) throws -> PinnedMicrophone {
         let now = Date()
-        restartTimes.removeAll { now.timeIntervalSince($0) > 5 }
-        guard restartTimes.count < 3 else {
+        session.restartTimes.removeAll { now.timeIntervalSince($0) > 5 }
+        guard session.restartTimes.count < 3 else {
             throw ScribeError.message("Аудиодвижок микрофона нестабилен.")
         }
-        restartTimes.append(now)
+        session.restartTimes.append(now)
+        let current = try validateEngineInput(for: microphone, engine: engine)
         do {
-            if current != previous {
-                engine.inputNode.removeTap(onBus: 0)
-                tapInstalled = false
-                try installMicrophoneTap(engine.inputNode, sampleRate: current.sampleRate, ingress: ingress, token: token)
-            }
+            // Reinstall even with the same format. A callback already in
+            // flight belongs to the old tap and cannot confirm this restart.
+            if session.tapInstalled { engine.inputNode.removeTap(onBus: 0) }
+            session.tapInstalled = false
+            try installMicrophoneTap(engine.inputNode, sampleRate: current.sampleRate, ingress: ingress, session: session)
             try engine.start()
         } catch {
             throw ScribeError.message("Не удалось возобновить аудиодвижок микрофона.")
         }
         let updated = try devices.refreshFormat(of: microphone)
-        expectedInput = try validateEngineInput(for: updated)
+        _ = try validateEngineInput(for: updated, engine: engine)
         engineRestartCount += 1
         return updated
     }
@@ -547,7 +583,7 @@ enum CaptureMicrophoneStatus: Equatable {
             // microphone the user is using is muted.
             if microphoneWasMuted { return }
         }
-        var candidates = request.candidates(in: devices, keeping: current?.uid).filter {
+        let candidates = request.candidates(in: devices, keeping: current?.uid).filter {
             failedInputs[$0.uid]?.deviceID != $0.deviceID
         }
         guard let first = candidates.first else {
@@ -555,16 +591,11 @@ enum CaptureMicrophoneStatus: Equatable {
             return
         }
         guard first.uid != current?.uid else { return }
-        if let current {
-            // If a priority upgrade fails, try the known working route next.
-            if let index = candidates.firstIndex(where: { $0.uid == current.uid }) {
-                candidates.insert(candidates.remove(at: index), at: 1)
-            }
-            stopMicrophone()
-            microphoneStatus = .waiting
-            beginMicrophoneRecovery(timeout: .seconds(9))
-        }
         for candidate in candidates {
+            // The current input continues to supply PCM until a higher-priority
+            // input has opened, supplied a packet and been atomically admitted.
+            if candidate.uid == microphone?.uid { return }
+            if awaitingFallbackConsent || microphoneWasMuted { return }
             let attemptDeadline = ContinuousClock.now + .seconds(4)
             let deadline = min(attemptDeadline, recoveryDeadline ?? attemptDeadline)
             guard !Task.isCancelled, ContinuousClock.now < deadline else { return }
@@ -578,8 +609,7 @@ enum CaptureMicrophoneStatus: Equatable {
                 onWarning?("Запись продолжилась с микрофоном «\(candidate.name)». Возможен короткий пропуск голоса.")
                 return
             } catch {
-                stopMicrophone()
-                if Task.isCancelled { return }
+                if Task.isCancelled || error is CancellationError { return }
                 if devices.snapshot.devices.contains(where: { $0.uid == candidate.uid && $0.deviceID == candidate.deviceID }) {
                     failedInputs[candidate.uid] = FailedInput(deviceID: candidate.deviceID)
                 }
@@ -612,7 +642,6 @@ enum CaptureMicrophoneStatus: Equatable {
 
     private func stopMicrophone() {
         if let microphoneToken { ingress?.suspendMicrophone(microphoneToken) }
-        microphoneToken = nil
         microphoneMonitor?.cancel()
         microphoneMonitor = nil
         configurationTask?.cancel()
@@ -621,15 +650,9 @@ enum CaptureMicrophoneStatus: Equatable {
         inputObserver = nil
         if let changeObserver { NotificationCenter.default.removeObserver(changeObserver) }
         changeObserver = nil
-        bluetoothMicrophone?.stop()
-        bluetoothMicrophone = nil
-        if tapInstalled { engine?.inputNode.removeTap(onBus: 0) }
-        tapInstalled = false
-        engine?.stop()
-        engine = nil
+        activeInput?.stop()
+        activeInput = nil
         microphone = nil
-        expectedInput = nil
-        restartTimes.removeAll()
         microphoneWasMuted = false
     }
 
@@ -656,7 +679,7 @@ enum CaptureMicrophoneStatus: Equatable {
     }
 
     func simulateConfigurationChangeForDiagnostics(stopEngine: Bool) {
-        guard CommandLine.arguments.contains("--self-check-microphone"), let engine else { return }
+        guard CommandLine.arguments.contains("--self-check-microphone"), let engine = activeInput?.engine else { return }
         if stopEngine { engine.stop() }
         NotificationCenter.default.post(name: .AVAudioEngineConfigurationChange, object: engine)
     }
@@ -672,9 +695,13 @@ final class CaptureIngress: @unchecked Sendable {
     private var admitted: Set<CaptureAudioSource> = []
     private var retired: Set<CaptureAudioSource> = []
     private var admissionClosed = false
-    private var microphoneToken: UUID?
-    private var microphoneReady = false
-    private var microphoneCallbackHostTime: UInt64?
+    private struct MicrophoneStream {
+        let token = UUID()
+        var tap: UUID?
+        var lastCallback: UInt64?
+    }
+    private var pendingMicrophone: MicrophoneStream?
+    private var activeMicrophone: MicrophoneStream?
     private var pressureReported = false
     private var pool: [AVAudioPCMBuffer] = []
     private var writer: TimedCaptureWriter?
@@ -697,31 +724,49 @@ final class CaptureIngress: @unchecked Sendable {
         self.pressure = pressure
     }
 
-    func beginMicrophoneAttempt() -> UUID? {
+    func beginMicrophoneAttempt(whileActive: Bool = false) -> UUID? {
         gate.withLock {
-            guard !admissionClosed, !retired.contains(.microphone), microphoneToken == nil,
+            guard !admissionClosed, !retired.contains(.microphone), pendingMicrophone == nil,
+                  whileActive || activeMicrophone == nil,
                   configuredSources?.contains(.microphone) != false else { return nil }
-            let token = UUID()
-            microphoneToken = token
-            return token
+            let stream = MicrophoneStream()
+            pendingMicrophone = stream
+            return stream.token
         }
     }
 
     func lastMicrophoneCallbackHostTime(for token: UUID) -> UInt64? {
-        gate.withLock { microphoneToken == token ? microphoneCallbackHostTime : nil }
+        gate.withLock {
+            if activeMicrophone?.token == token { return activeMicrophone?.lastCallback }
+            if pendingMicrophone?.token == token { return pendingMicrophone?.lastCallback }
+            return nil
+        }
     }
 
-    func clearPendingMicrophonePacket(_ token: UUID) {
+    func replaceMicrophoneTap(_ token: UUID) -> UUID? {
         gate.withLock {
-            if microphoneToken == token, !microphoneReady { microphoneCallbackHostTime = nil }
+            let tap = UUID()
+            if pendingMicrophone?.token == token {
+                pendingMicrophone?.tap = tap
+                pendingMicrophone?.lastCallback = nil
+            } else if activeMicrophone?.token == token {
+                activeMicrophone?.tap = tap
+                endMicrophoneSegment()
+            } else {
+                return nil
+            }
+            return tap
         }
     }
 
     func activateMicrophone(_ token: UUID) -> Bool {
         gate.withLock {
-            guard !admissionClosed, microphoneToken == token, microphoneCallbackHostTime != nil,
+            guard !admissionClosed, let pendingMicrophone, pendingMicrophone.token == token,
+                  pendingMicrophone.lastCallback != nil,
                   configuredSources?.contains(.microphone) != false else { return false }
-            microphoneReady = true
+            if activeMicrophone != nil { endMicrophoneSegment() }
+            activeMicrophone = pendingMicrophone
+            self.pendingMicrophone = nil
             if configuredSources != nil { admitted.insert(.microphone) }
             return true
         }
@@ -729,22 +774,32 @@ final class CaptureIngress: @unchecked Sendable {
 
     func suspendMicrophone(_ token: UUID) {
         gate.withLock {
-            guard microphoneToken == token else { return }
-            invalidateMicrophone()
-            let wasAdmitted = admitted.remove(.microphone) != nil
-            queue.async {
-                do {
-                    if wasAdmitted { try self.writer?.breakSourceSegment(.microphone) }
-                    if self.microphoneMuted {
-                        self.microphoneMuted = false
-                        self.updateMeter(at: .now(), force: true)
-                    }
-                } catch { self.failWriter() }
+            if pendingMicrophone?.token == token {
+                pendingMicrophone = nil
+                if activeMicrophone == nil { endMicrophoneSegment() }
+            }
+            if activeMicrophone?.token == token {
+                activeMicrophone = nil
+                admitted.remove(.microphone)
+                endMicrophoneSegment()
             }
         }
     }
 
-    func start(folder: URL, sources: Set<CaptureAudioSource>) async throws {
+    // Caller holds the gate so this barrier runs between old and new PCM.
+    private func endMicrophoneSegment() {
+        queue.async {
+            do {
+                try self.writer?.breakSourceSegment(.microphone)
+                if self.microphoneMuted {
+                    self.microphoneMuted = false
+                    self.updateMeter(at: .now(), force: true)
+                }
+            } catch { self.failWriter() }
+        }
+    }
+
+    func start(folder: URL, sources: Set<CaptureAudioSource>, originAtFirstPacket: Bool = false) async throws {
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async {
                 do {
@@ -755,7 +810,9 @@ final class CaptureIngress: @unchecked Sendable {
                     let buffers = (0..<48).map { _ in
                         AVAudioPCMBuffer(pcmFormat: format, frameCapacity: MicrophoneCaptureWriter.bufferCapacity)!
                     }
-                    self.writer = try TimedCaptureWriter(folder: folder, originHostTime: AudioGetCurrentHostTime(), sources: sources)
+                    self.writer = try TimedCaptureWriter(folder: folder,
+                                                        originHostTime: originAtFirstPacket ? nil : AudioGetCurrentHostTime(),
+                                                        sources: sources)
                     self.writerSources = sources
                     self.lastLoudSignal = .now()
                     self.gate.withLock {
@@ -763,7 +820,7 @@ final class CaptureIngress: @unchecked Sendable {
                         self.pool = buffers
                         if !self.admissionClosed {
                             self.admitted = sources.subtracting(self.retired)
-                            if !self.microphoneReady { self.admitted.remove(.microphone) }
+                            if self.activeMicrophone == nil { self.admitted.remove(.microphone) }
                         }
                     }
                     continuation.resume()
@@ -772,7 +829,8 @@ final class CaptureIngress: @unchecked Sendable {
         }
     }
 
-    func submitMicrophone(_ list: UnsafePointer<AudioBufferList>, format: AVAudioFormat, frameCount: Int, hostTime: UInt64, token: UUID) {
+    func submitMicrophone(_ list: UnsafePointer<AudioBufferList>, format: AVAudioFormat, frameCount: Int,
+                          hostTime: UInt64, token: UUID, tap: UUID? = nil) {
         let channelCount = Int(format.channelCount)
         let interleaved = format.isInterleaved
         let stream = format.streamDescription.pointee
@@ -789,7 +847,7 @@ final class CaptureIngress: @unchecked Sendable {
             $0.mNumberChannels == channelsPerBuffer && $0.mData != nil && Int($0.mDataByteSize) >= requiredBytes
         }) else { return }
 
-        submit(.microphone, count: frameCount, sampleRate: format.sampleRate, hostTime: hostTime, microphoneToken: token) { out, offset, frames in
+        submit(.microphone, count: frameCount, sampleRate: format.sampleRate, hostTime: hostTime, microphoneToken: token, tap: tap) { out, offset, frames in
             if channelCount == 1 {
                 let samples = buffers[0].mData!.assumingMemoryBound(to: Float.self)
                 out.update(from: samples + offset, count: frames)
@@ -833,19 +891,27 @@ final class CaptureIngress: @unchecked Sendable {
     }
 
     private func submit(_ source: CaptureAudioSource, count: Int, sampleRate: Double, hostTime: UInt64,
-                        microphoneToken: UUID?,
+                        microphoneToken: UUID?, tap: UUID? = nil,
                         copy: (UnsafeMutablePointer<Float>, Int, Int) -> Void) {
         guard count > 0, hostTime != 0, Self.inputRates.contains(sampleRate) else { return }
         let capacity = Int(MicrophoneCaptureWriter.bufferCapacity)
-        if count > capacity {
-            let duration = AVAudioTime.hostTime(forSeconds: Double(count) / sampleRate)
-            guard duration <= UInt64.max - hostTime else { return }
-        }
+        let received = AudioGetCurrentHostTime()
+        let duration = AVAudioTime.hostTime(forSeconds: Double(count) / sampleRate)
+        // A driver timestamp far ahead of the host clock must not make the
+        // writer materialize the difference as silence.
+        guard hostTime <= received || hostTime - received <= AVAudioTime.hostTime(forSeconds: 2),
+              duration <= UInt64.max - hostTime else { return }
         gate.lock()
         guard !admissionClosed else { gate.unlock(); return }
         if source == .microphone {
-            guard let microphoneToken, self.microphoneToken == microphoneToken else { gate.unlock(); return }
-            microphoneCallbackHostTime = AudioGetCurrentHostTime()
+            guard let microphoneToken else { gate.unlock(); return }
+            if pendingMicrophone?.token == microphoneToken, pendingMicrophone?.tap == tap {
+                pendingMicrophone?.lastCallback = received
+                gate.unlock()
+                return
+            }
+            guard activeMicrophone?.token == microphoneToken, activeMicrophone?.tap == tap else { gate.unlock(); return }
+            activeMicrophone?.lastCallback = received
         }
         guard admitted.contains(source) else { gate.unlock(); return }
         for offset in stride(from: 0, to: count, by: capacity) {
@@ -911,7 +977,8 @@ final class CaptureIngress: @unchecked Sendable {
 
     func setMicrophoneMuted(_ muted: Bool, token: UUID) {
         gate.withLock {
-            guard microphoneToken == token else { return }
+            guard activeMicrophone?.token == token ||
+                    (activeMicrophone == nil && pendingMicrophone?.token == token) else { return }
             queue.async {
                 guard self.microphoneMuted != muted else { return }
                 self.microphoneMuted = muted
@@ -948,9 +1015,8 @@ final class CaptureIngress: @unchecked Sendable {
 
     // These helpers are called with gate held.
     private func invalidateMicrophone() {
-        microphoneToken = nil
-        microphoneReady = false
-        microphoneCallbackHostTime = nil
+        activeMicrophone = nil
+        pendingMicrophone = nil
     }
 
     @discardableResult private func closeAdmissionLocked() -> Bool {

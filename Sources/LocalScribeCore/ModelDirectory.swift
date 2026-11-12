@@ -167,9 +167,13 @@ final class ModelDirectory {
             guard try claimed.matches(file) else { throw ScribeError.message("Не совпала SHA-256 файла \(file.localPath). Повторите загрузку.") }
         }
         try Task.checkCancellation()
-        if let final = try child(finalName) { try final.validateTree() }
-        try remove(finalName)
-        guard renameatx_np(staging.descriptor, "contents", descriptor, finalName, UInt32(RENAME_EXCL)) == 0 else { throw Self.unsafePath }
+        let final = try child(finalName)
+        try final?.validateTree()
+        let flags = final == nil ? RENAME_EXCL : RENAME_SWAP
+        guard renameatx_np(staging.descriptor, "contents", descriptor, finalName, UInt32(flags)) == 0 else { throw Self.unsafePath }
         published = true
+        // After a swap the previous installation is privately staged. Failure
+        // to remove it cannot invalidate the newly published installation.
+        if final != nil { try? staging.remove("contents") }
     }
 }

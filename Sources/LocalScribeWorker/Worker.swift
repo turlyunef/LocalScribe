@@ -41,11 +41,12 @@ import LocalScribeSpeakerKit
     }
 
     private static func run() async -> Int32 {
-        let protocolOutput = FileHandle(fileDescriptor: dup(STDOUT_FILENO), closeOnDealloc: true)
+        let protocolDescriptor = fcntl(STDOUT_FILENO, F_DUPFD_CLOEXEC, STDERR_FILENO + 1)
+        guard protocolDescriptor >= 0 else { return 73 }
+        let protocolOutput = FileHandle(fileDescriptor: protocolDescriptor, closeOnDealloc: true)
         defer { try? protocolOutput.close() }
-        _ = fcntl(protocolOutput.fileDescriptor,F_SETFD,FD_CLOEXEC)
         signal(SIGPIPE,SIG_IGN)
-        dup2(STDERR_FILENO, STDOUT_FILENO)
+        guard dup2(STDERR_FILENO, STDOUT_FILENO) >= 0 else { return 73 }
         guard setpgid(0,0) == 0 || getpgrp() == getpid() else { return 73 }
         guard localscribe_deny_network() == 0 else { fputs("Cannot deny worker network access.\n", stderr); return 70 }
         let control = WorkerControl(parent: getppid())

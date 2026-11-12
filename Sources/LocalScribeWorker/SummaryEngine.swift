@@ -51,7 +51,7 @@ actor SummaryEngine {
             container = try await LLMModelFactory.shared.loadContainer(configuration: .init(directory: modelFolder))
         }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let sourceHash = Disk.fingerprint(String(decoding: try encoder.encode(transcript), as: UTF8.self) + language + "prompt-v16-question-pages1")
+        let sourceHash = Disk.fingerprint(String(decoding: try encoder.encode(transcript), as: UTF8.self) + language + "prompt-v17-amendment-fallback")
         let sourceStarted = ProcessInfo.processInfo.systemUptime
         let source = await SummarySourceIndex(transcript) { line in
             await container.perform { $0.tokenizer.encode(text: line).count }
@@ -233,10 +233,23 @@ actor SummaryEngine {
                     // Review has already read every original/later source page. Apply only
                     // its validated quotation; do not concatenate the unbounded sources again.
                     let amendmentJSON = String(decoding: try JSONEncoder().encode(amendment), as: UTF8.self)
-                    let corrected = try await applyAmendment("Verified candidate:\n\(candidateText)\nValidated explicit amendment (source ID and verbatim quote):\n\(amendmentJSON)")
-                    let items = kind == "task" ? corrected.tasks : corrected.decisions
+                    let items: [Finding]
+                    do {
+                        let corrected = try await applyAmendment("Verified candidate:\n\(candidateText)\nValidated explicit amendment (source ID and verbatim quote):\n\(amendmentJSON)")
+                        items = kind == "task" ? corrected.tasks : corrected.decisions
+                    } catch is ScribeError {
+                        items = []
+                    }
                     guard items.count == 1, let sourceID = amendment.sourceSegmentId, items[0].evidenceSegmentIds.contains(sourceID),
-                          Set(accepted[0].evidenceSegmentIds).isSubset(of: Set(items[0].evidenceSegmentIds)) else { throw ScribeError.message("Не удалось подтвердить обновлённую договорённость; прежние результаты сохранены") }
+                          Set(accepted[0].evidenceSegmentIds).isSubset(of: Set(items[0].evidenceSegmentIds)) else {
+                        accepted[0].uncertain = true
+                        if let sourceID = amendment.sourceSegmentId,
+                           source.indexByID[sourceID] != nil, !accepted[0].evidenceSegmentIds.contains(sourceID) {
+                            accepted[0].evidenceSegmentIds.append(sourceID)
+                        }
+                        emit("warning", "Не удалось сформулировать подтверждённую поправку. Прежний пункт отмечен как неуверенный.", nil)
+                        continue
+                    }
                     let wasUncertain = accepted[0].uncertain
                     accepted = items
                     accepted[0].uncertain = accepted[0].uncertain || wasUncertain
@@ -383,7 +396,13 @@ actor SummaryEngine {
             let (output, finished) = try await completion(container, input: input, outputLimit: 2000,
                 phase: phase, attempt: attempt, preparedSince: preparedSince)
             try traceOutput(output, key: content + instruction, attempt: attempt)
-            guard finished else { if attempt == 0 { continue }; throw ScribeError.message("Модель достигла лимита ответа. Усечённые итоги не сохранены.") }
+            guard finished else {
+                if attempt == 0 {
+                    correction = "\nThe previous answer exceeded the output limit. Use concise wording and return a complete JSON object with the required evidence IDs."
+                    continue
+                }
+                throw ScribeError.message("Модель достигла лимита ответа. Усечённые итоги не сохранены.")
+            }
             try recordAudit(inputTokens: inputTokenCount, reservedOutputTokens: 2000)
             do {
                 let data = Data(output.trimmingCharacters(in: .whitespacesAndNewlines).utf8)

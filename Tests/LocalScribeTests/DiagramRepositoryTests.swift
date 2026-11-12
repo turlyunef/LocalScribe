@@ -185,7 +185,7 @@ final class DiagramRepositoryTests: XCTestCase {
         try Disk.directory(directory)
         let source = directory.appendingPathComponent("grow.png")
         try Data("0123456789".utf8).write(to: source)
-        let pinned = try PinnedImageSource(source)
+        let pinned = try ImportSource(source, allowsAppendedBytes: true)
         defer { pinned.close() }
         XCTAssertEqual(pinned.size, 10)
         let digest = try pinned.hash()
