@@ -66,9 +66,13 @@ public struct ModelLibrary: Codable, Sendable {
             selectedByRole[ModelRole.tokenizer.rawValue] = installedAt[tokenizerID] != nil ? tokenizerID : nil
         }
     }
-    public func activeCatalog(from catalog: ModelCatalog) -> ModelCatalog? {
+    public func activeCatalog(from catalog: ModelCatalog, summary: ModelProfile? = nil) -> ModelCatalog? {
         var profiles = ModelRole.audioRoles.compactMap { role in
-            catalog.models.first { $0.purpose == role && $0.id == selectedByRole[role.rawValue] && isInstalled($0) }
+            if role == .summary, var summary {
+                summary.role = .summary
+                return summary
+            }
+            return catalog.models.first { $0.purpose == role && $0.id == selectedByRole[role.rawValue] && isInstalled($0) }
         }
         guard profiles.count == ModelRole.audioRoles.count else { return nil }
         if let id = profiles.first(where: { $0.purpose == .asr })?.alignerID {

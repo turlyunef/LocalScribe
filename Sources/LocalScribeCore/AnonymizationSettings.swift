@@ -1,67 +1,80 @@
 import Foundation
 
-/// Mode of the model assignments for summaries, diagram recognition and
-/// anonymization. Speech recognition and diarization always keep their own
-/// separate selections.
-public enum ModelAssignmentMode: String, Codable, CaseIterable, Sendable, Hashable {
-    case separate = "SEPARATE"
-    case shared = "SHARED"
-}
-
-/// The saved settings record of the anonymization feature (schema version 1):
-/// the assignment mode, the shared profile, the per-task separate slots and
-/// the ordered data-type wordings. One atomic write stores the whole record;
-/// speech and diarization selections stay in `ModelLibrary`.
-///
-/// The record is additive: it lives in its own file, and the previous
-/// application version keeps reading its own settings unchanged. A rollback
-/// never rewrites old keys, and the record survives it to be read again on
-/// return.
+/// Independent assignments for summaries, diagrams and anonymization, plus
+/// the ordered data types. Speech recognition and diarization selections
+/// stay in `ModelLibrary`.
 public struct AnonymizationSettings: Codable, Equatable, Sendable {
     /// Initial data types of a fresh record (AC-27).
     public static let initialDataTypes = ["Имена и фамилии", "Телефоны", "Адреса электронной почты", "Почтовые адреса"]
 
     public var schemaVersion = 1
-    public var modelAssignmentMode: ModelAssignmentMode = .separate
-    /// Required when the mode is `SHARED`.
-    public var sharedProfileID: String?
     /// `ModelTask` raw value -> profile ID. A missing key is an empty slot.
-    public var separateProfiles: [String: String] = [:]
+    public private(set) var profilesByTask: [String: String] = [:]
     /// At least one non-whitespace wording; content is kept verbatim.
     public var dataTypes: [String] = AnonymizationSettings.initialDataTypes
 
     public init() {}
 
-    /// Mode-aware assignment of a task: the shared profile in `SHARED`, the
-    /// task's own slot in `SEPARATE`.
+    fileprivate struct Record: Codable {
+        enum Mode: String, Codable {
+            case separate = "SEPARATE"
+            case shared = "SHARED"
+        }
+
+        var schemaVersion: Int
+        var modelAssignmentMode: Mode
+        var sharedProfileID: String?
+        var separateProfiles: [String: String]
+        var dataTypes: [String]
+        var independentAssignments: Bool?
+
+        init(settings: AnonymizationSettings) {
+            // Keep the version 1 layout readable by older builds.
+            schemaVersion = settings.schemaVersion
+            modelAssignmentMode = .separate
+            separateProfiles = settings.profilesByTask
+            dataTypes = settings.dataTypes
+            independentAssignments = true
+        }
+    }
+
+    public init(from decoder: any Decoder) throws {
+        try self.init(record: Record(from: decoder))
+    }
+
+    fileprivate init(record: Record) throws {
+        schemaVersion = record.schemaVersion
+        dataTypes = record.dataTypes
+        try Self.validateProfiles(record.separateProfiles)
+        if let shared = record.sharedProfileID, !ModelProfile.safeComponent(shared) {
+            throw ScribeError.message("Некорректное назначение модели в настройках обезличивания")
+        }
+        switch record.modelAssignmentMode {
+        case .separate:
+            profilesByTask = record.separateProfiles
+        case .shared:
+            guard let shared = record.sharedProfileID else {
+                throw ScribeError.message("В общем режиме нужен выбранный профиль")
+            }
+            for task in ModelTask.allCases { setProfile(shared, for: task) }
+        }
+    }
+
+    public func encode(to encoder: any Encoder) throws {
+        try Record(settings: self).encode(to: encoder)
+    }
+
     public func profileID(for task: ModelTask) -> String? {
-        switch modelAssignmentMode {
-        case .shared: return sharedProfileID
-        case .separate: return separateProfiles[task.rawValue]
-        }
+        profilesByTask[task.rawValue]
     }
 
-    /// Set or clear one separate slot. Slots never store empty strings: a nil
-    /// id removes the key.
-    public mutating func setSeparateProfile(_ profileID: String?, for task: ModelTask) {
+    /// Set or clear a task's slot. Empty IDs clear the slot.
+    public mutating func setProfile(_ profileID: String?, for task: ModelTask) {
         if let profileID, !profileID.isEmpty {
-            separateProfiles[task.rawValue] = profileID
+            profilesByTask[task.rawValue] = profileID
         } else {
-            separateProfiles[task.rawValue] = nil
+            profilesByTask[task.rawValue] = nil
         }
-    }
-
-    /// The record with the two library-coupled slots mirroring the live native
-    /// selections: in `SEPARATE` the summary and diagram assignments are the
-    /// library's own selections, so the record keeps the last saved assignment
-    /// of every task while the user manages the native pickers. A nil id
-    /// clears the slot. Used when saving the draft and when computing removal
-    /// plans; the anonymization slot is never touched here.
-    public func syncingNativeAssignments(summaryID: String?, diagramID: String?) -> AnonymizationSettings {
-        var synced = self
-        synced.setSeparateProfile(summaryID, for: .summary)
-        synced.setSeparateProfile(diagramID, for: .diagramRecognition)
-        return synced
     }
 
     /// Drop whitespace-only lines, keeping every other line verbatim —
@@ -81,37 +94,24 @@ public struct AnonymizationSettings: Codable, Equatable, Sendable {
 
     public func validate() throws {
         guard schemaVersion == 1 else { throw ScribeError.message("Некорректная версия настроек обезличивания") }
-        if let shared = sharedProfileID {
-            guard ModelProfile.safeComponent(shared) else {
-                throw ScribeError.message("Некорректное назначение модели в настройках обезличивания")
-            }
-        }
-        if modelAssignmentMode == .shared, sharedProfileID == nil {
-            throw ScribeError.message("В общем режиме нужен выбранный профиль")
-        }
-        let taskKeys = Set(ModelTask.allCases.map(\.rawValue))
-        for (key, value) in separateProfiles {
-            guard taskKeys.contains(key), ModelProfile.safeComponent(value) else {
-                throw ScribeError.message("Некорректное назначение модели в настройках обезличивания")
-            }
-        }
+        try Self.validateProfiles(profilesByTask)
         guard !dataTypes.isEmpty,
               dataTypes.allSatisfy({ !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) else {
             throw ScribeError.message("Список типов данных не может быть пустым")
         }
     }
+
+    private static func validateProfiles(_ profiles: [String: String]) throws {
+        guard profiles.allSatisfy({ ModelTask(rawValue: $0.key) != nil && ModelProfile.safeComponent($0.value) }) else {
+            throw ScribeError.message("Некорректное назначение модели в настройках обезличивания")
+        }
+    }
 }
 
-/// File storage of the settings record: one atomic JSON write per save, one
-/// additive file that older versions never read or rewrite.
-///
-/// First open of the new version migrates: the record is created in `SEPARATE`
-/// from the previous summary and diagram selections, with an empty
-/// anonymization slot and shared profile and the initial data types. Later
-/// opens read the saved record; a damaged record is reported and never
-/// replaced. The old `selection.json` and UserDefaults keys stay untouched, so
-/// a rollback keeps the old version's view intact and a return re-reads this
-/// record.
+/// The task settings live in a separate file and are saved atomically.
+/// First open copies the existing summary and diagram selections and sets
+/// the initial data types. Later opens read the saved assignments, and report
+/// a damaged record without replacing it.
 public struct AnonymizationSettingsStore: Sendable {
     public let url: URL
 
@@ -126,13 +126,22 @@ public struct AnonymizationSettingsStore: Sendable {
     /// Nil only when the record is absent. A damaged or undecodable record is
     /// an error and is never replaced with defaults.
     public func load() throws -> AnonymizationSettings? {
+        try loadRecord()?.settings
+    }
+
+    private func loadRecord() throws -> (record: AnonymizationSettings.Record, settings: AnonymizationSettings)? {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        let record: AnonymizationSettings.Record
         let settings: AnonymizationSettings
-        do { settings = try Disk.read(AnonymizationSettings.self, at: url) }
-        catch { throw ScribeError.message("Не удалось прочитать настройки обезличивания: \(error.localizedDescription)") }
+        do {
+            record = try Disk.read(AnonymizationSettings.Record.self, at: url)
+            settings = try AnonymizationSettings(record: record)
+        } catch {
+            throw ScribeError.message("Не удалось прочитать настройки обезличивания: \(error.localizedDescription)")
+        }
         do { try settings.validate() }
         catch { throw ScribeError.message("Повреждённая запись настроек обезличивания") }
-        return settings
+        return (record, settings)
     }
 
     /// One atomic write of the whole validated record.
@@ -141,26 +150,35 @@ public struct AnonymizationSettingsStore: Sendable {
         try Disk.write(settings, to: url)
     }
 
-    /// The migration record from the previous summary and diagram selections:
-    /// `SEPARATE`, empty anonymization slot and shared profile, initial data
-    /// types. A previous selection only carries over while its profile exists
-    /// in the current catalog; otherwise the slot stays empty.
+    /// Copy the legacy summary and diagram selections whose profiles still
+    /// exist in the catalog. The anonymization assignment starts empty.
     public static func migratedSettings(catalog: ModelCatalog, library: ModelLibrary) -> AnonymizationSettings {
         var settings = AnonymizationSettings()
         for task in ModelTask.allCases {
             guard let role = task.legacyRole,
                   let selected = library.selectedByRole[role.rawValue],
                   catalog.models.contains(where: { $0.id == selected }) else { continue }
-            settings.setSeparateProfile(selected, for: task)
+            settings.setProfile(selected, for: task)
         }
         return settings
     }
 
-    /// First open: create and persist the migration record. Later opens read
-    /// the saved record as the single source of truth. Never writes any old
-    /// keys of the previous version.
+    /// Migrate the old settings once. In the old separate mode the library was
+    /// authoritative for summaries and diagrams, and their saved copies can be
+    /// stale. A legacy shared profile has already been copied to each slot.
     public func loadOrMigrate(catalog: ModelCatalog, library: ModelLibrary) throws -> AnonymizationSettings {
-        if let saved = try load() { return saved }
+        if let (record, saved) = try loadRecord() {
+            if record.independentAssignments == true { return saved }
+            var migrated = saved
+            if record.modelAssignmentMode == .separate {
+                let native = Self.migratedSettings(catalog: catalog, library: library)
+                for task in ModelTask.allCases {
+                    if let id = native.profileID(for: task) { migrated.setProfile(id, for: task) }
+                }
+            }
+            try save(migrated)
+            return migrated
+        }
         let migrated = Self.migratedSettings(catalog: catalog, library: library)
         try save(migrated)
         return migrated

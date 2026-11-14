@@ -165,7 +165,14 @@ public struct RecordingRepository: Sendable {
                     && (1...Manifest.maximumDurationMs).contains(manifest.durationMs) else {
                 throw ScribeError.message("Исходник не совпадает с незавершённым заданием")
             }
-            try catalog.pinned(to: info).validate(at: models)
+            let pinned = try catalog.pinned(to: info)
+            for profile in pinned.models {
+                if profile.purpose == .summary {
+                    _ = try catalog.verifiedModelFolder(for: profile, at: models)
+                } else {
+                    try profile.validate(at: models)
+                }
+            }
             return info
         } catch {
             throw ScribeError.message("Не удалось продолжить: \(error.localizedDescription). Задание и контрольные точки сохранены. Для создания нового задания с выбранными моделями нажмите «Обработать заново».")

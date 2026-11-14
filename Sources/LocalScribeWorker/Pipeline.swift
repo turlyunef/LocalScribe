@@ -54,15 +54,14 @@ actor Pipeline {
         let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
         let pinned = try catalog.pinned(to: info)
         let role: ModelRole? = stage == .transcribing ? .asr : stage == .diarizing ? .diarization : stage == .summarizing ? .summary : nil
+        let summaryFolder: URL?
         if let role {
             guard let profile = pinned.models.first(where: { $0.purpose == role }) else { throw ScribeError.message("Модель этапа отсутствует") }
             try hardware.requireCompatibility(for: profile)
-            if role == .diarization || role == .summary {
-                // SpeakerKit and the summary LLM read folder paths directly;
-                // verify the pinned sizes and SHA-256 before loading, like the
-                // ASR backends and the diagram engine already do.
-                try profile.validate(at: models)
-            }
+            summaryFolder = role == .summary ? try catalog.verifiedModelFolder(for: profile, at: models) : nil
+            if role == .diarization { try profile.validate(at: models) }
+        } else {
+            summaryFolder = nil
         }
         if command.liveCapture == true {
             guard pinned.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {
@@ -80,11 +79,12 @@ actor Pipeline {
         case .transcribing: return try await transcribe(catalog: catalog, metrics: asrMetrics)
         case .diarizing: return try await diarize()
         case .summarizing:
+            guard let summaryFolder else { throw ScribeError.message("Модель этапа отсутствует") }
             let transcript = try summaryTranscript()
             if transcript.segments.isEmpty {
                 try Disk.write(Summary(language: info.summaryLanguage ?? "ru"), to: run.appendingPathComponent("summary.json")); return "summary.json"
             }
-            try await SummaryEngine(modelFolder: modelFolder(.summary), run: run, emit: emit).summarize(transcript, language: info.summaryLanguage ?? transcript.primaryLanguage)
+            try await SummaryEngine(modelFolder: summaryFolder, run: run, emit: emit).summarize(transcript, language: info.summaryLanguage ?? transcript.primaryLanguage)
             return "summary.json"
         }
     }

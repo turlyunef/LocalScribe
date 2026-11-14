@@ -57,13 +57,12 @@ actor AnonymizationEngine {
             emit: emit)
     }
 
-    /// Qualification-probe path (`Worker.probeAnonymization`): the caller
-    /// resolved the profile with `lookupPinnedProfile`/`verifyResolved`
-    /// itself. Qualification runs before the catalog stamps ANONYMIZATION,
-    /// so the production task gate does not apply to the probe lookup, while
-    /// every integrity check still applies to the profile passed here.
-    init(command: WorkerCommand, input: AnonymizationAttemptInput, resolvedProfile: ModelProfile, emit: @escaping Emit) throws {
-        try self.init(command: command, input: input, profile: resolvedProfile,
+    /// Qualification runs before the catalog stamps ANONYMIZATION. Only the
+    /// production task gate is skipped, while all integrity checks still apply.
+    init(probing command: WorkerCommand, input: AnonymizationAttemptInput, emit: @escaping Emit) throws {
+        let models = URL(fileURLWithPath: command.modelsPath)
+        let folder = try Self.resolvePinnedModelFolder(models: models, toolsPath: command.toolsPath, input: input, task: nil)
+        try self.init(command: command, input: input, modelFolder: folder,
             makeRecognizer: { MLXAnonymizationRecognizer(folder: $0) },
             makeValueSource: { SeededAnonymizationValueSource(seed: Self.substitutionSeed(input: $0)) },
             emit: emit)
@@ -82,12 +81,12 @@ actor AnonymizationEngine {
                  makeValueSource: @escaping (AnonymizationAttemptInput) -> AnonymizationValueSourcing,
                  emit: @escaping Emit) throws {
         let models = URL(fileURLWithPath: command.modelsPath)
-        let profile = try Self.resolvePinnedModel(models: models, toolsPath: command.toolsPath, input: input)
-        try self.init(command: command, input: input, profile: profile,
+        let folder = try Self.resolvePinnedModelFolder(models: models, toolsPath: command.toolsPath, input: input, task: .anonymization)
+        try self.init(command: command, input: input, modelFolder: folder,
                       makeRecognizer: makeRecognizer, makeValueSource: makeValueSource, emit: emit)
     }
 
-    private init(command: WorkerCommand, input: AnonymizationAttemptInput, profile: ModelProfile,
+    private init(command: WorkerCommand, input: AnonymizationAttemptInput, modelFolder: URL,
                  makeRecognizer: @escaping (URL) -> AnonymizationRecognizing,
                  makeValueSource: @escaping (AnonymizationAttemptInput) -> AnonymizationValueSourcing,
                  emit: @escaping Emit) throws {
@@ -95,7 +94,7 @@ actor AnonymizationEngine {
         guard input.matches(command: command) else { throw ScribeError.message("Вход обезличивания не соответствует заданию") }
         self.attemptURL = URL(fileURLWithPath: path)
         self.input = input
-        self.recognizer = makeRecognizer(URL(fileURLWithPath: command.modelsPath).appendingPathComponent(profile.id))
+        self.recognizer = makeRecognizer(modelFolder)
         self.valueSource = makeValueSource(input)
         self.emit = emit
     }
@@ -134,21 +133,8 @@ actor AnonymizationEngine {
     /// Resolves the run's pinned profile like the audio and diagram
     /// pipelines: exact identity, task support, package identity, hardware
     /// compatibility and full size/SHA verification before any SDK load.
-    private static func resolvePinnedModel(models: URL, toolsPath: String?, input: AnonymizationAttemptInput) throws -> ModelProfile {
-        guard let profile = try lookupPinnedProfile(models: models, toolsPath: toolsPath, input: input, task: .anonymization) else {
-            throw ScribeError.message("Закреплённая модель обезличивания недоступна в каталоге")
-        }
-        try verifyResolved(profile: profile, models: models, input: input)
-        return profile
-    }
-
-    /// Catalog lookup of the profile pinned by the input, resolved the way
-    /// the audio and diagram pipelines do. The production path requires the
-    /// qualified anonymization task; the qualification probe passes no task
-    /// because it runs before the catalog is stamped — see
-    /// docs/TextAnonymization/Qualification.md.
-    static func lookupPinnedProfile(models: URL, toolsPath: String?, input: AnonymizationAttemptInput,
-                                    task: ModelTask?) throws -> ModelProfile? {
+    private static func resolvePinnedModelFolder(models: URL, toolsPath: String?, input: AnonymizationAttemptInput,
+                                                 task: ModelTask?) throws -> URL {
         guard let catalogURL = Self.catalogURL(for: models, toolsPath: toolsPath) else {
             throw ScribeError.message("Не найден каталог моделей для обезличивания")
         }
@@ -156,20 +142,15 @@ actor AnonymizationEngine {
         do { catalog = try Disk.read(ModelCatalog.self, at: catalogURL) }
         catch { throw ScribeError.message("Не удалось прочитать каталог моделей") }
         guard catalog.schemaVersion == 1 else { throw ScribeError.message("Несовместимая версия каталога моделей") }
-        guard let profile = catalog.models.first(where: { $0.id == input.profileID }) else { return nil }
-        if let task, !profile.supports(task) { return nil }
-        return profile
-    }
-
-    /// Post-lookup verification shared by the production path and the
-    /// qualification probe: package identity, hardware compatibility and full
-    /// size/SHA verification of the installed files.
-    static func verifyResolved(profile: ModelProfile, models: URL, input: AnonymizationAttemptInput) throws {
+        let matches = catalog.models.filter { $0.id == input.profileID }
+        guard matches.count == 1, let profile = matches.first, task.map({ profile.supports($0) }) != false else {
+            throw ScribeError.message("Закреплённая модель обезличивания недоступна в каталоге")
+        }
         guard profile.effectivePackageID == input.packageID else {
             throw ScribeError.message("Комплект модели обезличивания не совпадает с заданием")
         }
         try ModelHardware.current.requireCompatibility(for: profile)
-        try profile.validate(at: models)
+        return try catalog.verifiedModelFolder(for: profile, at: models)
     }
 
     /// The pinned catalog is resolved the way the audio and diagram pipelines

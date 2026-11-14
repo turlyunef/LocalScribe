@@ -217,27 +217,31 @@ struct ModelSettings: View {
     @ObservedObject var model: AppModel
     @ObservedObject var draft: SettingsDraft
     @State private var asrID = ""
-    @State private var summaryID = ""
-    @State private var diagramID = ""
     @State private var showFiles = false
-    @State private var manuallyChosenRoles: Set<ModelRole> = []
+    @State private var choseASR = false
     private var profiles: [ModelProfile] { model.catalog?.models ?? [] }
-    private var recordingProfiles: [ModelProfile] { profiles.filter { $0.purpose != .diagram } }
-    private var diagramProfiles: [ModelProfile] { profiles.filter { $0.purpose == .diagram } }
+    private var summaryProfiles: [ModelProfile] { profiles.filter { $0.supports(.summary) } }
+    private var diagramProfiles: [ModelProfile] { profiles.filter { $0.supports(.diagramRecognition) } }
+    private var anonymizationProfiles: [ModelProfile] { profiles.filter { $0.supports(.anonymization) } }
+    private var auxiliaryProfiles: [ModelProfile] { profiles.filter { $0.purpose == nil && $0.effectiveSupportedTasks.isEmpty } }
+    private var recordingProfiles: [ModelProfile] {
+        auxiliaryProfiles + profiles.filter { $0.purpose == .asr || $0.purpose == .diarization || $0.purpose == .tokenizer } + summaryProfiles
+    }
+    private var summarySelection: Binding<String> { taskSelection(.summary, draftID: $draft.summaryModelID) }
+    private var diagramSelection: Binding<String> { taskSelection(.diagramRecognition, draftID: $draft.diagramModelID) }
+    private var anonymizationSelection: Binding<String> { taskSelection(.anonymization, draftID: $draft.anonymizationProfileID) }
+    private var selectedSummaryProfile: ModelProfile? {
+        summaryProfiles.first { $0.id == summarySelection.wrappedValue && model.hardware.compatibility(for: $0).isCompatible }
+    }
     private var downloads: [ModelProfile] {
-        draft.anonymizationMode == .shared
-            ? model.audioStackToInstall(asrID: asrID)
-            : model.profilesToInstall(asrID: asrID, summaryID: summaryID)
+        if let summary = selectedSummaryProfile { return model.profilesToInstall(asrID: asrID, summaryID: summary.id) }
+        return model.audioStackToInstall(asrID: asrID)
     }
     private var downloadSelectionCompatible: Bool {
-        if draft.anonymizationMode == .shared {
-            guard let asr = profiles.first(where: { $0.id == asrID && $0.purpose == .asr }) else { return false }
-            return model.hardware.compatibility(for: asr).isCompatible
+        let asrCompatible = profiles.contains {
+            $0.id == asrID && $0.purpose == .asr && model.hardware.compatibility(for: $0).isCompatible
         }
-        let selected = profiles.filter { $0.id == asrID || $0.id == summaryID || $0.purpose == .diarization }
-        return selected.contains { $0.id == asrID && $0.purpose == .asr } &&
-            selected.contains { $0.id == summaryID && $0.purpose == .summary } &&
-            selected.allSatisfy { model.hardware.compatibility(for: $0).isCompatible }
+        return asrCompatible || selectedSummaryProfile != nil
     }
     var body: some View {
         TabView(selection: $model.settingsTab) {
@@ -251,13 +255,6 @@ struct ModelSettings: View {
         .onChange(of: model.modelLibrary.selectedByRole) { _, _ in initializeSelection() }
         .onChange(of: model.modelLibrary.installedAt) { _, installed in
             draft.modelIDs = draft.modelIDs.filter { installed[$0.value] != nil }
-        }
-        .onChange(of: model.installedAnonymizationCandidateID) { _, candidateID in
-            // A compatible profile installed from the recordings tab fills the
-            // still-empty anonymization slot of the draft; applied on «ОК».
-            guard let candidateID, draft.anonymizationMode == .separate,
-                  draft.anonymizationProfileID.isEmpty else { return }
-            draft.anonymizationProfileID = candidateID
         }
     }
 
@@ -273,15 +270,10 @@ struct ModelSettings: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             Section(L10n.text("Загрузить модели записей")) {
-                modelPicker(L10n.text("Распознавание"), role: .asr, selection: $asrID)
-                if draft.anonymizationMode == .shared {
-                    // The shared mode governs summaries; the recordings tab only
-                    // links to the shared profile settings (AC-2).
-                    sharedModelRow(title: L10n.text("Итоги"), identifier: "settings.models.sharedSummary")
-                } else {
-                    modelPicker(L10n.text("Итоги"), role: .summary, selection: $summaryID)
-                }
-                ForEach(profiles.filter { draft.anonymizationMode == .shared ? $0.id == asrID : $0.id == asrID || $0.id == summaryID }) { profile in
+                asrModelPicker
+                taskModelPicker(L10n.text("Итоги"), task: .summary, candidates: summaryProfiles,
+                                selection: summarySelection, identifier: "settings.models.summary")
+                ForEach(profiles.filter { $0.id == asrID || $0.id == summarySelection.wrappedValue }) { profile in
                     if profile.experimental == true {
                         Text(L10n.text("Экспериментальный профиль · качество на встречах ещё не принято"))
                             .font(.caption).foregroundStyle(.secondary)
@@ -302,22 +294,30 @@ struct ModelSettings: View {
                     }
                 }
                 HStack {
-                    Button(L10n.text("Загрузить выбранные")) { model.installModels(downloads, mayFillAnonymizationSlot: true) }.buttonStyle(.borderedProminent).disabled(downloads.isEmpty).help(L10n.text("Скачать выбранные модели и необходимые зависимости"))
+                    Button(L10n.text("Загрузить выбранные")) {
+                        if let summary = selectedSummaryProfile { draft.summaryModelID = summary.id }
+                        model.installModels(downloads)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .disabled(downloads.isEmpty)
+                    .help(L10n.text("Скачать выбранные модели и необходимые зависимости"))
                     Text(!downloadSelectionCompatible ? L10n.text("Нет совместимого комплекта") : downloads.isEmpty ? L10n.text("Уже установлены") : L10n.text("Всего: %1$@", size(downloads.reduce(0) { $0 + $1.bytes }))).font(.caption).foregroundStyle(.secondary)
                 }
-                Text(L10n.text("Нужные токенизатор, выравниватель и модель участников загрузятся автоматически. После успешной установки новая модель станет выбранной; ранее загруженные останутся на диске."))
+                Text(L10n.text("Нужные токенизатор, выравниватель и модель участников загрузятся автоматически. Выбор модели для итогов сохраняется по кнопке «ОК»."))
                     .font(.caption).foregroundStyle(.secondary)
                 importPicker(recordingProfiles, identifier: "settings.models.import")
             }.disabled(!model.canManageModels)
             Section(L10n.text("Загруженные модели")) {
-                ForEach(profiles.filter { $0.purpose == nil && model.modelLibrary.isInstalled($0) }) { profile in
+                ForEach(auxiliaryProfiles.filter(model.modelLibrary.isInstalled)) { profile in
                     installedRow(profile)
                 }
-                if !recordingProfiles.contains(where: model.modelLibrary.isInstalled) {
+                if !recordingProfiles.contains(where: isInstalled) {
                     Text(L10n.text("Пока нет загруженных моделей")).foregroundStyle(.secondary)
                 }
                 ForEach(ModelRole.audioRoles, id: \.self) { role in
-                    let installed = profiles.filter { $0.purpose == role && model.modelLibrary.isInstalled($0) }
+                    let installed = role == .summary
+                        ? installedTaskProfiles(summaryProfiles)
+                        : recordingProfiles.filter { $0.purpose == role && model.modelLibrary.isInstalled($0) }
                     if !installed.isEmpty {
                         Text(role.title).font(.caption).foregroundStyle(.secondary)
                         ForEach(installed) { profile in installedRow(profile) }
@@ -325,7 +325,7 @@ struct ModelSettings: View {
                 }
             }
             Section {
-                if let profile = selectedProfile(for: .asr), !profile.supportsClosedFragments {
+                if let profile = selectedASRProfile, !profile.supportsClosedFragments {
                     Text(L10n.text("Выбранный профиль обрабатывает запись после остановки микрофона. Фоновое распознавание для него пока недоступно."))
                         .font(.caption).foregroundStyle(.secondary)
                 }
@@ -351,9 +351,7 @@ struct ModelSettings: View {
         Form {
             modelActivity
             Section(L10n.text("Модели схем")) {
-                if draft.anonymizationMode == .shared {
-                    sharedModelRow(title: L10n.text("Распознавание схем"), identifier: "settings.diagramModels.shared")
-                } else if let active = selectedProfile(for: .diagram), model.hardware.compatibility(for: active).isCompatible {
+                if let active = model.selectedTaskModel(.diagramRecognition), model.packageIsReady(active) {
                     Text(L10n.text("Выбрана %1$@ · распознавание без интернета", active.displayName))
                         .accessibilityIdentifier("settings.diagramModels.status")
                 } else {
@@ -364,11 +362,13 @@ struct ModelSettings: View {
                     .font(.caption).foregroundStyle(.secondary)
             }
             if diagramProfiles.isEmpty {
-                Section { Text(L10n.text("Профили моделей схем отсутствуют в каталоге")).foregroundStyle(.secondary) }
+                Section { Text(L10n.text("В каталоге нет моделей для распознавания схем.")).foregroundStyle(.secondary) }
             } else {
                 Section(L10n.text("Загрузить модель схем")) {
-                    modelPicker(L10n.text("Распознавание"), role: .diagram, selection: $diagramID)
-                    if let profile = diagramProfiles.first(where: { $0.id == diagramID }) {
+                    taskModelPicker(L10n.text("Распознавание"), task: .diagramRecognition,
+                                    candidates: diagramProfiles, selection: diagramSelection,
+                                    identifier: "settings.models.diagram")
+                    if let profile = diagramProfiles.first(where: { $0.id == diagramSelection.wrappedValue }) {
                         if let ram = profile.recommendedMemoryGB, let working = profile.workingMemoryGB {
                             Text(L10n.text("RAM: от %1$@ ГБ · рабочий объём этапа: %2$@ ГБ", String(ram), String(working)))
                                 .font(.caption).foregroundStyle(.secondary)
@@ -378,19 +378,22 @@ struct ModelSettings: View {
                                 .font(.caption).foregroundStyle(.orange)
                         }
                         HStack {
-                            Button(L10n.text("Загрузить выбранную")) { model.installModels([profile]) }
+                            Button(L10n.text("Загрузить выбранную")) {
+                                draft.diagramModelID = profile.id
+                                model.installModels([profile])
+                            }
                                 .buttonStyle(.borderedProminent)
-                                .disabled(model.modelLibrary.isInstalled(profile) || !model.hardware.compatibility(for: profile).isCompatible)
+                                .disabled(model.packageIsReady(profile) || !model.hardware.compatibility(for: profile).isCompatible)
                                 .accessibilityIdentifier("settings.diagramModels.install.\(profile.id)")
-                            Text(model.modelLibrary.isInstalled(profile) ? L10n.text("Уже установлена") : size(profile.bytes))
+                            Text(model.packageIsReady(profile) ? L10n.text("Уже установлена") : size(profile.bytes))
                                 .font(.caption).foregroundStyle(.secondary)
                         }
                     }
                     importPicker(diagramProfiles, identifier: "settings.diagramModels.import")
-                }.disabled(!model.canManageModels || draft.anonymizationMode == .shared)
+                }.disabled(!model.canManageModels)
             }
             Section(L10n.text("Загруженные модели")) {
-                let installed = diagramProfiles.filter(model.modelLibrary.isInstalled)
+                let installed = installedTaskProfiles(diagramProfiles)
                 if installed.isEmpty { Text(L10n.text("Пока нет загруженных моделей")).foregroundStyle(.secondary) }
                 ForEach(installed) { profile in installedRow(profile) }
             }
@@ -429,9 +432,6 @@ struct ModelSettings: View {
         }.formStyle(.grouped)
     }
 
-    /// The anonymization tab: the data-type list on top and the «Модели» block
-    /// below with the mode switch, the shared-profile picker or the separate
-    /// anonymization slot, and the installation state (AC-1, AC-3, AC-5).
     private var anonymizationSettingsTab: some View {
         Form {
             Section(L10n.text("Типы данных для замены")) {
@@ -451,44 +451,21 @@ struct ModelSettings: View {
             }
             modelActivity
             Section(L10n.text("Модели")) {
-                Picker(L10n.text("Назначение моделей"), selection: $draft.anonymizationMode) {
-                    Text(L10n.text("Общая модель")).tag(ModelAssignmentMode.shared)
-                    Text(L10n.text("Отдельные модели")).tag(ModelAssignmentMode.separate)
-                }
-                .pickerStyle(.segmented)
-                .accessibilityLabel(L10n.text("Назначение моделей"))
-                .accessibilityIdentifier("settings.anonymization.mode")
-                if draft.anonymizationMode == .shared {
-                    HStack {
-                        Text(L10n.text("Профиль"))
-                        taskModelPicker(candidates: profiles,
-                                        compatibility: { ModelTaskSupport.sharedCompatibility(profile: $0, hardware: model.hardware) },
-                                        selection: $draft.sharedProfileID)
-                            .accessibilityLabel(L10n.text("Профиль"))
-                            .accessibilityIdentifier("settings.anonymization.sharedProfile")
-                    }
-                    anonymizationInstallControls(profileID: draft.sharedProfileID, shared: true)
-                    Text(L10n.text("После установки и сохранения общий профиль применяется к новым итогам записей, схемам и обезличиванию. Распознавание речи и определение участников используют отдельные модели в обоих режимах."))
+                taskModelPicker(L10n.text("Обезличивание"), task: .anonymization,
+                                candidates: anonymizationProfiles, selection: anonymizationSelection,
+                                identifier: "settings.anonymization.profile")
+                    .disabled(anonymizationProfiles.isEmpty)
+                if anonymizationProfiles.isEmpty {
+                    Text(L10n.text("В каталоге пока нет моделей, проверенных для обезличивания."))
                         .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("settings.anonymization.noProfiles")
                 } else {
-                    HStack {
-                        Text(L10n.text("Обезличивание"))
-                        taskModelPicker(candidates: profiles,
-                                        compatibility: { ModelTaskSupport.compatibility(task: .anonymization, profile: $0, hardware: model.hardware) },
-                                        selection: $draft.anonymizationProfileID)
-                            .accessibilityLabel(L10n.text("Обезличивание"))
-                            .accessibilityIdentifier("settings.anonymization.profile")
-                    }
-                    anonymizationInstallControls(profileID: draft.anonymizationProfileID, shared: false)
-                    Text(L10n.text("Профили итогов и схем выбираются на их вкладках. Распознавание речи и определение участников используют отдельные модели в обоих режимах."))
-                        .font(.caption).foregroundStyle(.secondary)
+                    anonymizationInstallControls(profileID: anonymizationSelection.wrappedValue)
+                    importPicker(anonymizationProfiles, identifier: "settings.anonymization.import")
                 }
             }.disabled(!model.canManageModels)
             Section(L10n.text("Загруженные модели")) {
-                let relevant = profiles.filter { profile in
-                    model.modelLibrary.isInstalled(profile)
-                        && (profile.supports(.anonymization) || profile.effectiveSupportedTasks == Set(ModelTask.allCases))
-                }
+                let relevant = installedTaskProfiles(anonymizationProfiles)
                 if relevant.isEmpty {
                     Text(L10n.text("Пока нет загруженных моделей")).foregroundStyle(.secondary)
                 } else {
@@ -498,14 +475,9 @@ struct ModelSettings: View {
         }.formStyle(.grouped)
     }
 
-    /// The download button, size and installation state of the selected
-    /// anonymization/shared profile: compatible-but-not-installed keeps the
-    /// assignment while its jobs wait for the model.
-    @ViewBuilder private func anonymizationInstallControls(profileID: String, shared: Bool) -> some View {
-        if let profile = profiles.first(where: { $0.id == profileID }) {
-            let compatibility = shared
-                ? ModelTaskSupport.sharedCompatibility(profile: profile, hardware: model.hardware)
-                : ModelTaskSupport.compatibility(task: .anonymization, profile: profile, hardware: model.hardware)
+    @ViewBuilder private func anonymizationInstallControls(profileID: String) -> some View {
+        if let profile = anonymizationProfiles.first(where: { $0.id == profileID }) {
+            let compatibility = ModelTaskSupport.compatibility(task: .anonymization, profile: profile, hardware: model.hardware)
             if let reasons = compatibility.explanation {
                 Label(L10n.message(reasons), systemImage: "exclamationmark.triangle.fill")
                     .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
@@ -529,43 +501,41 @@ struct ModelSettings: View {
                 }
             }
         } else {
-            Text(L10n.text("Выберите совместимый профиль; до установки задания будут ждать модель"))
+            Text(L10n.text("Выберите совместимую модель. До установки задания будут ждать модель."))
                 .font(.caption).foregroundStyle(.secondary)
                 .accessibilityIdentifier("settings.anonymization.emptySlot")
         }
     }
 
-    /// Task-aware picker: profiles incompatible for the task or this Mac stay
-    /// visible but disabled with the combined reason (AC-3).
-    private func taskModelPicker(candidates: [ModelProfile], compatibility: @escaping (ModelProfile) -> ModelCompatibility,
-                                 selection: Binding<String>) -> some View {
+    private func taskModelPicker(_ title: String, task: ModelTask, candidates: [ModelProfile],
+                                 selection: Binding<String>, identifier: String) -> some View {
         let options = candidates.map { profile in
-            let reasons = compatibility(profile).reasons
+            let reasons = ModelTaskSupport.compatibility(task: task, profile: profile, hardware: model.hardware).reasons
             return ModelMenuOption(profile: profile,
                                    reason: reasons.isEmpty ? nil : reasons.map(L10n.message).joined(separator: "; "),
-                                   recommended: false)
+                                   recommended: profile.purpose == task.legacyRole && model.isRecommended(profile),
+                                   installed: model.packageIsReady(profile))
         }
-        return ModelPopup(options: options, selection: selection)
+        return HStack {
+            Text(title)
+            ModelPopup(options: options, selection: selection, prompt: modelPickerPrompt(options))
+                .accessibilityLabel(title)
+                .accessibilityIdentifier(identifier)
+        }
     }
 
-    /// The shared-mode link row shown next to the summary and diagram model
-    /// settings: the shared model name and a jump into the anonymization tab
-    /// (AC-2).
-    private func sharedModelRow(title: String, identifier: String) -> some View {
-        let name = draft.sharedProfileID.isEmpty
-            ? L10n.text("Профиль не выбран")
-            : profiles.first { $0.id == draft.sharedProfileID }?.displayName ?? draft.sharedProfileID
-        return HStack {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).foregroundStyle(.secondary)
-                Text(L10n.text("Общая модель: %1$@", name))
-            }
-            Spacer()
-            Button(L10n.text("Настроить общую модель")) { model.settingsTab = .anonymization }
-                .accessibilityIdentifier(identifier + ".configureShared")
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityIdentifier(identifier)
+    private func modelPickerPrompt(_ options: [ModelMenuOption]) -> String {
+        options.contains(where: \.enabled) ? L10n.text("Модель не выбрана") : L10n.text("Нет совместимой модели")
+    }
+
+    private func taskSelection(_ task: ModelTask, draftID: Binding<String>) -> Binding<String> {
+        Binding(get: {
+            if !draftID.wrappedValue.isEmpty { return draftID.wrappedValue }
+            if let profile = model.selectedTaskModel(task) { return profile.id }
+            return profiles.first {
+                $0.supports(task) && $0.purpose == task.legacyRole && model.isRecommended($0) && !model.packageIsReady($0)
+            }?.id ?? ""
+        }, set: { draftID.wrappedValue = $0 })
     }
 
     @ViewBuilder private var modelActivity: some View {
@@ -579,65 +549,67 @@ struct ModelSettings: View {
     }
 
     private func initializeSelection() {
-        if !manuallyChosenRoles.contains(.asr) { asrID = model.initialModelID(for: .asr) }
-        if !manuallyChosenRoles.contains(.summary) { summaryID = model.initialModelID(for: .summary) }
-        if !manuallyChosenRoles.contains(.diagram) { diagramID = model.initialModelID(for: .diagram) }
+        if !choseASR { asrID = model.initialModelID(for: .asr) }
     }
     private func menuOption(_ profile: ModelProfile) -> ModelMenuOption {
-        ModelMenuOption(profile: profile, hardware: model.hardware, recommended: model.isRecommended(profile))
+        ModelMenuOption(profile: profile, hardware: model.hardware,
+                        recommended: model.isRecommended(profile), installed: isInstalled(profile))
     }
     private func importPicker(_ candidates: [ModelProfile], identifier: String) -> some View {
-        ModelPopup(options: candidates.map(menuOption), selection: .constant(""), prompt: L10n.text("Импортировать из папки…"), imports: true) { id in
+        let options = candidates.map { profile in
+            let option = menuOption(profile)
+            guard !profile.effectiveSupportedTasks.isEmpty, model.packageIsReady(profile) else { return option }
+            return ModelMenuOption(profile: profile, reason: option.reason ?? L10n.text("Уже установлена"),
+                                   recommended: false, installed: true)
+        }
+        return ModelPopup(options: options, selection: .constant(""), prompt: L10n.text("Импортировать из папки…"), imports: true) { id in
             if let profile = candidates.first(where: { $0.id == id }) { model.importModel(profile) }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .accessibilityIdentifier(identifier)
     }
-    private func modelPicker(_ title: String, role: ModelRole, selection: Binding<String>) -> some View {
-        HStack {
+    private var asrModelPicker: some View {
+        let title = L10n.text("Распознавание")
+        let options = profiles.filter { $0.purpose == .asr }.map(menuOption)
+        return HStack {
             Text(title)
-            ModelPopup(options: profiles.filter { $0.purpose == role }.map(menuOption), selection: Binding(
-                get: { selection.wrappedValue },
-                set: { value in manuallyChosenRoles.insert(role); selection.wrappedValue = value }
-            ))
+            ModelPopup(options: options, selection: Binding(
+                get: { asrID },
+                set: { id in
+                    choseASR = true
+                    asrID = id
+                    let installed = model.modelLibrary.installedAt[id] != nil
+                    let alreadySelected = model.modelLibrary.selectedByRole[ModelRole.asr.rawValue] == id
+                    draft.modelIDs[.asr] = installed && !alreadySelected ? id : nil
+                }
+            ), prompt: modelPickerPrompt(options))
                 .accessibilityLabel(title)
-                .accessibilityIdentifier("settings.models.\(role.rawValue)")
+                .accessibilityIdentifier("settings.models.asr")
         }
     }
     private func size(_ bytes: Int64) -> String { bytes.formatted(.byteCount(style: .file).locale(L10n.locale)) }
     private func memoryGB(_ bytes: UInt64) -> String {
         (Double(bytes) / 1_073_741_824).formatted(.number.precision(.fractionLength(1)).locale(L10n.locale))
     }
-    private func selectedProfile(for role: ModelRole) -> ModelProfile? {
-        let id = draft.modelIDs[role] ?? model.modelLibrary.selectedByRole[role.rawValue]
+    private var selectedASRProfile: ModelProfile? {
+        let id = draft.modelIDs[.asr] ?? model.modelLibrary.selectedByRole[ModelRole.asr.rawValue]
         return profiles.first { $0.id == id && model.modelLibrary.isInstalled($0) }
+    }
+    private func isInstalled(_ profile: ModelProfile) -> Bool {
+        profile.effectiveSupportedTasks.isEmpty
+            ? model.modelLibrary.isInstalled(profile)
+            : model.packageIsReady(profile)
+    }
+    private func installedTaskProfiles(_ candidates: [ModelProfile]) -> [ModelProfile] {
+        var packages: Set<String> = []
+        return candidates.filter { model.packageIsReady($0) && packages.insert($0.effectivePackageID).inserted }
     }
     @ViewBuilder private func installedRow(_ profile: ModelProfile) -> some View {
         HStack(alignment: .top) {
-            if let role = profile.purpose, role == .asr || role == .summary || role == .diagram {
-                Toggle(isOn: Binding(
-                    get: { selectedProfile(for: role)?.id == profile.id },
-                    set: { checked in
-                        if checked { draft.modelIDs[role] = model.modelLibrary.isSelected(profile) ? nil : profile.id }
-                    }
-                )) {
-                    Text(model.isRecommended(profile) ? L10n.text("%1$@ · Максимально рекомендуется", profile.displayName) : profile.displayName)
-                        .fontWeight(model.isRecommended(profile) ? .bold : .regular)
-                }
-                .toggleStyle(.checkbox)
-                .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible
-                    || (draft.anonymizationMode == .shared && (role == .summary || role == .diagram)))
+            Text(model.isRecommended(profile) ? L10n.text("%1$@ · Максимально рекомендуется", profile.displayName) : profile.displayName)
+                .fontWeight(model.isRecommended(profile) ? .bold : .regular)
                 .foregroundStyle(model.hardware.compatibility(for: profile).isCompatible ? Color.primary : Color.secondary)
-                .help(model.hardware.warning(for: profile)
-                      ?? (draft.anonymizationMode == .shared && (role == .summary || role == .diagram)
-                          ? L10n.text("В общем режиме назначением управляет общая модель на вкладке «Обезличивание»")
-                          : L10n.text("Использовать %1$@ для новых заданий", profile.displayName)))
                 .accessibilityIdentifier("settings.\(profile.purpose == .diagram ? "diagramModels" : "models").installed.\(profile.id)")
-                .accessibilityHint(model.hardware.warning(for: profile) ?? L10n.text("Модель совместима с этим Mac"))
-            } else {
-                Label(profile.displayName, systemImage: model.modelLibrary.isSelected(profile) ? "checkmark.circle.fill" : "circle")
-                    .foregroundStyle(model.hardware.compatibility(for: profile).isCompatible ? Color.primary : Color.secondary)
-            }
             Spacer()
             if model.hardware.warning(for: profile) != nil {
                 Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).help(model.hardware.warning(for: profile) ?? "")

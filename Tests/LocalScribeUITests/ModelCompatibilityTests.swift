@@ -74,7 +74,7 @@ final class ModelCompatibilityTests: XCTestCase {
         XCTAssertEqual(model.initialModelID(for: .summary), "summary")
         let compatible = try XCTUnwrap(catalog.models.first { $0.id == "summary" })
         let draft = SettingsDraft(model: model)
-        draft.modelIDs[.summary] = compatible.id
+        draft.summaryModelID = compatible.id
         draft.automaticSummaries = false
         XCTAssertTrue(draft.hasChanges(from: model))
         XCTAssertEqual(model.modelLibrary.selectedByRole["summary"], "summary-heavy")
@@ -159,7 +159,10 @@ final class ModelCompatibilityTests: XCTestCase {
         let popups = descendants(host).compactMap { $0 as? NSPopUpButton }
         XCTAssertEqual(popups.count, 3)
         let summary = try XCTUnwrap(popups.first { !$0.pullsDown && $0.menu?.items.contains { ($0.representedObject as? String) == "summary-heavy" } == true })
-        XCTAssertEqual(summary.selectedItem?.representedObject as? String, "summary")
+        XCTAssertEqual(summary.selectedItem?.title, L10n.text("Модель не выбрана"))
+        let compatible = try XCTUnwrap(summary.menu?.items.first { ($0.representedObject as? String) == "summary" })
+        XCTAssertTrue(compatible.isEnabled)
+        XCTAssertTrue(compatible.title.contains(L10n.text("Установлена")))
         let heavy = try XCTUnwrap(summary.menu?.items.first { ($0.representedObject as? String) == "summary-heavy" })
         XCTAssertFalse(heavy.isEnabled)
         let imports = try XCTUnwrap(popups.first { $0.pullsDown })

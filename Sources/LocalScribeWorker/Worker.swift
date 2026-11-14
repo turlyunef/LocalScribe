@@ -200,14 +200,10 @@ import LocalScribeSpeakerKit
             do { input = try Disk.read(AnonymizationAttemptInput.self, at: inputURL) }
             catch { throw ScribeError.message("Не удалось прочитать вход пробы обезличивания") }
             try input.validate()
-            guard let profile = try AnonymizationEngine.lookupPinnedProfile(models: models, toolsPath: nil, input: input, task: nil) else {
-                throw ScribeError.message("Закреплённая модель обезличивания недоступна в каталоге")
-            }
-            try AnonymizationEngine.verifyResolved(profile: profile, models: models, input: input)
             let workspace = inputURL.deletingLastPathComponent()
             let command = WorkerCommand(anonymizationJobId: input.fileId, runId: input.attemptId,
                                         anonymizationPath: workspace.path, modelsPath: models.path)
-            let engine = try AnonymizationEngine(command: command, input: input, resolvedProfile: profile) { type, message, _ in
+            let engine = try AnonymizationEngine(probing: command, input: input) { type, message, _ in
                 fputs("probe-anonymization \(type): \(message)\n", stderr)
             }
             let outcome = try await engine.run()

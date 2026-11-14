@@ -122,58 +122,49 @@ struct QueueJobID: Hashable, Sendable {
     @Published var modelLibrary = ModelLibrary()
     @Published var downloadProgress: ModelInstallProgress?
     @Published var downloadBatch = ""
-    // Anonymization model assignments (work 4): the settings record is the
-    // source of truth for the mode and the slots; the package registry owns
-    // the published verified installations shared by all compatible tabs.
     @Published private(set) var anonymizationSettings = AnonymizationSettings()
     @Published private(set) var anonymizationSettingsDamaged = false
     @Published private(set) var readyPackageIDs: Set<String> = []
-    /// A profile installed from the recordings tab that fits the still-empty
-    /// anonymization slot; consumed by the settings draft (applied on «ОК»).
-    @Published private(set) var installedAnonymizationCandidateID: String?
+    private var packageReadinessLoaded = false
     let packageRegistry = ModelPackageRegistry()
     private var anonymizationStore: AnonymizationSettingsStore?
     let hardware: ModelHardware
     var canManageModels: Bool { !savingResult && resultEdit == nil && !preparingStorage && !installing && !verifyingModels && !busy && queued.isEmpty && !resourcesPaused && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
     var activeCatalog: ModelCatalog? {
-        guard let catalog, let selected = modelLibrary.activeCatalog(from: catalog),
+        guard let catalog, let summary = readyTaskModel(.summary),
+              let selected = modelLibrary.activeCatalog(from: catalog, summary: summary),
               selected.models.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return nil }
-        guard let shared = readySharedProfile() else { return selected }
-        var substituted = selected
-        if let index = substituted.models.firstIndex(where: { $0.purpose == .summary }) {
-            // The role view keeps the native pinning contract (RunInfo.modelIDs
-            // and `ModelCatalog.pinned(to:)`); the pinned identity — id,
-            // revision and files — stays the shared profile itself.
-            var summaryView = shared
-            summaryView.role = .summary
-            substituted.models[index] = summaryView
-        }
-        return substituted
+        return selected
     }
-    /// The shared-mode profile: assigned, compatible with all three tasks on
-    /// this Mac and backed by a published verified package installation. Until
-    /// the shared package is verified the native assignments stay effective, so
-    /// audio jobs never wait for a download. Speech recognition and diarization
-    /// are never resolved through the shared profile.
-    func readySharedProfile() -> ModelProfile? {
-        guard let catalog, anonymizationSettings.modelAssignmentMode == .shared,
-              let id = anonymizationSettings.sharedProfileID,
-              let profile = catalog.models.first(where: { $0.id == id }),
-              ModelTaskSupport.sharedCompatibility(profile: profile, hardware: hardware).isCompatible,
-              readyPackageIDs.contains(profile.effectivePackageID) else { return nil }
+
+    func selectedTaskModel(_ task: ModelTask) -> ModelProfile? {
+        guard let profile = assignedTaskModel(task),
+              ModelTaskSupport.compatibility(task: task, profile: profile, hardware: hardware).isCompatible else { return nil }
+        return profile
+    }
+    private func assignedTaskModel(_ task: ModelTask) -> ModelProfile? {
+        guard let id = effectiveAnonymizationSettings.profileID(for: task) else { return nil }
+        return catalog?.models.first { $0.id == id }
+    }
+    private func readyTaskModel(_ task: ModelTask) -> ModelProfile? {
+        guard let profile = selectedTaskModel(task), packageIsReady(profile) else { return nil }
         return profile
     }
     /// Whether the profile's package has a published verified installation
     /// that is not pending a confirmed removal.
     func packageIsReady(_ profile: ModelProfile) -> Bool {
-        readyPackageIDs.contains(profile.effectivePackageID)
+        readyPackageIDs.contains(profile.effectivePackageID) || (!packageReadinessLoaded && modelLibrary.isInstalled(profile))
     }
-    /// The active record with the two library-coupled slots mirroring the live
-    /// native selections; used for package removal plans and readiness.
-    var effectiveAnonymizationSettings: AnonymizationSettings {
-        anonymizationSettings.syncingNativeAssignments(
-            summaryID: modelLibrary.selectedByRole[ModelRole.summary.rawValue],
-            diagramID: modelLibrary.selectedByRole[ModelRole.diagram.rawValue])
+    private var effectiveAnonymizationSettings: AnonymizationSettings {
+        // Native selections are used until settings have been loaded, or if
+        // their file is damaged. Installing a model never fills another slot.
+        guard !packageReadinessLoaded || anonymizationSettingsDamaged else { return anonymizationSettings }
+        var settings = anonymizationSettings
+        for task in [ModelTask.summary, .diagramRecognition] where settings.profileID(for: task) == nil {
+            guard let role = task.legacyRole else { continue }
+            settings.setProfile(modelLibrary.selectedByRole[role.rawValue], for: task)
+        }
+        return settings
     }
     func isRecommended(_ profile: ModelProfile) -> Bool {
         guard let catalog, let role = profile.purpose else { return false }
@@ -473,40 +464,42 @@ struct QueueJobID: Hashable, Sendable {
                 try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware,
                                       verifyContents: verifyContents)
             }.value
+            await reloadAnonymizationState()
             updateModelsStatus()
-        } catch { modelsReady = false; modelsStatus = L10n.text("Не удалось проверить модели"); errorHandler.report(error) }
-        await reloadAnonymizationState()
+        } catch {
+            modelsReady = false
+            modelsStatus = L10n.text("Не удалось проверить модели")
+            errorHandler.report(error)
+        }
     }
 
     /// Load or migrate the anonymization settings record (first open copies the
-    /// previous summary and diagram selections) and refresh the shared package
+    /// previous summary and diagram selections) and refresh the package
     /// readiness snapshot from the freshly verified library. File reads happen
     /// off the main actor; a damaged record is reported and never replaced.
     func reloadAnonymizationState() async {
         guard let repository else { return }
         let store = anonymizationStore ?? AnonymizationSettingsStore(root: repository.root)
         anonymizationStore = store
+        let catalog = catalog ?? ModelCatalog(models: [])
+        let library = modelLibrary
+        // ModelLibrary has already verified each installed folder.
+        var verified: [String: ModelPackageInstallation] = [:]
+        for profile in catalog.models where library.isInstalled(profile) {
+            let packageID = profile.effectivePackageID
+            if verified[packageID] == nil {
+                verified[packageID] = ModelPackageInstallation(packageID: packageID, installedProfileID: profile.id)
+            }
+        }
+        await packageRegistry.replaceInstallations(verified)
+        packageReadinessLoaded = true
+        readyPackageIDs = await packageRegistry.readyPackageIDs()
         do {
-            let catalog = catalog ?? ModelCatalog(models: [])
-            let library = modelLibrary
-            let (settings, installations) = try await Task.detached(priority: .utility) {
-                let settings = try store.loadOrMigrate(catalog: catalog, library: library)
-                // Verified packages: the first member profile (in catalog order)
-                // whose files the library just verified owns the installation,
-                // exactly like `ModelPackageRegistry.scanInstallations`.
-                var verified: [String: ModelPackageInstallation] = [:]
-                for profile in catalog.models where library.isInstalled(profile) {
-                    let packageID = profile.effectivePackageID
-                    if verified[packageID] == nil {
-                        verified[packageID] = ModelPackageInstallation(packageID: packageID, installedProfileID: profile.id)
-                    }
-                }
-                return (settings, verified)
+            let settings = try await Task.detached(priority: .utility) {
+                try store.loadOrMigrate(catalog: catalog, library: library)
             }.value
             anonymizationSettings = settings
             anonymizationSettingsDamaged = false
-            await packageRegistry.replaceInstallations(installations)
-            readyPackageIDs = await packageRegistry.readyPackageIDs()
             // A readiness change wakes the waiting cards of the text archive
             // only: settings changes never start pending recordings (AC-30).
             await wakeWaitingTextCards()
@@ -517,29 +510,21 @@ struct QueueJobID: Hashable, Sendable {
     }
     private func updateModelsStatus() {
         modelsReady = activeCatalog != nil
-        let incompatible = catalog?.models.filter {
-            $0.purpose != .diagram && modelLibrary.isSelected($0)
+        var incompatible = catalog?.models.filter {
+            $0.purpose != .diagram && $0.purpose != .summary && modelLibrary.isSelected($0)
         }.compactMap { hardware.warning(for: $0) } ?? []
+        if let summary = assignedTaskModel(.summary),
+           let reason = ModelTaskSupport.compatibility(task: .summary, profile: summary, hardware: hardware).explanation {
+            incompatible.append(L10n.message(reason))
+        }
         modelsStatus = !incompatible.isEmpty ? L10n.text("Выберите совместимую модель. ") + incompatible.joined(separator: " ") :
             (modelsReady ? L10n.text("Модели готовы · обработка без интернета") : L10n.text("Загрузите модели для всех этапов обработки"))
     }
     func profilesToInstall(asrID: String, summaryID: String) -> [ModelProfile] {
-        guard let catalog,
-              let asr = catalog.models.first(where: { $0.id == asrID && $0.purpose == .asr }),
-              let summary = catalog.models.first(where: { $0.id == summaryID && $0.purpose == .summary }),
-              let tokenizer = catalog.models.first(where: { $0.id == (asr.tokenizerID ?? "tokenizer") && $0.purpose == .tokenizer }),
-              let diarization = catalog.models.first(where: { $0.id == "diarization" && $0.purpose == .diarization }) else { return [] }
-        var profiles = [tokenizer, asr, diarization, summary]
-        if let id = asr.alignerID {
-            guard let aligner = catalog.models.first(where: { $0.id == id && $0.purpose == nil }) else { return [] }
-            profiles.insert(aligner, at: 1)
-        }
-        guard profiles.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return [] }
-        return profiles.filter { !modelLibrary.isInstalled($0) }
+        guard let summary = catalog?.models.first(where: { $0.id == summaryID }),
+              ModelTaskSupport.compatibility(task: .summary, profile: summary, hardware: hardware).isCompatible else { return [] }
+        return audioStackToInstall(asrID: asrID) + (packageIsReady(summary) ? [] : [summary])
     }
-    /// The speech stack without the summary profile: in the shared mode the
-    /// summaries are governed by the shared profile of the anonymization tab,
-    /// so the recordings batch installs only the native audio complect.
     func audioStackToInstall(asrID: String) -> [ModelProfile] {
         guard let catalog,
               let asr = catalog.models.first(where: { $0.id == asrID && $0.purpose == .asr }),
@@ -565,7 +550,7 @@ struct QueueJobID: Hashable, Sendable {
             }
         } catch { errorHandler.report(error); return nil }
     }
-    func installModels(_ profiles: [ModelProfile], mayFillAnonymizationSlot: Bool = false) {
+    func installModels(_ profiles: [ModelProfile]) {
         guard let repository, let catalog, canManageModels, !profiles.isEmpty,
               let profiles = compatibleProfiles(profiles) else { return }
         downloadingModels = true; installing = true; downloadProgress = nil
@@ -577,6 +562,8 @@ struct QueueJobID: Hashable, Sendable {
             do {
                 for (index, profile) in profiles.enumerated() {
                     try Task.checkCancellation()
+                    let installed = profile.effectiveSupportedTasks.isEmpty ? modelLibrary.isInstalled(profile) : packageIsReady(profile)
+                    guard !installed else { continue }
                     downloadBatch = L10n.text("Модель %1$@ из %2$@ · %3$@", String(index + 1), String(profiles.count), profile.displayName)
                     downloadProgress = ModelInstallProgress(profile: profile)
                     try await installer.install(profile, root: repository.models, fetch: { index, progress in
@@ -587,7 +574,7 @@ struct QueueJobID: Hashable, Sendable {
                     var updated = modelLibrary
                     updated.installed(profile, catalog: catalog, hardware: hardware)
                     try updated.save(at: repository.models); modelLibrary = updated
-                    await noteInstalled(profile, mayFillAnonymizationSlot: mayFillAnonymizationSlot)
+                    await noteInstalled(profile)
                 }
                 updateModelsStatus()
             } catch {
@@ -598,22 +585,11 @@ struct QueueJobID: Hashable, Sendable {
         }
     }
 
-    /// Publish one verified installation to the package registry (the physical
-    /// installation is shared per package by all compatible tabs) and stage the
-    /// anonymization-slot substitution: a profile installed from the recordings
-    /// tab in the separate mode fills the still-empty slot in the settings
-    /// draft. The draft assignment itself is applied only by «ОК».
-    func noteInstalled(_ profile: ModelProfile, mayFillAnonymizationSlot: Bool) async {
+    func noteInstalled(_ profile: ModelProfile) async {
         await packageRegistry.publishInstallation(packageID: profile.effectivePackageID, profileID: profile.id)
         readyPackageIDs = await packageRegistry.readyPackageIDs()
         // A finished installation can make the waiting text cards admissible.
         await wakeWaitingTextCards()
-        guard mayFillAnonymizationSlot,
-              anonymizationSettings.modelAssignmentMode == .separate,
-              anonymizationSettings.profileID(for: .anonymization) == nil,
-              profile.supports(.anonymization),
-              hardware.compatibility(for: profile).isCompatible else { return }
-        installedAnonymizationCandidateID = profile.id
     }
     private func receiveProgress(_ progress: ModelInstallProgress) {
         guard installing, downloadProgress?.profileID == progress.profileID else { return }
@@ -633,6 +609,7 @@ struct QueueJobID: Hashable, Sendable {
     func cancelInstall() { installTask?.cancel(); downloader.cancel() }
     func importModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels, let profile = compatibleProfiles([profile])?.first else { return }
+        if !profile.effectiveSupportedTasks.isEmpty, packageIsReady(profile) { return }
         let panel = NSOpenPanel(); panel.canChooseDirectories = true; panel.canChooseFiles = false
         panel.message = L10n.text("Выберите папку модели %1$@ из закреплённого каталога", profile.displayName)
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -647,8 +624,9 @@ struct QueueJobID: Hashable, Sendable {
             do {
                 try await installer.install(profile, root: repository.models, localSource: url) { progress in Task { @MainActor in self.receiveProgress(progress) } }
                 var updated = modelLibrary; updated.installed(profile, catalog: catalog, hardware: hardware)
-                try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
-                await noteInstalled(profile, mayFillAnonymizationSlot: false)
+                try updated.save(at: repository.models); modelLibrary = updated
+                await noteInstalled(profile)
+                updateModelsStatus()
             } catch {
                 updateModelsStatus()
                 if !Task.isCancelled { errorHandler.report(error) }
@@ -657,18 +635,58 @@ struct QueueJobID: Hashable, Sendable {
         }
     }
     func selectModel(_ profile: ModelProfile) {
-        guard canManageModels, !modelLibrary.isSelected(profile),
+        guard canManageModels,
               let profile = compatibleProfiles([profile])?.first else { return }
-        do { try selectModels([profile.id]) }
+        do {
+            let draft = SettingsDraft(model: self)
+            switch profile.purpose {
+            case .summary: draft.summaryModelID = profile.id
+            case .diagram: draft.diagramModelID = profile.id
+            case let role?: draft.modelIDs[role] = profile.id
+            case nil: return
+            }
+            try applySettings(draft)
+        }
         catch { errorHandler.report(error) }
     }
     func applySettings(_ draft: SettingsDraft) throws {
-        // Build and validate the anonymization record first: a rejected «ОК»
-        // must leave both the library selection and the record untouched.
-        let anonymization = try buildAnonymizationSettings(from: draft)
-        let changes = draft.changedModels(in: modelLibrary)
-        if !changes.isEmpty { try selectModels(Array(changes.values)) }
-        try commitAnonymizationSettings(anonymization, changed: draft.hasAnonymizationChanges(from: self))
+        var settings = anonymizationSettings
+        try settings.applyDataTypes(draft.dataTypesLines)
+        let taskChanges = draft.taskModelChanges(from: self)
+        let libraryChanges = draft.changedModels(in: modelLibrary)
+        if !taskChanges.isEmpty || !libraryChanges.isEmpty {
+            guard canManageModels else {
+                throw ScribeError.message("Выбор моделей можно сохранить после завершения записи и обработки.")
+            }
+        }
+        for (task, id) in taskChanges {
+            guard let profile = catalog?.models.first(where: { $0.id == id }) else {
+                throw ScribeError.message("Модель отсутствует в закреплённом каталоге")
+            }
+            let compatibility = ModelTaskSupport.compatibility(task: task, profile: profile, hardware: hardware)
+            if let explanation = compatibility.explanation { throw ScribeError.message(explanation) }
+            settings.setProfile(id, for: task)
+        }
+        let updatedLibrary = try libraryChanges.isEmpty ? nil : librarySelecting(libraryChanges)
+        let settingsChanged = settings != anonymizationSettings
+        let store = settingsChanged ? try writableAnonymizationStore() : nil
+        if let updatedLibrary, let repository {
+            try updatedLibrary.save(at: repository.models)
+        }
+        if let store {
+            do { try store.save(settings) }
+            catch {
+                if updatedLibrary != nil, let repository {
+                    do { try modelLibrary.save(at: repository.models) }
+                    catch { errorHandler.report(error) }
+                }
+                throw error
+            }
+            anonymizationSettings = settings
+            Task { await wakeWaitingTextCards() }
+        }
+        if let updatedLibrary { modelLibrary = updatedLibrary }
+        if settingsChanged || updatedLibrary != nil { updateModelsStatus() }
         if backgroundRecognition != draft.backgroundRecognition { backgroundRecognition = draft.backgroundRecognition }
         if automaticSummaries != draft.automaticSummaries { automaticSummaries = draft.automaticSummaries }
         if recordingSources != draft.recordingSources {
@@ -680,65 +698,26 @@ struct QueueJobID: Hashable, Sendable {
         }
     }
 
-    /// Pure draft → record conversion: the mode, the assignments and the data
-    /// types are validated without any mutation.
-    private func buildAnonymizationSettings(from draft: SettingsDraft) throws -> AnonymizationSettings {
-        var settings = AnonymizationSettings()
-        settings.modelAssignmentMode = draft.anonymizationMode
-        // Whitespace-only lines are dropped; an empty remainder is rejected and
-        // the active record keeps its previous list.
-        try settings.applyDataTypes(draft.dataTypesLines)
-        // The separate anonymization assignment is saved in both modes: the
-        // record keeps the last separate choice and restores it when the user
-        // returns to the separate mode (AC-4).
-        if let id = draft.nonEmptyAnonymizationProfileID {
-            guard let profile = catalog?.models.first(where: { $0.id == id }),
-                  ModelTaskSupport.compatibility(task: .anonymization, profile: profile, hardware: hardware).isCompatible else {
-                throw ScribeError.message("Модель не поддерживает эту задачу")
-            }
-            settings.setSeparateProfile(id, for: .anonymization)
+    private func writableAnonymizationStore() throws -> AnonymizationSettingsStore {
+        guard !preparingStorage, !verifyingModels else {
+            throw ScribeError.message("Дождитесь завершения проверки моделей.")
         }
-        if draft.anonymizationMode == .shared {
-            guard let id = draft.nonEmptySharedProfileID,
-                  let profile = catalog?.models.first(where: { $0.id == id }),
-                  ModelTaskSupport.sharedCompatibility(profile: profile, hardware: hardware).isCompatible else {
-                throw ScribeError.message("В общем режиме нужен выбранный профиль")
-            }
-            settings.sharedProfileID = id
-        }
-        return settings
-    }
-
-    /// One atomic write applies the mode, the assignments and the data types
-    /// together; the two library-coupled slots mirror the just-saved native
-    /// selections, keeping the last saved assignment of every task.
-    private func commitAnonymizationSettings(_ settings: AnonymizationSettings, changed: Bool) throws {
-        guard changed else { return }
         guard let store = anonymizationStore else { throw ScribeError.message("Настройки обезличивания недоступны") }
         guard !anonymizationSettingsDamaged else { throw ScribeError.message("Повреждённая запись настроек обезличивания") }
-        let effective = settings.syncingNativeAssignments(
-            summaryID: modelLibrary.selectedByRole[ModelRole.summary.rawValue],
-            diagramID: modelLibrary.selectedByRole[ModelRole.diagram.rawValue])
-        try store.save(effective)
-        anonymizationSettings = effective
-        // A new assignment may reference an already verified package: only the
-        // waiting text cards wake, never pending recordings (AC-30/AC-43).
-        Task { await wakeWaitingTextCards() }
+        return store
     }
-    private func selectModels(_ ids: [String]) throws {
-        guard let repository, let catalog, canManageModels else {
+    private func librarySelecting(_ changes: [ModelRole: String]) throws -> ModelLibrary {
+        guard repository != nil, let catalog else {
             throw ScribeError.message("Выбор моделей можно сохранить после завершения записи и обработки.")
         }
         var updated = modelLibrary
-        for id in ids {
-            guard let profile = catalog.models.first(where: { $0.id == id }) else {
+        for (role, id) in changes {
+            guard let profile = catalog.models.first(where: { $0.id == id && $0.purpose == role }) else {
                 throw ScribeError.message("Модель отсутствует в закреплённом каталоге")
             }
             try updated.select(profile, catalog: catalog, hardware: hardware)
         }
-        try updated.save(at: repository.models)
-        modelLibrary = updated
-        updateModelsStatus()
+        return updated
     }
     /// The confirmation dialog of a package removal (test seam through
     /// `presentRemovalDialog`). The body lists every tab whose assignment
@@ -763,18 +742,18 @@ struct QueueJobID: Hashable, Sendable {
     }
 
     /// The dialog text of one package removal plan.
-    static func removalConfirmation(profile: ModelProfile, memberNames: [String], plan: ModelPackageRemovalPlan, listChanged: Bool) -> ModelRemovalConfirmation {
-        var body = L10n.text("Будут удалены файлы всех профилей комплекта (%1$@): %2$@. Аудио, расшифровки, итоги и схемы сохранятся.", String(memberNames.count), memberNames.joined(separator: ", "))
+    static func removalConfirmation(profile: ModelProfile, plan: ModelPackageRemovalPlan, listChanged: Bool) -> ModelRemovalConfirmation {
+        var body = L10n.text("Будут удалены файлы модели. Аудио, расшифровки, итоги и схемы сохранятся.")
         if plan.affectsAnything {
             let tabs = ModelTask.allCases.filter { plan.affectedTasks.contains($0) }.map(\.title).joined(separator: ", ")
-            body += "\n\n" + L10n.text("Комплект используют вкладки: %1$@. После удаления новые задания этих задач будут ждать модель; назначенные профили сохранятся, а начатые задания завершатся с закреплёнными файлами.", tabs)
+            body += "\n\n" + L10n.text("Модель используется для следующих задач: %1$@. После удаления новые задания будут ждать её установки.", tabs)
         }
         if listChanged {
             body += "\n\n" + L10n.text("Состав затронутых вкладок изменился. Подтвердите актуальный список.")
         }
-        return ModelRemovalConfirmation(title: L10n.text("Удалить комплект %1$@?", profile.displayName),
+        return ModelRemovalConfirmation(title: L10n.text("Удалить модель %1$@?", profile.displayName),
                                         body: body,
-                                        confirmButton: L10n.text("Удалить комплект"),
+                                        confirmButton: L10n.text("Удалить модель"),
                                         cancelButton: L10n.text("Отмена"))
     }
 
@@ -790,7 +769,7 @@ struct QueueJobID: Hashable, Sendable {
         var listChanged = false
         while true {
             let plan = ModelPackageRegistry.removalPlan(packageID: packageID, settings: effectiveAnonymizationSettings, catalog: catalog)
-            let confirmation = Self.removalConfirmation(profile: profile, memberNames: members.map(\.displayName), plan: plan, listChanged: listChanged)
+            let confirmation = Self.removalConfirmation(profile: profile, plan: plan, listChanged: listChanged)
             guard presentRemovalDialog(confirmation) else { return }
             // Re-check the affected tabs after the confirmation: a changed list
             // requires a fresh confirmation of the actual state.
@@ -1854,27 +1833,13 @@ struct QueueJobID: Hashable, Sendable {
     }
     // MARK: - Diagrams
 
-    /// Selected, installed and hardware-compatible diagram model; readiness is
-    /// fully independent of the four-role audio complect. In the shared mode
-    /// the ready shared profile serves new diagram runs; until its package is
-    /// verified the native diagram assignment stays effective.
-    var diagramProfile: ModelProfile? {
-        if let shared = readySharedProfile() { return shared }
-        guard let catalog, let profile = modelLibrary.diagramProfile(from: catalog),
-              hardware.compatibility(for: profile).isCompatible else { return nil }
-        return profile
-    }
+    var diagramProfile: ModelProfile? { readyTaskModel(.diagramRecognition) }
     var diagramModelsReady: Bool { diagramProfile != nil }
     /// Readiness of the anonymization assignment for the section's model link
-    /// (AC-7): the mode-effective profile with a published verified package.
+    /// (AC-7): the selected model with a published verified package.
     /// Worker admission re-checks readiness at dequeue time (work 9).
     var anonymizationModelsReady: Bool {
-        guard let catalog, let id = effectiveAnonymizationSettings.profileID(for: .anonymization),
-              let profile = catalog.models.first(where: { $0.id == id }),
-              profile.supports(.anonymization),
-              hardware.compatibility(for: profile).isCompatible,
-              readyPackageIDs.contains(profile.effectivePackageID) else { return false }
-        return true
+        readyTaskModel(.anonymization) != nil
     }
     /// The acting byte limit for text import and run admission: the pair
     /// «assigned profile and this Mac» (AC-37). Nil while no profile is
@@ -1883,8 +1848,7 @@ struct QueueJobID: Hashable, Sendable {
     /// form is the qualification seam of work 13 and the test seam.
     var inputLimits = AnonymizationInputLimit()
     var anonymizationImportLimitBytes: UInt? {
-        guard let catalog, let id = effectiveAnonymizationSettings.profileID(for: .anonymization),
-              let profile = catalog.models.first(where: { $0.id == id }) else { return nil }
+        guard let profile = selectedTaskModel(.anonymization) else { return nil }
         return inputLimits.limitBytes(profile: profile, hardware: hardware)
     }
     func reloadDiagrams() async {

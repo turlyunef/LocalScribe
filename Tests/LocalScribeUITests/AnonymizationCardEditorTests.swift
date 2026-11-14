@@ -150,7 +150,7 @@ final class AnonymizationCardEditorTests: XCTestCase {
     /// while the queue is idle.
     private func saveAssignment(_ fixture: Fixture, profile: ModelProfile) async throws {
         var settings = fixture.model.anonymizationSettings
-        settings.setSeparateProfile(profile.id, for: .anonymization)
+        settings.setProfile(profile.id, for: .anonymization)
         try AnonymizationSettingsStore(root: fixture.repository.root).save(settings)
         await fixture.model.reloadAnonymizationState()
     }

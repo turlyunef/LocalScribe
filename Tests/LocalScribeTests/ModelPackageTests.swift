@@ -98,13 +98,12 @@ final class ModelPackageTests: XCTestCase {
         XCTAssertFalse(reasons.contains("Модель не поддерживает эту задачу"))
         XCTAssertFalse(reasons.isEmpty)
 
-        // The shared profile must serve all three tasks.
+        // Each tab checks only its own task against the same profile.
         let partial = try makeProfile(id: "partial", role: .summary, modelsRoot: modelsRoot,
                                       tasks: [.summary, .anonymization])
-        XCTAssertTrue(ModelTaskSupport.sharedCompatibility(profile: partial, hardware: hardware).reasons
-            .contains("Общий профиль должен поддерживать итоги, схемы и обезличивание"))
-        let full = try makeProfile(id: "full", role: .summary, modelsRoot: modelsRoot, tasks: Set(ModelTask.allCases))
-        XCTAssertTrue(ModelTaskSupport.sharedCompatibility(profile: full, hardware: hardware).isCompatible)
+        XCTAssertTrue(ModelTaskSupport.compatibility(task: .summary, profile: partial, hardware: hardware).isCompatible)
+        XCTAssertTrue(ModelTaskSupport.compatibility(task: .anonymization, profile: partial, hardware: hardware).isCompatible)
+        XCTAssertFalse(ModelTaskSupport.compatibility(task: .diagramRecognition, profile: partial, hardware: hardware).isCompatible)
     }
 
     func testLegacyFingerprintsDoNotChangeWithNewProfileFields() throws {
@@ -154,17 +153,23 @@ final class ModelPackageTests: XCTestCase {
         await registry.replaceInstallations(verified)
 
         var settings = AnonymizationSettings()
-        settings.setSeparateProfile(sibling.id, for: .anonymization)
+        settings.setProfile(sibling.id, for: .anonymization)
         let readiness = await registry.anonymizationReadiness(settings: settings, catalog: catalog, hardware: hardware)
         XCTAssertTrue(readiness.isReady)
         XCTAssertEqual(readiness.packageID, member.effectivePackageID)
         // The sibling slot needs no second download of the same files.
         XCTAssertFalse(FileManager.default.fileExists(atPath: modelsRoot.appendingPathComponent(sibling.id).path))
+        XCTAssertEqual(try catalog.verifiedModelFolder(for: sibling, at: modelsRoot).path,
+                       modelsRoot.appendingPathComponent(member.id).path)
+
+        // A present file of the expected size cannot substitute for a valid SHA.
+        try Data("x".utf8).write(to: modelsRoot.appendingPathComponent("shared-9b/file-0.bin"))
+        XCTAssertThrowsError(try catalog.verifiedModelFolder(for: sibling, at: modelsRoot))
     }
 
     // MARK: - Readiness matrix
 
-    func testReadinessMatrixForSeparateAndSharedModes() throws {
+    func testReadinessMatrixForIndependentTasks() throws {
         let modelsRoot = try makeRoot().appendingPathComponent("models")
         let summaryOnly = try makeProfile(id: "summary-9b", role: .summary, modelsRoot: modelsRoot, tasks: [.summary])
         let full = try makeProfile(id: "full", role: .summary, modelsRoot: modelsRoot, tasks: Set(ModelTask.allCases))
@@ -180,14 +185,14 @@ final class ModelPackageTests: XCTestCase {
         XCTAssertFalse(readiness.waitingForInstall)
 
         // An assignment that no longer resolves in the catalog reads as empty.
-        settings.setSeparateProfile("deleted-profile", for: .anonymization)
+        settings.setProfile("deleted-profile", for: .anonymization)
         readiness = ModelAssignments.readiness(for: .anonymization, settings: settings, catalog: catalog,
                                                hardware: hardware, readyPackageIDs: ready)
         XCTAssertTrue(readiness.noAssignment)
 
         // Compatible but not installed: the assignment is kept, jobs wait for
         // the package installation.
-        settings.setSeparateProfile(full.id, for: .anonymization)
+        settings.setProfile(full.id, for: .anonymization)
         readiness = ModelAssignments.readiness(for: .anonymization, settings: settings, catalog: catalog,
                                                hardware: hardware, readyPackageIDs: [])
         XCTAssertFalse(readiness.isReady)
@@ -197,7 +202,7 @@ final class ModelPackageTests: XCTestCase {
         let installed = try makeProfile(id: "installed-summary", role: .summary, modelsRoot: modelsRoot,
                                         contents: ["x"], tasks: [.summary], packageID: "pkg-installed")
         let catalogWithInstalled = ModelCatalog(models: catalog.models + [installed])
-        settings.setSeparateProfile(installed.id, for: .anonymization)
+        settings.setProfile(installed.id, for: .anonymization)
         readiness = ModelAssignments.readiness(for: .anonymization, settings: settings, catalog: catalogWithInstalled,
                                                hardware: hardware, readyPackageIDs: ["pkg-installed"])
         XCTAssertFalse(readiness.isReady)
@@ -205,24 +210,17 @@ final class ModelPackageTests: XCTestCase {
         XCTAssertTrue(readiness.compatibility.reasons.contains("Модель не поддерживает эту задачу"))
 
         // Ready: assigned, qualified, installed.
-        settings.setSeparateProfile(full.id, for: .anonymization)
+        settings.setProfile(full.id, for: .anonymization)
         readiness = ModelAssignments.readiness(for: .anonymization, settings: settings, catalog: catalog,
                                                hardware: hardware, readyPackageIDs: ready)
         XCTAssertTrue(readiness.isReady)
 
-        // Shared mode checks the shared requirement for every task: the
-        // summary-only profile cannot serve the three tabs even when installed.
-        settings.modelAssignmentMode = .shared
-        settings.sharedProfileID = summaryOnly.id
-        readiness = ModelAssignments.readiness(for: .anonymization, settings: settings, catalog: catalog,
-                                               hardware: hardware, readyPackageIDs: [summaryOnly.effectivePackageID])
-        XCTAssertFalse(readiness.isReady)
-        XCTAssertTrue(readiness.compatibility.reasons
-            .contains("Общий профиль должен поддерживать итоги, схемы и обезличивание"))
-        settings.sharedProfileID = full.id
+        settings.setProfile(summaryOnly.id, for: .summary)
         readiness = ModelAssignments.readiness(for: .summary, settings: settings, catalog: catalog,
-                                               hardware: hardware, readyPackageIDs: ready)
+                                               hardware: hardware, readyPackageIDs: [summaryOnly.effectivePackageID])
         XCTAssertTrue(readiness.isReady)
+        XCTAssertEqual(readiness.profile?.id, summaryOnly.id)
+        XCTAssertEqual(settings.profileID(for: .anonymization), full.id)
     }
 
     // MARK: - Removal, readiness and leases
@@ -238,8 +236,9 @@ final class ModelPackageTests: XCTestCase {
         await registry.replaceInstallations(try ModelPackageRegistry.scanInstallations(catalog: catalog, modelsRoot: modelsRoot))
 
         var settings = AnonymizationSettings()
-        settings.modelAssignmentMode = .shared
-        settings.sharedProfileID = profile.id
+        for task in ModelTask.allCases {
+            settings.setProfile(profile.id, for: task)
+        }
         var readiness = await registry.anonymizationReadiness(settings: settings, catalog: catalog, hardware: hardware)
         XCTAssertTrue(readiness.isReady)
 
@@ -258,7 +257,7 @@ final class ModelPackageTests: XCTestCase {
         readiness = await registry.anonymizationReadiness(settings: settings, catalog: catalog, hardware: hardware)
         XCTAssertFalse(readiness.isReady)
         // The assignment itself survives; only readiness is gone.
-        XCTAssertEqual(settings.sharedProfileID, profile.id)
+        XCTAssertEqual(settings.profileID(for: .anonymization), profile.id)
         let rejected = await registry.acquireLeaseIfReady(packageID: packageID, profileID: profile.id)
         XCTAssertNil(rejected)
         // Physical deletion waits for the running job.
@@ -317,15 +316,15 @@ final class ModelPackageTests: XCTestCase {
         } catch {}
     }
 
-    func testSeparateRemovalPlanCountsOnlySlotsOfTheSamePackage() throws {
+    func testRemovalPlanCountsOnlyAssignmentsOfTheSamePackage() throws {
         let modelsRoot = try makeRoot().appendingPathComponent("models")
         let first = try makeProfile(id: "pkg-a-member", role: .summary, modelsRoot: modelsRoot, contents: ["a"])
         let second = try makeProfile(id: "pkg-b-member", role: .diagram, modelsRoot: modelsRoot, contents: ["b"])
         let catalog = ModelCatalog(models: [first, second])
         var settings = AnonymizationSettings()
-        settings.setSeparateProfile(first.id, for: .summary)
-        settings.setSeparateProfile(second.id, for: .diagramRecognition)
-        settings.setSeparateProfile(first.id, for: .anonymization)
+        settings.setProfile(first.id, for: .summary)
+        settings.setProfile(second.id, for: .diagramRecognition)
+        settings.setProfile(first.id, for: .anonymization)
 
         XCTAssertEqual(ModelPackageRegistry.removalPlan(packageID: first.effectivePackageID, settings: settings, catalog: catalog)
             .affectedTasks, [.summary, .anonymization])
@@ -334,7 +333,7 @@ final class ModelPackageTests: XCTestCase {
 
         // A settings change between confirmation and execution changes the
         // list: the recomputed plan requires a fresh confirmation.
-        settings.setSeparateProfile(nil, for: .summary)
+        settings.setProfile(nil, for: .summary)
         XCTAssertEqual(ModelPackageRegistry.removalPlan(packageID: first.effectivePackageID, settings: settings, catalog: catalog)
             .affectedTasks, [.anonymization])
     }

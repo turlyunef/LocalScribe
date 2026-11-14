@@ -60,6 +60,7 @@
   "Выберите поддерживаемый аудиофайл без видео": "Choose a supported audio file without video.",
   "Выберите совместимую модель. ": "Choose a compatible model. ",
   "Выбор моделей можно сохранить после завершения записи и обработки.": "Model selection can be saved when recording and processing have finished.",
+  "Дождитесь завершения проверки моделей.": "Wait for model verification to finish.",
   "Выбранная модель поддерживает только обработку готовой записи": "The selected model only supports completed recordings.",
   "Выбранный микрофон не передал аудиоданные при запуске.": "The selected microphone did not deliver audio data at startup.",
   "Выбранный микрофон недоступен или имеет неподдерживаемый формат.": "The selected microphone is unavailable or uses an unsupported format.",

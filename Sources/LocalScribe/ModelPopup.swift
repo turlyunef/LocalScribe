@@ -9,19 +9,20 @@ struct ModelMenuOption {
     let recommended: Bool
     var enabled: Bool { reason == nil }
 
-    init(profile: ModelProfile, hardware: ModelHardware, recommended: Bool) {
-        self.init(profile: profile, reason: hardware.warning(for: profile), recommended: recommended)
+    init(profile: ModelProfile, hardware: ModelHardware, recommended: Bool, installed: Bool = false) {
+        self.init(profile: profile, reason: hardware.warning(for: profile), recommended: recommended, installed: installed)
     }
 
     /// Task-aware option: the caller supplies the combined incompatibility
     /// reasons of the task and the Mac (already localized for display).
-    init(profile: ModelProfile, reason: String?, recommended: Bool) {
+    init(profile: ModelProfile, reason: String?, recommended: Bool, installed: Bool = false) {
         id = profile.id
         self.reason = reason
         self.recommended = recommended && reason == nil
         let size = profile.bytes.formatted(.byteCount(style: .file).locale(L10n.locale))
         let details = "\(profile.displayName) · \(size)"
-        title = self.recommended ? L10n.text("%1$@ · Максимально рекомендуется", details) : details
+        let label = self.recommended ? L10n.text("%1$@ · Максимально рекомендуется", details) : details
+        title = installed ? "\(label) · \(L10n.text("Установлена"))" : label
     }
 
     func menuItem(target: AnyObject?, action: Selector?) -> NSMenuItem {

@@ -24,7 +24,7 @@ final class AnonymizationDeletionTests: XCTestCase {
         let root: URL
     }
 
-    private func fixture(_ root: URL) throws -> Fixture {
+    private func fixture(_ root: URL) async throws -> Fixture {
         var repo = try RecordingRepository(root: root)
         let executable = root.appendingPathComponent("worker.py")
         // The process fixture serves the recording and anonymization kinds:
@@ -108,9 +108,12 @@ final class AnonymizationDeletionTests: XCTestCase {
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(repository: repo, startServices: false, workerExecutable: executable,
                              userDefaults: defaults, catalog: catalog)
-        for profile in profiles { model.modelLibrary.installed(profile, catalog: catalog) }
-        try model.modelLibrary.select(profiles[0], catalog: catalog)
-        model.modelsReady = true
+        var library = ModelLibrary()
+        for profile in profiles { library.installed(profile, catalog: catalog) }
+        try library.select(profiles[0], catalog: catalog)
+        try library.save(at: repo.models)
+        await model.verifyModels()
+        XCTAssertTrue(model.modelsReady)
         XCTAssertNotNil(model.activeCatalog)
         return Fixture(repository: repo, catalog: catalog, model: model, anon: anon, root: root)
     }
@@ -238,7 +241,7 @@ final class AnonymizationDeletionTests: XCTestCase {
     func testDeletionConfirmationFromShortcutAndCardFreezesTheSetAndUsesEnterEscape() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         let first = try await importCard(fixture, name: "Отчёт команды", text: "Первый текст Анна Петрова")
         let second = try await importCard(fixture, name: "Заметки", text: "Второй текст")
@@ -303,7 +306,7 @@ final class AnonymizationDeletionTests: XCTestCase {
     func testRowMenuOffersSearchNarrowedDeletion() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         let workspace = AnonymizationWorkspaceModel(model: model)
         let matching = try await importCard(fixture, name: "Отчёт команды", text: "Текст отчёта")
@@ -358,7 +361,7 @@ final class AnonymizationDeletionTests: XCTestCase {
     func testDeletingActiveAndQueuedAttemptsStopsOnlyThemAndKeepsForeignOrderAndExternalFiles() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         let workspace = AnonymizationWorkspaceModel(model: model)
         try await assign(fixture, profile: fixture.anon)
@@ -428,7 +431,7 @@ final class AnonymizationDeletionTests: XCTestCase {
     func testPartialCardDeletionFailureShowsReasonAndActualRemainder() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         let workspace = AnonymizationWorkspaceModel(model: model)
         let stuck = try await importCard(fixture, name: "stuck", text: "Застрявший текст")
@@ -459,7 +462,7 @@ final class AnonymizationDeletionTests: XCTestCase {
     func testGroupDialogShowsFullCountReconfirmsCompositionAndDeletesByConfirmedSet() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await model.changeTextGroups { try $0.create(name: "Работа") }
         let group = try XCTUnwrap(model.textGroups.groups.first { $0.name == "Работа" })
@@ -530,7 +533,7 @@ final class AnonymizationDeletionTests: XCTestCase {
     func testGroupOnlyDeletionMovesMembersToUngroupedAndDefaultFallsBack() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await model.changeTextGroups { try $0.create(name: "Проект") }
         let group = try XCTUnwrap(model.textGroups.groups.first { $0.name == "Проект" })
@@ -559,7 +562,7 @@ final class AnonymizationDeletionTests: XCTestCase {
     func testGroupWithFilesPartialFailureKeepsGroupAndCancelsStoppedAttempt() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         try await model.changeTextGroups { try $0.create(name: "Отчёты") }

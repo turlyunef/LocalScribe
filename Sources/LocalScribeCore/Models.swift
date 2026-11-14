@@ -83,11 +83,15 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     }
     func validateFiles(at root: URL, verifyContents: Bool) throws {
         try validatePaths()
+        try validateFiles(in: root.appendingPathComponent(id), verifyContents: verifyContents)
+    }
+    fileprivate func validateFiles(in folder: URL, verifyContents: Bool, checkCancellation: Bool = false) throws {
         for f in files {
-            let url = root.appendingPathComponent(id).appendingPathComponent(f.localPath)
+            if checkCancellation { try Task.checkCancellation() }
+            let url = folder.appendingPathComponent(f.localPath)
             let invalid = ScribeError.message("Модель \(catalogName): отсутствует или повреждён \(f.localPath)")
             guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize, Int64(size) == f.size else { throw invalid }
-            if verifyContents, try Disk.hash(url) != f.sha256 { throw invalid }
+            if verifyContents, try Disk.hash(url, checkCancellation: checkCancellation) != f.sha256 { throw invalid }
         }
     }
 }
@@ -121,10 +125,8 @@ public struct ModelCatalog: Codable, Sendable {
             let id = try info.modelID(for: role)
             let matches = models.filter { $0.id == id && $0.purpose == role }
             if matches.count == 1 { return matches[0] }
-            // Shared-mode summaries may pin a task-qualified profile of another
-            // catalog purpose (the shared model serves three tasks). Resolve it
-            // with a summary role view: the pinned identity — id, revision and
-            // pinned files — is unchanged, so the run fingerprint stays equal.
+            // A summary may pin a task-qualified profile of another role.
+            // Adapt the role without changing the pinned identity and fingerprint.
             if role == .summary {
                 let taskMatches = models.filter { $0.id == id && $0.supports(.summary) }
                 if taskMatches.count == 1 {
@@ -157,6 +159,43 @@ public struct ModelCatalog: Codable, Sendable {
         }
         return pinned
     }
+
+    /// Verify the selected profile's pinned files in its own folder or in the
+    /// folder of a catalog member of the same package with the same pinned files.
+    /// The returned path does not change the profile's ID or run fingerprint.
+    public func verifiedModelFolder(for profile: ModelProfile, at root: URL) throws -> URL {
+        try profile.validatePaths()
+        let primary = root.appendingPathComponent(profile.id)
+        do {
+            try profile.validateFiles(in: primary, verifyContents: true, checkCancellation: true)
+            return primary
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            let primaryError = error
+            let packageID = profile.effectivePackageID
+            let pinnedFiles = profile.files.sorted { $0.localPath < $1.localPath }
+            for candidate in models where candidate.id != profile.id && candidate.effectivePackageID == packageID {
+                try Task.checkCancellation()
+                guard (try? candidate.validatePaths()) != nil else { continue }
+                let files = candidate.files.sorted { $0.localPath < $1.localPath }
+                guard pinnedFiles.elementsEqual(files, by: {
+                    $0.localPath == $1.localPath && $0.size == $1.size && $0.sha256 == $1.sha256
+                }) else { continue }
+                let folder = root.appendingPathComponent(candidate.id)
+                do {
+                    try profile.validateFiles(in: folder, verifyContents: true, checkCancellation: true)
+                    return folder
+                } catch is CancellationError {
+                    throw CancellationError()
+                } catch {
+                    continue
+                }
+            }
+            throw primaryError
+        }
+    }
+
     public func validate(at root: URL, progress: (@Sendable (String) -> Void)? = nil) throws {
         for m in models {
             try m.validate(at: root)

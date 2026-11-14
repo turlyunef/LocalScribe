@@ -1,9 +1,8 @@
 import Foundation
 
-/// A task that a shared text-capable profile can serve: recording summaries,
-/// diagram recognition and text anonymization. Speech recognition and speaker
-/// diarization keep their own separate assignments and never join a shared
-/// profile (`Out of scope` of the anonymization requirements).
+/// Recording summaries, diagram recognition and text anonymization each have
+/// their own model assignment. Speech recognition and speaker diarization use
+/// the separate role-based settings in `ModelLibrary`.
 public enum ModelTask: String, Codable, CaseIterable, Sendable, Hashable {
     case summary = "SUMMARY"
     case diagramRecognition = "DIAGRAM_RECOGNITION"
@@ -61,19 +60,9 @@ public enum ModelTaskSupport {
         }
         return ModelCompatibility(reasons: reasons)
     }
-
-    /// The shared mode requires one profile that supports all three tasks on
-    /// this Mac (`Invariants`, 1).
-    public static func sharedCompatibility(profile: ModelProfile, hardware: ModelHardware) -> ModelCompatibility {
-        var reasons = hardware.compatibility(for: profile).reasons
-        if profile.effectiveSupportedTasks != Set(ModelTask.allCases) {
-            reasons.insert("Общий профиль должен поддерживать итоги, схемы и обезличивание", at: 0)
-        }
-        return ModelCompatibility(reasons: reasons)
-    }
 }
 
-/// One resolved task slot: the saved assignment under the current mode, its
+/// One resolved task slot: the saved assignment, its
 /// compatibility for the task on this Mac, and whether the referenced package
 /// has a published verified installation. A compatible profile without
 /// installation keeps its assignment and only lacks readiness.
@@ -107,9 +96,6 @@ public struct ModelTaskReadiness: Sendable, Equatable {
 /// Pure resolution of saved assignments against the catalog, hardware and the
 /// set of packages with a published verified installation.
 public enum ModelAssignments {
-    /// Mode-aware slot resolution. In `SHARED` the shared profile is checked
-    /// against the shared requirement (all three tasks); in `SEPARATE` the
-    /// task's own slot is checked against its own task.
     public static func readiness(for task: ModelTask, settings: AnonymizationSettings,
                                  catalog: ModelCatalog, hardware: ModelHardware,
                                  readyPackageIDs: Set<String>) -> ModelTaskReadiness {
@@ -117,32 +103,21 @@ public enum ModelAssignments {
               let profile = catalog.models.first(where: { $0.id == id }) else {
             return .unresolved(task)
         }
-        let compatibility = settings.modelAssignmentMode == .shared
-            ? ModelTaskSupport.sharedCompatibility(profile: profile, hardware: hardware)
-            : ModelTaskSupport.compatibility(task: task, profile: profile, hardware: hardware)
+        let compatibility = ModelTaskSupport.compatibility(task: task, profile: profile, hardware: hardware)
         let packageID = profile.effectivePackageID
         return ModelTaskReadiness(task: task, profile: profile, packageID: packageID,
                                   compatibility: compatibility, packageReady: readyPackageIDs.contains(packageID))
     }
 
-    /// Assignments (tabs) that reference profiles of a package through the
-    /// mode-effective slots: in `SHARED` one shared profile of the package
-    /// affects all three tabs; in `SEPARATE` every slot referencing a member
-    /// profile of the package counts. Recomputing after any change yields the
-    /// current list for re-confirmation.
+    /// Assignments whose profiles reference this package. Recompute after a
+    /// settings change to refresh the removal confirmation.
     public static func affectedTasks(packageID: String, settings: AnonymizationSettings,
                                      catalog: ModelCatalog) -> Set<ModelTask> {
-        func referencesPackage(_ profileID: String?) -> Bool {
-            guard let profileID,
+        Set(ModelTask.allCases.filter { task in
+            guard let profileID = settings.profileID(for: task),
                   let profile = catalog.models.first(where: { $0.id == profileID }) else { return false }
             return profile.effectivePackageID == packageID
-        }
-        switch settings.modelAssignmentMode {
-        case .shared:
-            return referencesPackage(settings.sharedProfileID) ? Set(ModelTask.allCases) : []
-        case .separate:
-            return Set(ModelTask.allCases.filter { referencesPackage(settings.separateProfiles[$0.rawValue]) })
-        }
+        })
     }
 }
 

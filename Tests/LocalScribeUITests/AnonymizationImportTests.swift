@@ -66,7 +66,7 @@ final class AnonymizationImportTests: XCTestCase {
     private func assign(_ profile: ModelProfile, of model: AppModel, in repo: RecordingRepository) async throws {
         let store = AnonymizationSettingsStore(root: repo.root)
         var settings = AnonymizationSettings()
-        settings.setSeparateProfile(profile.id, for: .anonymization)
+        settings.setProfile(profile.id, for: .anonymization)
         try store.save(settings)
         await model.reloadAnonymizationState()
         XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), profile.id)

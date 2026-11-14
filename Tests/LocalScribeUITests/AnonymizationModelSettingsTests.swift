@@ -4,11 +4,8 @@ import XCTest
 @testable import LocalScribeCore
 @testable import LocalScribe
 
-/// The settings tabs of the three model assignments (work 4): both modes and
-/// the transitions, one-record draft commits, discard on cancel, the empty-slot
-/// substitution after a recordings-tab install, incompatibility reasons with
-/// causes, package-removal confirmations with the affected-tab list, and the
-/// data-type list rules (AC-1–5, AC-27).
+/// Independent settings assignments, a single installation across compatible
+/// tasks, package-removal confirmations, and data-type validation.
 @MainActor
 final class AnonymizationModelSettingsTests: XCTestCase {
     private let hardware = ModelHardware(chip: "Fixture M1", memoryBytes: 16 * 1_073_741_824, cpuCores: 8,
@@ -16,14 +13,12 @@ final class AnonymizationModelSettingsTests: XCTestCase {
 
     private struct Fixture {
         let repository: RecordingRepository
-        let catalog: ModelCatalog
         let model: AppModel
-        let shared: ModelProfile
+        let multitask: ModelProfile
         let anonymizationOnly: ModelProfile
+        let anonymizationAlias: ModelProfile
         let heavy: ModelProfile
         let nativeSummary: ModelProfile
-        let nativeDiagram: ModelProfile
-        let anonymizationContents: [String]
 
         /// Place the catalog-pinned files of a profile that was created absent.
         func placeOnDisk(_ profile: ModelProfile, contents: [String]) throws {
@@ -35,7 +30,7 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         }
     }
 
-    private func makeFixture(root: URL, installSharedPackage: Bool = true,
+    private func makeFixture(root: URL, installMultitaskPackage: Bool = true,
                              installAnonymizationPackage: Bool = true) throws -> Fixture {
         let repo = try RecordingRepository(root: root)
         var entries: [(profile: ModelProfile, install: Bool)] = []
@@ -71,12 +66,14 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         let nativeSummary = try profile("summary", role: .summary, contents: ["sum-1"], install: true)
         _ = try profile("tokenizer", role: .tokenizer, ram: 0, working: 0, contents: ["tok-1"], install: true)
         let nativeDiagram = try profile("diagram", role: .diagram, contents: ["dia-a"], install: true)
-        let shared = try profile("shared-9b", role: .diagram, tasks: Set(ModelTask.allCases),
-                                 contents: ["sh-1", "sh-2"], install: installSharedPackage)
+        let multitask = try profile("multitask-9b", role: .diagram, tasks: Set(ModelTask.allCases),
+                                 contents: ["sh-1", "sh-2"], install: installMultitaskPackage)
         let anonymizationContents = ["an-1"]
         let anonymizationOnly = try profile("anon-4b", role: nil, tasks: [.anonymization],
                                             contents: anonymizationContents, install: installAnonymizationPackage)
-        let heavy = try profile("heavy-shared", role: .summary, ram: 32, working: 24,
+        let anonymizationAlias = try profile("anon-multitask-alias", role: nil, tasks: [.anonymization],
+                                             contents: ["sh-1", "sh-2"], install: false)
+        let heavy = try profile("heavy-multitask", role: .summary, ram: 32, working: 24,
                                 tasks: Set(ModelTask.allCases), contents: ["hv-1"], install: true)
 
         let catalog = ModelCatalog(models: entries.map(\.profile))
@@ -93,15 +90,14 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         defer { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(repository: repo, startServices: false, userDefaults: defaults, catalog: catalog, hardware: hardware)
-        return Fixture(repository: repo, catalog: catalog, model: model, shared: shared,
-                       anonymizationOnly: anonymizationOnly, heavy: heavy,
-                       nativeSummary: nativeSummary, nativeDiagram: nativeDiagram,
-                       anonymizationContents: anonymizationContents)
+        return Fixture(repository: repo, model: model, multitask: multitask,
+                       anonymizationOnly: anonymizationOnly, anonymizationAlias: anonymizationAlias,
+                       heavy: heavy, nativeSummary: nativeSummary)
     }
 
-    private func open(_ root: URL, installSharedPackage: Bool = true,
+    private func open(_ root: URL, installMultitaskPackage: Bool = true,
                       installAnonymizationPackage: Bool = true) async throws -> Fixture {
-        let fixture = try makeFixture(root: root, installSharedPackage: installSharedPackage,
+        let fixture = try makeFixture(root: root, installMultitaskPackage: installMultitaskPackage,
                                        installAnonymizationPackage: installAnonymizationPackage)
         await fixture.model.verifyModels(verifyContents: false)
         return fixture
@@ -116,18 +112,16 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         let model = fixture.model
         let store = AnonymizationSettingsStore(root: fixture.repository.root)
 
-        // The first open migrates: separate mode, library-coupled slots, an
-        // empty anonymization slot and the initial data types.
+        // The first open migrates the saved model choices and initial data types.
         let migrated = try XCTUnwrap(store.load())
-        XCTAssertEqual(migrated.modelAssignmentMode, .separate)
-        XCTAssertEqual(migrated.separateProfiles[ModelTask.summary.rawValue], "summary")
-        XCTAssertEqual(migrated.separateProfiles[ModelTask.diagramRecognition.rawValue], "diagram")
-        XCTAssertNil(migrated.separateProfiles[ModelTask.anonymization.rawValue])
+        XCTAssertEqual(migrated.profileID(for: .summary), "summary")
+        XCTAssertEqual(migrated.profileID(for: .diagramRecognition), "diagram")
+        XCTAssertNil(migrated.profileID(for: .anonymization))
         XCTAssertEqual(migrated.dataTypes, AnonymizationSettings.initialDataTypes)
 
         let draft = SettingsDraft(model: model)
-        XCTAssertEqual(draft.anonymizationMode, .separate)
-        XCTAssertEqual(draft.sharedProfileID, "")
+        XCTAssertEqual(draft.summaryModelID, "summary")
+        XCTAssertEqual(draft.diagramModelID, "diagram")
         XCTAssertEqual(draft.anonymizationProfileID, "")
         XCTAssertEqual(draft.dataTypesText, AnonymizationSettings.initialDataTypes.joined(separator: "\n"))
         XCTAssertFalse(draft.hasChanges(from: model))
@@ -140,94 +134,78 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         // the remaining lines are saved by one record write.
         let saved = try XCTUnwrap(store.load())
         XCTAssertEqual(saved.dataTypes, ["Имена и фамилии", "Внутренние номера заявок", "  Телефоны  "])
-        XCTAssertEqual(saved.modelAssignmentMode, .separate)
         XCTAssertFalse(draft.hasChanges(from: model))
         XCTAssertEqual(SettingsDraft(model: model).dataTypesText, "Имена и фамилии\nВнутренние номера заявок\n  Телефоны  ")
         await model.shutdown()
     }
 
-    // MARK: - Shared mode and the native pinning points
+    // MARK: - Per-task assignments
 
-    func testSharedModePinsSharedProfileForNewSummariesAndDiagramsOnly() async throws {
+    func testModelInstalledForDiagramsCanBePinnedForSummariesWithoutChangingOtherTasks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = try await open(root)
         let model = fixture.model
-        let shared = fixture.shared
+        let multitask = fixture.multitask
         var manifest = Manifest(sourceType: "import", title: "Встреча", filename: "a.wav")
-        manifest.sourceComplete = true; manifest.durationMs = 1000
+        manifest.sourceComplete = true
+        manifest.durationMs = 1000
         try fixture.repository.save(manifest)
 
         let draft = SettingsDraft(model: model)
+        draft.summaryModelID = multitask.id
         draft.anonymizationProfileID = fixture.anonymizationOnly.id
-        draft.anonymizationMode = .shared
-        draft.sharedProfileID = shared.id
         try model.applySettings(draft)
-        XCTAssertEqual(model.anonymizationSettings.modelAssignmentMode, .shared)
-        XCTAssertEqual(model.anonymizationSettings.sharedProfileID, shared.id)
-        // The last separate anonymization assignment survives the shared mode
-        // and the shared assignment is effective for the task (AC-4).
-        XCTAssertEqual(model.anonymizationSettings.separateProfiles[ModelTask.anonymization.rawValue],
-                       fixture.anonymizationOnly.id)
-        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), shared.id)
+        XCTAssertEqual(model.anonymizationSettings.profileID(for: .summary), multitask.id)
+        XCTAssertEqual(model.anonymizationSettings.profileID(for: .diagramRecognition), "diagram")
+        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), fixture.anonymizationOnly.id)
 
-        // New audio runs pin the shared profile for summaries through the
-        // native pinning points; ASR and diarization keep their own selections.
         let runCatalog = try XCTUnwrap(model.activeCatalog)
-        XCTAssertEqual(runCatalog.models.first { $0.purpose == .summary }?.id, shared.id)
+        XCTAssertEqual(runCatalog.models.first { $0.purpose == .summary }?.id, multitask.id)
         XCTAssertEqual(runCatalog.models.first { $0.purpose == .asr }?.id, "asr")
         XCTAssertEqual(runCatalog.models.first { $0.purpose == .diarization }?.id, "diarization")
         XCTAssertEqual(runCatalog.models.first { $0.purpose == .tokenizer }?.id, "tokenizer")
-        XCTAssertEqual(model.diagramProfile?.id, shared.id)
-        XCTAssertEqual(model.modelLibrary.selectedByRole[ModelRole.summary.rawValue], "summary")
-        XCTAssertEqual(model.modelLibrary.selectedByRole[ModelRole.asr.rawValue], "asr")
-        XCTAssertEqual(model.modelLibrary.selectedByRole[ModelRole.diagram.rawValue], "diagram")
+        XCTAssertEqual(model.diagramProfile?.id, "diagram")
 
-        // A real run pins the shared profile and resumes against the full
-        // catalog with the relaxed summary-slot resolution.
-        _ = try await model.archive!.beginRun(manifest.id, catalog: runCatalog)
-        let fullCatalog = model.catalog!
+        // A new run pins the cross-task model and still resumes after the
+        // summary assignment changes again.
+        let archive = try XCTUnwrap(model.archive)
+        _ = try await archive.beginRun(manifest.id, catalog: runCatalog)
+        let nextDraft = SettingsDraft(model: model)
+        nextDraft.summaryModelID = fixture.nativeSummary.id
+        nextDraft.diagramModelID = multitask.id
+        try model.applySettings(nextDraft)
+        XCTAssertEqual(model.activeCatalog?.models.first { $0.purpose == .summary }?.id, "summary")
+        XCTAssertEqual(model.diagramProfile?.id, multitask.id)
+        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), fixture.anonymizationOnly.id)
+
+        let fullCatalog = try XCTUnwrap(model.catalog)
         let recordingID = manifest.id
-        let info = try await model.archive!.perform { try $0.resumeRun(recordingID, catalog: fullCatalog) }
-        XCTAssertEqual(info.modelIDs?["summary"], shared.id)
+        let info = try await archive.perform { try $0.resumeRun(recordingID, catalog: fullCatalog) }
+        XCTAssertEqual(info.modelIDs?["summary"], multitask.id)
         XCTAssertEqual(info.modelIDs?["asr"], "asr")
         XCTAssertEqual(info.modelIDs?["diarization"], "diarization")
-
-        // Returning to the separate mode restores the last saved assignments.
-        let separate = SettingsDraft(model: model)
-        separate.anonymizationMode = .separate
-        try model.applySettings(separate)
-        XCTAssertEqual(model.anonymizationSettings.modelAssignmentMode, .separate)
-        XCTAssertEqual(model.activeCatalog?.models.first { $0.purpose == .summary }?.id, "summary")
-        XCTAssertEqual(model.diagramProfile?.id, "diagram")
-        XCTAssertEqual(model.anonymizationSettings.separateProfiles[ModelTask.summary.rawValue], "summary")
-        XCTAssertEqual(model.anonymizationSettings.separateProfiles[ModelTask.diagramRecognition.rawValue], "diagram")
-        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), fixture.anonymizationOnly.id)
         await model.shutdown()
     }
 
-    func testSharedModeWithoutVerifiedPackageKeepsNativeAssignments() async throws {
+    func testUninstalledAssignmentIsSavedWithoutChangingTheOtherTasks() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try await open(root, installSharedPackage: false)
+        let fixture = try await open(root, installMultitaskPackage: false)
         let model = fixture.model
         let draft = SettingsDraft(model: model)
-        draft.anonymizationMode = .shared
-        draft.sharedProfileID = fixture.shared.id
+        draft.diagramModelID = fixture.multitask.id
         try model.applySettings(draft)
-        // The assignment is saved, but its jobs are not ready: the native
-        // assignments stay effective until the package is verified.
-        XCTAssertEqual(model.anonymizationSettings.sharedProfileID, fixture.shared.id)
-        XCTAssertNil(model.readySharedProfile())
-        XCTAssertFalse(model.packageIsReady(fixture.shared))
+
+        XCTAssertEqual(model.selectedTaskModel(.diagramRecognition)?.id, fixture.multitask.id)
+        XCTAssertFalse(model.packageIsReady(fixture.multitask))
+        XCTAssertNil(model.diagramProfile)
         XCTAssertEqual(model.activeCatalog?.models.first { $0.purpose == .summary }?.id, "summary")
-        XCTAssertEqual(model.diagramProfile?.id, "diagram")
+        XCTAssertNil(model.selectedTaskModel(.anonymization))
         await model.shutdown()
     }
 
-    // MARK: - Incompatibility
-
-    func testIncompatibleProfilesRejectedWithReasonsAndRecordUntouched() async throws {
+    func testIncompatibleModelChoicesLeaveSavedRecordUntouched() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = try await open(root)
@@ -235,36 +213,16 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         let store = AnonymizationSettingsStore(root: fixture.repository.root)
         let before = try Data(contentsOf: store.url)
 
-        // Menu options: a Mac-incompatible profile and a task-incomplete
-        // profile stay disabled with the combined reason.
-        func sharedOption(_ profile: ModelProfile) -> ModelMenuOption {
-            let reasons = ModelTaskSupport.sharedCompatibility(profile: profile, hardware: hardware).reasons
-            return ModelMenuOption(profile: profile,
-                                   reason: reasons.isEmpty ? nil : reasons.map(L10n.message).joined(separator: "; "),
-                                   recommended: false)
-        }
-        XCTAssertFalse(sharedOption(fixture.heavy).enabled)
-        XCTAssertTrue(sharedOption(fixture.heavy).reason?.contains("32 ГБ") == true)
-        XCTAssertFalse(sharedOption(fixture.nativeSummary).enabled)
-        XCTAssertTrue(sharedOption(fixture.nativeSummary).reason?
-            .contains(L10n.message("Общий профиль должен поддерживать итоги, схемы и обезличивание")) == true)
-        XCTAssertTrue(sharedOption(fixture.shared).enabled)
-        let taskReasons = ModelTaskSupport.compatibility(task: .anonymization, profile: fixture.nativeSummary, hardware: hardware).reasons
-        XCTAssertEqual(taskReasons.first, "Модель не поддерживает эту задачу")
-
-        // «ОК» rejects an incompatible shared profile and an incompatible task
-        // slot; the saved record keeps its bytes and the mode.
-        var draft = SettingsDraft(model: model)
-        draft.anonymizationMode = .shared
-        draft.sharedProfileID = fixture.heavy.id
+        let draft = SettingsDraft(model: model)
+        draft.summaryModelID = fixture.heavy.id
         XCTAssertThrowsError(try model.applySettings(draft))
-        draft.sharedProfileID = ""
-        XCTAssertThrowsError(try model.applySettings(draft))
-        draft.anonymizationMode = .separate
+        draft.summaryModelID = fixture.nativeSummary.id
         draft.anonymizationProfileID = fixture.nativeSummary.id
         XCTAssertThrowsError(try model.applySettings(draft))
+
         XCTAssertEqual(try Data(contentsOf: store.url), before)
-        XCTAssertEqual(model.anonymizationSettings.modelAssignmentMode, .separate)
+        XCTAssertEqual(model.selectedTaskModel(.summary)?.id, fixture.nativeSummary.id)
+        XCTAssertNil(model.selectedTaskModel(.anonymization))
         await model.shutdown()
     }
 
@@ -300,54 +258,42 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         await model.shutdown()
     }
 
-    // MARK: - Empty-slot substitution after a recordings-tab install
-
-    func testRecordingsInstallFillsOnlyEmptyAnonymizationSlotOfDraft() async throws {
+    func testNewInstallationCanBeSelectedFromAnotherTabWithoutAssigningItAutomatically() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try await open(root, installAnonymizationPackage: false)
+        let fixture = try await open(root, installMultitaskPackage: false)
         let model = fixture.model
-        let anon = fixture.anonymizationOnly
-        XCTAssertFalse(model.packageIsReady(anon))
+        let multitask = fixture.multitask
+        let alias = fixture.anonymizationAlias
+        let store = AnonymizationSettingsStore(root: root)
+        var settings = try XCTUnwrap(store.load())
+        settings.setProfile(nil, for: .diagramRecognition)
+        try store.save(settings)
+        await model.reloadAnonymizationState()
+        let draft = SettingsDraft(model: model)
+        XCTAssertFalse(model.packageIsReady(multitask))
+        XCTAssertFalse(model.packageIsReady(alias))
+        XCTAssertNil(model.selectedTaskModel(.diagramRecognition))
 
-        // An existing choice is never overwritten by the substitution.
-        let kept = SettingsDraft(model: model)
-        kept.anonymizationProfileID = fixture.shared.id
-        _ = NSApplication.shared
-        let (hosting, window) = host(ModelSettings(model: model, draft: kept), width: 760, height: 1500)
-        defer { window.close() }
-        model.settingsTab = .recordings
-        try await settle(hosting)
+        // Install the model using pre-placed files, without network.
+        try fixture.placeOnDisk(multitask, contents: ["sh-1", "sh-2"])
+        model.installModels([multitask])
+        let deadline = Date().addingTimeInterval(5)
+        while model.installing && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertTrue(model.packageIsReady(multitask))
+        XCTAssertTrue(model.packageIsReady(alias))
+        XCTAssertEqual(draft.anonymizationProfileID, "")
+        XCTAssertNil(model.selectedTaskModel(.anonymization))
+        XCTAssertNil(model.selectedTaskModel(.diagramRecognition))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.repository.models.appendingPathComponent(alias.id).path))
 
-        // The recordings-tab download (files fully pre-placed, offline install).
-        try fixture.placeOnDisk(anon, contents: fixture.anonymizationContents)
-        model.installModels([anon], mayFillAnonymizationSlot: true)
-        while model.installing { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertTrue(model.modelLibrary.isInstalled(anon))
-        XCTAssertTrue(model.packageIsReady(anon))
-        XCTAssertEqual(model.installedAnonymizationCandidateID, anon.id)
-        try await settle(hosting)
-        XCTAssertEqual(kept.anonymizationProfileID, fixture.shared.id)
-        XCTAssertNil(model.anonymizationSettings.profileID(for: .anonymization))
-
-        // A cancelled draft discards the assignment; the package stays ready.
-        XCTAssertEqual(SettingsDraft(model: model).anonymizationProfileID, "")
-
-        // The fill enters a fresh empty draft on the next install event and is
-        // applied by «ОК».
-        let filled = SettingsDraft(model: model)
-        XCTAssertEqual(filled.anonymizationProfileID, "")
-        let (fillHosting, fillWindow) = host(ModelSettings(model: model, draft: filled), width: 760, height: 1500)
-        defer { fillWindow.close() }
-        try await settle(fillHosting)
-        model.installModels([fixture.shared], mayFillAnonymizationSlot: true)
-        while model.installing { try await Task.sleep(for: .milliseconds(20)) }
-        XCTAssertEqual(model.installedAnonymizationCandidateID, fixture.shared.id)
-        try await settle(fillHosting)
-        XCTAssertEqual(filled.anonymizationProfileID, fixture.shared.id)
-        try model.applySettings(filled)
-        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), fixture.shared.id)
-        XCTAssertTrue(model.packageIsReady(anon))
+        draft.anonymizationProfileID = alias.id
+        try model.applySettings(draft)
+        XCTAssertEqual(model.selectedTaskModel(.anonymization)?.id, alias.id)
+        XCTAssertEqual(model.selectedTaskModel(.summary)?.id, "summary")
+        XCTAssertNil(model.selectedTaskModel(.diagramRecognition))
         await model.shutdown()
     }
 
@@ -358,101 +304,99 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let fixture = try await open(root)
         let model = fixture.model
-        let anon = fixture.anonymizationOnly
+        let owner = fixture.multitask
+        let alias = fixture.anonymizationAlias
 
         var dialogs: [AppModel.ModelRemovalConfirmation] = []
         model.presentRemovalDialog = { confirmation in
             dialogs.append(confirmation)
             if dialogs.count == 1 {
-                // The affected list changes under the first confirmation: the
-                // still-empty slot gets assigned inside the dialog.
-                var changed = SettingsDraft(model: model)
-                changed.anonymizationProfileID = anon.id
+                // Two tabs select the same package under distinct IDs while
+                // the first removal confirmation is open.
+                let changed = SettingsDraft(model: model)
+                changed.summaryModelID = owner.id
+                changed.anonymizationProfileID = alias.id
                 try? model.applySettings(changed)
                 return true
             }
             return dialogs.count == 3
         }
-        model.removeModel(anon)
+        model.removeModel(alias)
         // First dialog: no tab uses the package. The changed list forces a
         // fresh confirmation; the cancelled re-confirmation keeps everything.
         XCTAssertEqual(dialogs.count, 2)
-        XCTAssertFalse(dialogs[0].body.contains("Комплект используют вкладки"))
+        XCTAssertFalse(dialogs[0].body.contains("Модель используется для следующих задач"))
         XCTAssertTrue(dialogs[1].body.contains("Состав затронутых вкладок изменился"))
         XCTAssertTrue(dialogs[1].body.contains("Обезличивание"))
-        XCTAssertEqual(dialogs[1].confirmButton, L10n.text("Удалить комплект"))
-        XCTAssertTrue(model.modelLibrary.isInstalled(anon))
-        XCTAssertTrue(model.packageIsReady(anon))
-        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), anon.id)
+        XCTAssertTrue(dialogs[1].body.contains("Итоги"))
+        XCTAssertEqual(dialogs[1].confirmButton, L10n.text("Удалить модель"))
+        XCTAssertTrue(model.modelLibrary.isInstalled(owner))
+        XCTAssertTrue(model.packageIsReady(alias))
+        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), alias.id)
 
         // The confirmed removal of the same package deletes the files, keeps
         // the assignment and switches readiness off (invariant 2).
-        model.removeModel(anon)
+        model.removeModel(alias)
         XCTAssertEqual(dialogs.count, 3)
-        XCTAssertTrue(dialogs[2].body.contains("Комплект используют вкладки"))
+        XCTAssertTrue(dialogs[2].body.contains("Модель используется для следующих задач"))
         XCTAssertTrue(dialogs[2].body.contains("Обезличивание"))
         let deadline = Date().addingTimeInterval(5)
-        while model.modelLibrary.isInstalled(anon) && Date() < deadline {
+        while model.modelLibrary.isInstalled(owner) && Date() < deadline {
             try await Task.sleep(for: .milliseconds(20))
         }
-        XCTAssertFalse(model.modelLibrary.isInstalled(anon))
-        XCTAssertFalse(model.packageIsReady(anon))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.repository.models.appendingPathComponent(anon.id).path))
-        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), anon.id)
+        XCTAssertFalse(model.modelLibrary.isInstalled(owner))
+        XCTAssertFalse(model.packageIsReady(alias))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: fixture.repository.models.appendingPathComponent(owner.id).path))
+        XCTAssertEqual(model.anonymizationSettings.profileID(for: .summary), owner.id)
+        XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), alias.id)
+        XCTAssertEqual(model.diagramProfile?.id, "diagram")
         await model.shutdown()
     }
 
-    // MARK: - Tab layout and the shared links (AC-1, AC-2, AC-3)
-
-    func testTabsShowModeBlocksSharedLinksAndDisabledReasons() async throws {
+    func testEachTabOffersCompatibleModelsAndMarksInstalledPackages() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try await open(root)
+        let fixture = try await open(root, installAnonymizationPackage: false)
         let model = fixture.model
         let draft = SettingsDraft(model: model)
-        draft.anonymizationMode = .shared
-        draft.sharedProfileID = fixture.shared.id
-        _ = NSApplication.shared
         let (hosting, window) = host(ModelSettings(model: model, draft: draft), width: 900, height: 1700)
         defer { window.close() }
-        try await settle(hosting)
 
-        // Recordings tab: the shared-model link replaces the summary picker.
-        XCTAssertNotNil(findElement("settings.models.sharedSummary", in: hosting))
-        XCTAssertTrue(try element("settings.models.sharedSummary.configureShared", in: hosting).accessibilityPerformPress?() ?? false)
-        try await settle(hosting)
-        XCTAssertEqual(model.settingsTab, .anonymization)
-        XCTAssertEqual(nonPullDownPopups(in: hosting).count, 1)
+        func menuItem(_ id: String) -> NSMenuItem? {
+            nonPullDownPopups(in: hosting).compactMap { popup in
+                popup.menu?.items.first { ($0.representedObject as? String) == id }
+            }.first
+        }
+        func installed(_ item: NSMenuItem) -> Bool {
+            (item.attributedTitle?.string ?? item.title).contains(L10n.text("Установлена"))
+        }
 
-        // Anonymization tab: the mode switch, the shared picker with disabled
-        // incompatible entries and the installation state.
-        XCTAssertNotNil(findElement("settings.anonymization.mode", in: hosting))
-        XCTAssertNotNil(findElement("settings.anonymization.sharedProfile", in: hosting))
-        XCTAssertNotNil(findElement("settings.anonymization.ready.\(fixture.shared.id)", in: hosting))
-        XCTAssertNil(findElement("settings.anonymization.profile", in: hosting))
-        let sharedPopup = try XCTUnwrap(nonPullDownPopups(in: hosting).last)
-        let heavyItem = try XCTUnwrap(sharedPopup.menu?.items.first { ($0.representedObject as? String) == fixture.heavy.id })
-        XCTAssertFalse(heavyItem.isEnabled)
-        XCTAssertTrue(heavyItem.accessibilityHelp()?.contains("32 ГБ") == true)
+        let tabs: [SettingsTab] = [.recordings, .diagrams, .anonymization]
+        for tab in tabs {
+            model.settingsTab = tab
+            try await settle(hosting)
+            let multitask = try XCTUnwrap(menuItem(fixture.multitask.id))
+            XCTAssertTrue(multitask.isEnabled)
+            XCTAssertTrue(installed(multitask))
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(multitask.action), to: multitask.target, from: multitask))
+        }
 
-        // Diagrams tab: the shared-model link instead of the separate status.
-        model.settingsTab = .diagrams
-        try await settle(hosting)
-        XCTAssertNotNil(findElement("settings.diagramModels.shared", in: hosting))
-        XCTAssertNotNil(findElement("settings.diagramModels.shared.configureShared", in: hosting))
-        XCTAssertNil(findElement("settings.diagramModels.status", in: hosting))
+        XCTAssertEqual(draft.summaryModelID, fixture.multitask.id)
+        XCTAssertEqual(draft.diagramModelID, fixture.multitask.id)
+        XCTAssertEqual(draft.anonymizationProfileID, fixture.multitask.id)
+        XCTAssertEqual(model.selectedTaskModel(.summary)?.id, "summary")
+        XCTAssertEqual(model.selectedTaskModel(.diagramRecognition)?.id, "diagram")
+        XCTAssertNil(model.selectedTaskModel(.anonymization))
 
-        // Separate mode: the slot picker appears, the shared links disappear
-        // and the summary picker returns.
-        draft.anonymizationMode = .separate
-        model.settingsTab = .anonymization
-        try await settle(hosting)
-        XCTAssertNotNil(findElement("settings.anonymization.profile", in: hosting))
-        XCTAssertNil(findElement("settings.anonymization.sharedProfile", in: hosting))
-        model.settingsTab = .recordings
-        try await settle(hosting)
-        XCTAssertNil(findElement("settings.models.sharedSummary", in: hosting))
-        XCTAssertEqual(nonPullDownPopups(in: hosting).count, 2)
+        XCTAssertNil(findElement("settings.anonymization.mode", in: hosting))
+        XCTAssertNil(menuItem(fixture.nativeSummary.id))
+        let alias = try XCTUnwrap(menuItem(fixture.anonymizationAlias.id))
+        XCTAssertTrue(alias.isEnabled)
+        XCTAssertTrue(installed(alias))
+        XCTAssertFalse(installed(try XCTUnwrap(menuItem(fixture.anonymizationOnly.id))))
+        let heavy = try XCTUnwrap(menuItem(fixture.heavy.id))
+        XCTAssertFalse(heavy.isEnabled)
+        XCTAssertTrue(heavy.accessibilityHelp()?.contains("32 ГБ") == true)
         await model.shutdown()
     }
 

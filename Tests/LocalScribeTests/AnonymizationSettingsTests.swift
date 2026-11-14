@@ -51,12 +51,9 @@ final class AnonymizationSettingsTests: XCTestCase {
 
         let settings = try store.loadOrMigrate(catalog: catalog, library: library)
 
-        XCTAssertEqual(settings.modelAssignmentMode, .separate)
-        XCTAssertNil(settings.sharedProfileID)
-        XCTAssertEqual(settings.separateProfiles[ModelTask.summary.rawValue], "summary-9b")
-        XCTAssertEqual(settings.separateProfiles[ModelTask.diagramRecognition.rawValue], "diagram-vlm")
-        // The anonymization slot and the shared profile start empty.
-        XCTAssertNil(settings.separateProfiles[ModelTask.anonymization.rawValue])
+        XCTAssertEqual(settings.profileID(for: .summary), "summary-9b")
+        XCTAssertEqual(settings.profileID(for: .diagramRecognition), "diagram-vlm")
+        XCTAssertNil(settings.profileID(for: .anonymization))
         XCTAssertEqual(settings.dataTypes, ["Имена и фамилии", "Телефоны", "Адреса электронной почты", "Почтовые адреса"])
         // The record is persisted and the old selection file is untouched.
         XCTAssertTrue(FileManager.default.fileExists(atPath: store.url.path))
@@ -70,7 +67,7 @@ final class AnonymizationSettingsTests: XCTestCase {
         let (catalog, library, _) = try previousState(modelsRoot: modelsRoot)
         let opened = try AnonymizationBootstrap.open(root: root, catalog: catalog, library: library)
         XCTAssertTrue(opened.settingsCreated)
-        XCTAssertEqual(opened.settings.modelAssignmentMode, .separate)
+        XCTAssertEqual(opened.settings.profileID(for: .summary), "summary-9b")
         // The archive is the item-2 storage: empty with the system group.
         let archiveCatalog = try opened.repository.loadCatalog()
         XCTAssertEqual(archiveCatalog.groups.map(\.id), [AnonymizationGroup.systemID])
@@ -94,9 +91,59 @@ final class AnonymizationSettingsTests: XCTestCase {
         let currentCatalog = ModelCatalog(models: [try makeProfile(id: "diagram-vlm", role: .diagram, modelsRoot: modelsRoot)])
         let settings = try AnonymizationSettingsStore(root: root).loadOrMigrate(catalog: currentCatalog, library: library)
 
-        XCTAssertNil(settings.separateProfiles[ModelTask.summary.rawValue])
-        XCTAssertNil(settings.separateProfiles[ModelTask.diagramRecognition.rawValue])
-        XCTAssertTrue(settings.separateProfiles.isEmpty)
+        XCTAssertTrue(settings.profilesByTask.isEmpty)
+    }
+
+    func testLegacySharedRecordMigratesEffectiveAssignmentsAndSavesIndependentChoices() throws {
+        let (root, modelsRoot) = try makeRoot()
+        let (catalog, library, _) = try previousState(modelsRoot: modelsRoot)
+        let store = AnonymizationSettingsStore(root: root)
+        let legacy: [String: Any] = [
+            "schemaVersion": 1,
+            "modelAssignmentMode": "SHARED",
+            "sharedProfileID": "vision-model",
+            "separateProfiles": ["SUMMARY": "summary-9b", "DIAGRAM_RECOGNITION": "diagram-vlm"],
+            "dataTypes": ["Телефоны"]
+        ]
+        try Disk.directory(store.url.deletingLastPathComponent())
+        try JSONSerialization.data(withJSONObject: legacy).write(to: store.url)
+
+        var loaded = try store.loadOrMigrate(catalog: catalog, library: library)
+        for task in ModelTask.allCases {
+            XCTAssertEqual(loaded.profileID(for: task), "vision-model")
+        }
+        XCTAssertEqual(loaded.dataTypes, ["Телефоны"])
+        loaded.setProfile("summary-9b", for: .summary)
+        try store.save(loaded)
+
+        let saved = try store.loadOrMigrate(catalog: catalog, library: library)
+        XCTAssertEqual(saved.profileID(for: .summary), "summary-9b")
+        XCTAssertEqual(saved.profileID(for: .diagramRecognition), "vision-model")
+        XCTAssertEqual(saved.profileID(for: .anonymization), "vision-model")
+        let json = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: store.url)) as? [String: Any])
+        XCTAssertEqual(json["modelAssignmentMode"] as? String, "SEPARATE")
+        XCTAssertNil(json["sharedProfileID"])
+    }
+
+    func testLegacySeparateRecordUsesLatestNativeChoicesAndKeepsAnonymization() throws {
+        let (root, modelsRoot) = try makeRoot()
+        let (catalog, library, _) = try previousState(modelsRoot: modelsRoot)
+        let store = AnonymizationSettingsStore(root: root)
+        let legacy: [String: Any] = [
+            "schemaVersion": 1,
+            "modelAssignmentMode": "SEPARATE",
+            "sharedProfileID": "vision-model",
+            "separateProfiles": ["SUMMARY": "old-summary", "ANONYMIZATION": "text-model"],
+            "dataTypes": ["Телефоны"]
+        ]
+        try Disk.directory(store.url.deletingLastPathComponent())
+        try JSONSerialization.data(withJSONObject: legacy).write(to: store.url)
+
+        let settings = try store.loadOrMigrate(catalog: catalog, library: library)
+        XCTAssertEqual(settings.profileID(for: .summary), "summary-9b")
+        XCTAssertEqual(settings.profileID(for: .diagramRecognition), "diagram-vlm")
+        XCTAssertEqual(settings.profileID(for: .anonymization), "text-model")
+        XCTAssertEqual(try store.load(), settings)
     }
 
     // MARK: - Subsequent opens, rollback and return
@@ -107,10 +154,9 @@ final class AnonymizationSettingsTests: XCTestCase {
         let store = AnonymizationSettingsStore(root: root)
         _ = try store.loadOrMigrate(catalog: catalog, library: library)
 
-        // The user switches to the shared mode and edits the data types.
+        // The user selects an anonymization model and edits the data types.
         var saved = try XCTUnwrap(store.load())
-        saved.modelAssignmentMode = .shared
-        saved.sharedProfileID = "summary-9b"
+        saved.setProfile("text-model", for: .anonymization)
         try saved.applyDataTypes(["Внутренние номера заявок", " ", "", "Имена и фамилии"])
         try store.save(saved)
 
@@ -125,7 +171,7 @@ final class AnonymizationSettingsTests: XCTestCase {
         let reopened = try store.loadOrMigrate(catalog: catalog, library: oldLibrary)
         XCTAssertEqual(reopened, saved)
         XCTAssertEqual(reopened.dataTypes, ["Внутренние номера заявок", "Имена и фамилии"])
-        XCTAssertEqual(reopened.profileID(for: .anonymization), "summary-9b")
+        XCTAssertEqual(reopened.profileID(for: .anonymization), "text-model")
         XCTAssertEqual(reopened.profileID(for: .summary), "summary-9b")
     }
 
@@ -172,7 +218,7 @@ final class AnonymizationSettingsTests: XCTestCase {
     func testValidationRejectsDamagedVariants() throws {
         func damaged(_ mutate: (inout [String: Any]) -> Void) throws -> AnonymizationSettings {
             var base = AnonymizationSettings()
-            base.setSeparateProfile("summary-9b", for: .summary)
+            base.setProfile("summary-9b", for: .summary)
             var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(base)) as? [String: Any])
             mutate(&json)
             let settings = try JSONDecoder().decode(AnonymizationSettings.self,

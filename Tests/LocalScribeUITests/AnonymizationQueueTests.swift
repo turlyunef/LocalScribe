@@ -24,7 +24,7 @@ final class AnonymizationQueueTests: XCTestCase {
         var release: URL { root.appendingPathComponent("release") }
     }
 
-    private func fixture(_ root: URL) throws -> Fixture {
+    private func fixture(_ root: URL) async throws -> Fixture {
         var repo = try RecordingRepository(root: root)
         let executable = root.appendingPathComponent("worker.py")
         // The process fixture serves all three job kinds: the audio and
@@ -146,9 +146,12 @@ final class AnonymizationQueueTests: XCTestCase {
         addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
         let model = AppModel(repository: repo, startServices: false, workerExecutable: executable,
                              userDefaults: defaults, catalog: catalog)
-        for profile in profiles { model.modelLibrary.installed(profile, catalog: catalog) }
-        try model.modelLibrary.select(profiles[0], catalog: catalog)
-        model.modelsReady = true
+        var library = ModelLibrary()
+        for profile in profiles { library.installed(profile, catalog: catalog) }
+        try library.select(profiles[0], catalog: catalog)
+        try library.save(at: repo.models)
+        await model.verifyModels()
+        XCTAssertTrue(model.modelsReady)
         XCTAssertNotNil(model.activeCatalog)
         return Fixture(repository: repo, catalog: catalog, model: model, anon: anon, anonB: anonB, root: root)
     }
@@ -197,7 +200,7 @@ final class AnonymizationQueueTests: XCTestCase {
     /// before an admission re-check.
     private func saveAssignment(_ fixture: Fixture, profile: ModelProfile) async throws {
         var settings = fixture.model.anonymizationSettings
-        settings.setSeparateProfile(profile.id, for: .anonymization)
+        settings.setProfile(profile.id, for: .anonymization)
         try AnonymizationSettingsStore(root: fixture.repository.root).save(settings)
         await fixture.model.reloadAnonymizationState()
     }
@@ -228,7 +231,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testWaitingCardsEnterFIFOInImportOrderWhenModelBecomesReady() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         let first = try await importCard(fixture, name: "first", text: "Первый отчёт Анна Петрова")
         let second = try await importCard(fixture, name: "second", text: "Второй отчёт")
@@ -272,7 +275,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testRecordingDiagramAndTextRunSequentiallyAndTextPublishesFullResult() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         let recording = try completedRecording(fixture.repository, title: "Запись")
@@ -305,7 +308,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testCancelTouchesOnlyItsAttemptAndFailureKeepsSafeReasonAndAllowsRetry() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         let first = try await importCard(fixture, name: "first", text: "Первый отчёт Анна Петрова")
@@ -349,7 +352,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testRetryConsentBoundToVersionAndStaleCompletionKeepsCurrentRightText() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         let id = try await importCard(fixture, name: "Отчёт", text: "Отчёт: Анна Петрова позвонила.")
@@ -402,7 +405,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testRetryWaitingForModelDropsSnapshotAndAdmissionTakesLastSavedSource() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         let original = "Анна Петрова позвонила утром."
         let id = try await importCard(fixture, name: "Отчёт", text: original)
@@ -434,7 +437,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testRunUsesLastSavedDataTypesBeforeStartAndFreezesThemForTheRun() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         let waiting = try await importCard(fixture, name: "waiting", text: "Ожидает модель: Анна Петрова")
         // A type list saved while the card waits for the model.
@@ -467,7 +470,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testSourceStaysReadableInQueueAndRunningAndEditableAfterEachOutcome() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         let running = try await importCard(fixture, name: "running", text: "Обработка: Анна Петрова")
@@ -507,7 +510,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testRestartInterruptsQueueAndRunKeepsResultsAndWaitingResumes() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         let done = try await importCard(fixture, name: "done", text: "Готово: Анна Петрова")
@@ -562,7 +565,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testAdmissionMeasuresRunTextInUTF8AndRecordsBothByteNumbers() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         model.inputLimits = AnonymizationInputLimit(overrides: [fixture.anon.id: 100])
         try await assign(fixture, profile: fixture.anon)
@@ -594,7 +597,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testQueuedJobUsesCurrentAssignmentAndRemovalMovesWaitingBackAndKeepsActivePinned() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         let active = try await importCard(fixture, name: "active", text: "Активное: Анна Петрова")
@@ -646,7 +649,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testCancelAfterArtifactWrittenKeepsPreviousResultUnpublished() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         // A first successful attempt establishes the published result.
@@ -683,7 +686,7 @@ final class AnonymizationQueueTests: XCTestCase {
     func testCorruptResultFailsAttemptAndKeepsPreviousResultIntact() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let fixture = try fixture(root)
+        let fixture = try await fixture(root)
         let model = fixture.model
         try await assign(fixture, profile: fixture.anon)
         let id = try await importCard(fixture, name: "Отчёт", text: "Отчёт: Анна Петрова позвонила.")

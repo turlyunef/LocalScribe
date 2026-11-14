@@ -140,9 +140,7 @@ actor DiagramEngine {
         do { catalog = try Disk.read(ModelCatalog.self, at: catalogURL) }
         catch { throw ScribeError.message("Не удалось прочитать каталог моделей") }
         guard catalog.schemaVersion == 1 else { throw ScribeError.message("Несовместимая версия каталога моделей") }
-        // A shared-mode run may pin a task-qualified profile of another catalog
-        // purpose (the shared model serves three tasks); the pinned identity —
-        // id, revision and files — is unchanged, so the run hash still matches.
+        // A run may pin a task-qualified profile of another catalog role.
         let matches = catalog.models.filter { $0.id == info.modelID && ($0.purpose == .diagram || $0.supports(.diagramRecognition)) }
         guard matches.count == 1 else { throw ScribeError.message("Закреплённая модель схем недоступна в каталоге") }
         let profile = matches[0]
@@ -150,10 +148,9 @@ actor DiagramEngine {
             throw ScribeError.message("Ревизии или SHA-256 модели схем не совпадают с заданием")
         }
         try ModelHardware.current.requireCompatibility(for: profile)
-        // Full size and SHA verification before any SDK load, like the audio pipeline.
-        try profile.validate(at: models)
+        let folder = try catalog.verifiedModelFolder(for: profile, at: models)
         self.item = item; self.manifest = manifest; self.info = info
-        self.recognizer = makeRecognizer(models.appendingPathComponent(info.modelID))
+        self.recognizer = makeRecognizer(folder)
         self.emit = emit
     }
 
