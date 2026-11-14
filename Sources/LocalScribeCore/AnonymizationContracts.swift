@@ -496,6 +496,7 @@ extension AnonymizationResult {
         for warning in warnings {
             try warning.validate(input: input, generatedScalarCount: generatedScalars,
                                  importedNameScalarCount: importedNameScalarCount,
+                                 generatedNameScalarCount: downloadNameStem.unicodeScalars.count,
                                  currentTextScalarCount: currentScalars)
         }
     }
@@ -511,7 +512,7 @@ extension AnonymizationResult {
 
 extension AnonymizationWarning {
     func validate(input: RunInput, generatedScalarCount: Int, importedNameScalarCount: Int,
-                  currentTextScalarCount: Int) throws {
+                  generatedNameScalarCount: Int, currentTextScalarCount: Int) throws {
         switch kind {
         case .doubtfulFragment:
             guard let target, let inputRange, let generatedRange, dataType == nil else {
@@ -526,7 +527,7 @@ extension AnonymizationWarning {
                 }
             case .importedName:
                 guard inputRange.isValid(withinScalarCount: importedNameScalarCount),
-                      generatedRange.isValid(withinScalarCount: importedNameScalarCount),
+                      generatedRange.isValid(withinScalarCount: generatedNameScalarCount),
                       reviewRange == nil else {
                     throw ScribeError.message("Диапазон предупреждения имени выходит за границы имени")
                 }

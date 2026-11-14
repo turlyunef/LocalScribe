@@ -234,7 +234,7 @@ enum AnonymizationAssembly {
             for span in spans where span.range.overlaps(replacement.range) {
                 let spanSwallowed = span.range.lowerBound >= replacement.range.lowerBound
                     && span.range.upperBound <= replacement.range.upperBound
-                if spanSwallowed { continue } // the whole construct is replaced
+                if spanSwallowed && span.range != replacement.range { continue }
                 let insideSpan = replacement.range.lowerBound >= span.range.lowerBound
                     && replacement.range.upperBound <= span.range.upperBound
                 guard insideSpan, representation == nil else { throw AnonymizationAssemblyError.unrepresentable }
@@ -275,7 +275,8 @@ enum AnonymizationAssembly {
             let touched = originalRanges.contains { $0.overlaps(span.range) }
             guard touched else { continue }
             let swallowed = originalRanges.contains { replacement in
-                span.range.lowerBound >= replacement.lowerBound && span.range.upperBound <= replacement.upperBound
+                span.range != replacement && span.range.lowerBound >= replacement.lowerBound
+                    && span.range.upperBound <= replacement.upperBound
             }
             guard !swallowed else { continue } // the construct itself was replaced
             let start = generatedBoundary(span.range.lowerBound, originalRanges: originalRanges, generatedRanges: generatedRanges)

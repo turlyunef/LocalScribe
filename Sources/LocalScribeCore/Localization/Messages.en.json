@@ -435,6 +435,7 @@
   "Определяем участников": "Identifying Speakers",
   "Оригинал не совпадает с незавершённым заданием схемы": "The original does not match the pending diagram job.",
   "Оригинал не соответствует фрагментам записи": "The original does not match the recording fragments.",
+  "Модель вернула некорректный ответ обезличивания": "The anonymization model returned an invalid answer.",
   "Ответ модели обезличивания оборван": "The anonymization model answer was truncated.",
   "Ответ модели оборван — повторите распознавание": "The model response was cut off. Run recognition again.",
   "Ответ модели превышает допустимый размер %1$@ КБ": "The model response exceeds the %1$@ KB limit.",

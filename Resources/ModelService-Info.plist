@@ -3,7 +3,7 @@
 <key>CFBundleExecutable</key><string>LocalScribeModelService</string>
 <key>CFBundleName</key><string>LocalScribeModelService</string>
 <key>CFBundlePackageType</key><string>XPC!</string>
-<key>CFBundleVersion</key><string>27</string>
+<key>CFBundleVersion</key><string>28</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>XPCService</key><dict><key>ServiceType</key><string>Application</string></dict>
 </dict></plist>

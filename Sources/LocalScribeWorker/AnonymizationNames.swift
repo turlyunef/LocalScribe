@@ -43,8 +43,10 @@ enum AnonymizationNames {
     /// Analyzes «Имя Фамилия». Returns nil when the fragment is not a
     /// two-word capitalized Cyrillic pair with recognized endings — those
     /// values keep their raw form as the substitution key and never decline.
-    static func analyze(_ fragment: String) -> Analysis? {
-        let parts = fragment.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+    static func analyze(_ fragment: String, legacy: Bool = false) -> Analysis? {
+        let parts = legacy
+            ? fragment.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
+            : fragment.split(whereSeparator: \.isWhitespace).map(String.init)
         guard parts.count == 2 else { return nil }
         let first = parts[0], last = parts[1]
         guard isCyrillicWord(first), isCyrillicWord(last),
@@ -56,7 +58,8 @@ enum AnonymizationNames {
         // Feminine surnames drop their two-scalar adjectival endings
         // («Заречной» → «Заречн») so hard and soft forms unify on one key.
         func feminineCanonical(_ stem1: String, _ stem2: String) -> String { stem1 + "а " + stem2 + "а" }
-        func masculineCanonical(_ stem1: String, _ stem2: String) -> String { (normalizeMaleFirst(stem1) ?? stem1) + " " + stem2 }
+        func maleNominative(_ stem: String) -> String? { normalizeMaleFirst(stem, legacy: legacy) }
+        func masculineCanonical(_ stem1: String, _ stem2: String) -> String { (maleNominative(stem1) ?? stem1) + " " + stem2 }
         func drop(_ word: String, _ scalars: Int) -> String { String(word.unicodeScalars.dropLast(scalars)) }
         func feminineSurnameStem(_ word: String) -> String {
             for suffix in ["ая", "яя", "ой", "ей", "ую", "юю"] where word.hasSuffix(suffix) { return drop(word, 2) }
@@ -90,7 +93,7 @@ enum AnonymizationNames {
             if first.hasSuffix("а") || first.hasSuffix("я") {
                 // «Анна Петрова» (feminine nominative) vs «Ивана Соколова»
                 // (masculine genitive): the dictionary decides, feminine wins ties.
-                if let name = normalizeMaleFirst(firstStem) {
+                if let name = maleNominative(firstStem) {
                     return Analysis(canonical: name + " " + surnameStem, nameCase: .genitive, feminine: false)
                 }
                 return Analysis(canonical: feminineCanonical(firstStem, surnameStem), nameCase: .nominative, feminine: true)
@@ -100,7 +103,7 @@ enum AnonymizationNames {
                 // a «Никита»-type male name («Никиту Соколова»); the feminine
                 // accusative takes «у» endings on both words and never
                 // reaches this branch.
-                if let name = normalizeMaleFirst(firstStem) {
+                if let name = maleNominative(firstStem) {
                     return Analysis(canonical: name + " " + surnameStem, nameCase: .accusative, feminine: false)
                 }
                 return Analysis(canonical: feminineCanonical(firstStem, surnameStem), nameCase: .accusative, feminine: true)
@@ -117,7 +120,7 @@ enum AnonymizationNames {
             // output endings coincide either way.
             let surnameStem = feminineSurnameStem(last)
             let firstStem = drop(first, 1)
-            if let name = normalizeMaleFirst(firstStem) {
+            if let name = maleNominative(firstStem) {
                 return Analysis(canonical: name + " " + surnameStem, nameCase: .dative, feminine: false)
             }
             return Analysis(canonical: feminineCanonical(firstStem, surnameStem), nameCase: .accusative, feminine: true)
@@ -133,10 +136,14 @@ enum AnonymizationNames {
             return Analysis(canonical: masculineCanonical(drop(first, 1), last), nameCase: .dative, feminine: false)
         }
         if first.hasSuffix("ом") || first.hasSuffix("ем") || first.hasSuffix("ым") || first.hasSuffix("им") {
-            return Analysis(canonical: masculineCanonical(drop(first, 2), last), nameCase: .instrumental, feminine: false)
+            let stem = drop(last, 2)
+            let surname = !legacy && last.hasSuffix("ым") && ["ов", "ев", "ин", "ын"].contains(where: stem.hasSuffix) ? stem : last
+            return Analysis(canonical: masculineCanonical(drop(first, 2), surname), nameCase: .instrumental, feminine: false)
         }
         if first.hasSuffix("е") {
-            return Analysis(canonical: masculineCanonical(drop(first, 1), last), nameCase: .prepositional, feminine: false)
+            let stem = drop(last, 1)
+            let surname = !legacy && last.hasSuffix("е") && ["ов", "ев", "ин", "ын"].contains(where: stem.hasSuffix) ? stem : last
+            return Analysis(canonical: masculineCanonical(drop(first, 1), surname), nameCase: .prepositional, feminine: false)
         }
         // Bare consonant endings on both words: nominative masculine.
         return Analysis(canonical: masculineCanonical(first, last), nameCase: .nominative, feminine: false)
@@ -144,10 +151,12 @@ enum AnonymizationNames {
 
     /// The nominative form of a known male name: the word itself, or a stem
     /// completed with «а»/«я» («Никит» → «Никита»); nil for everything else.
-    private static func normalizeMaleFirst(_ stemOrWord: String) -> String? {
+    private static func normalizeMaleFirst(_ stemOrWord: String, legacy: Bool) -> String? {
         if maleFirstNames.contains(stemOrWord) { return stemOrWord }
         if maleFirstNames.contains(stemOrWord + "а") { return stemOrWord + "а" }
         if maleFirstNames.contains(stemOrWord + "я") { return stemOrWord + "я" }
+        if !legacy, maleFirstNames.contains(stemOrWord + "й") { return stemOrWord + "й" }
+        if !legacy, maleFirstNames.contains(stemOrWord + "ь") { return stemOrWord + "ь" }
         return nil
     }
 

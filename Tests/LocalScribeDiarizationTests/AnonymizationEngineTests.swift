@@ -99,69 +99,73 @@ private final class ScriptedValueSource: AnonymizationValueSourcing, @unchecked 
 }
 
 final class AnonymizationEngineTests: XCTestCase {
-    func testModelFragmentsResolveToExactStandaloneScalarRanges() throws {
-        let source = "👩‍💻 Anna, Annabelle\r\n\r\nAnna: North\nAnna: North\nMain Street\n_Anna_"
-        let response = """
-        {"schemaVersion":1,"candidates":[
-            {"dataType":"name","fragment":"Anna"},
-            {"dataType":"place","line":4,"fragment":"North\\nMain Street","doubtful":true},
-            {"dataType":"place","line":3,"fragment":"North\\nMain Street"},
-            {"dataType":"place","line":0,"fragment":"North"},
-            {"dataType":"place","fragment":"Missing"},
-            {"dataType":"unknown","fragment":"Main Street"}
-        ]}
-        """
-        let answer = try MLXAnonymizationRecognizer.parse(response, text: source, dataTypes: ["name", "place"])
+    func testModelFragmentsResolveToExactOccurrencesAndMultilineRanges() throws {
+        let source = "👩‍💻 Роман прочитал «Роман».\r\nАдрес: North\nMain Street"
+        let response = #"{"schemaVersion":1,"status":"ok","matches":[{"line":1,"fragment":"Роман","occurrence":1,"doubtful":false},{"line":2,"fragment":"North\nMain Street","doubtful":true}]}"#
+        let answer = try MLXAnonymizationRecognizer.parse(response, text: source, dataType: "name")
         let scalars = Array(source.unicodeScalars)
-        XCTAssertEqual(answer.candidates.map(\.fragment), ["Anna", "Anna", "Anna", "Anna", "North\nMain Street"])
-        XCTAssertEqual(answer.candidates.map(\.start), [4, 23, 35, 60, 41])
-        XCTAssertEqual(answer.candidates.map(\.doubtful), [false, false, false, false, true])
+        XCTAssertEqual(answer.candidates.map(\.fragment), ["Роман", "North\nMain Street"])
+        XCTAssertEqual(answer.candidates.first?.start, 4)
+        XCTAssertEqual(answer.candidates.map(\.dataType), ["name", "name"])
+        XCTAssertEqual(answer.candidates.map(\.doubtful), [false, true])
+        XCTAssertFalse(answer.hasUnanchoredMatches)
         for candidate in answer.candidates {
-            XCTAssertEqual(String(String.UnicodeScalarView(scalars[Int(candidate.start)..<Int(candidate.end)])),
-                           candidate.fragment)
+            let slice = scalars[Int(candidate.start)..<Int(candidate.end)]
+            XCTAssertEqual(String(String.UnicodeScalarView(slice)), candidate.fragment)
         }
     }
 
-    /// The model regularly drops quotation marks from a company name
-    /// («ООО Ромашка» for ООО «Ромашка»); the verbatim miss is anchored by a
-    /// unique quote-insensitive match, and the fragment names the actual text
-    /// span so the engine's verification still passes.
-    func testQuoteStrippedFragmentRecoversActualSpan() throws {
-        let source = "Работа: ООО «Ромашка» и Ростелеком ИТ."
-        let response = """
-        {"schemaVersion":1,"candidates":[
-            {"dataType":"company","fragment":"ООО Ромашка"},
-            {"dataType":"company","fragment":"Ростелеком ИТ"}
-        ]}
-        """
-        let answer = try MLXAnonymizationRecognizer.parse(response, text: source, dataTypes: ["company"])
-        XCTAssertEqual(answer.candidates.map(\.fragment), ["ООО «Ромашка»", "Ростелеком ИТ"])
-        let scalars = Array(source.unicodeScalars)
-        for candidate in answer.candidates {
-            XCTAssertEqual(String(String.UnicodeScalarView(scalars[Int(candidate.start)..<Int(candidate.end)])),
-                           candidate.fragment)
+    func testModelResponseDistinguishesEmptyUnknownAndUnverified() throws {
+        let text = "Роман прочитал «Роман»."
+        XCTAssertThrowsError(try MLXAnonymizationRecognizer.parse("{}", text: text, dataType: "name"))
+        let empty = #"{"schemaVersion":1,"status":"ok","matches":[]}"#
+        XCTAssertEqual(try MLXAnonymizationRecognizer.parse(empty, text: text, dataType: "name"), .init())
+        let unknown = #"{"schemaVersion":1,"status":"unknown_type","matches":[]}"#
+        XCTAssertEqual(try MLXAnonymizationRecognizer.parse(unknown, text: text, dataType: "name").uninterpretedTypes, ["name"])
+
+        let badMatches = [
+            #"{"line":1,"fragment":"Роман","doubtful":false}"#,
+            #"{"line":1,"fragment":"Роман","occurrence":3,"doubtful":false}"#,
+            #"{"line":0,"fragment":"Роман","doubtful":false}"#,
+            #"{"line":1,"fragment":"Иван","doubtful":false}"#,
+        ]
+        for match in badMatches {
+            let response = #"{"schemaVersion":1,"status":"ok","matches":["# + match + "]}"
+            let answer = try MLXAnonymizationRecognizer.parse(response, text: text, dataType: "name")
+            XCTAssertTrue(answer.candidates.isEmpty)
+            XCTAssertTrue(answer.hasUnanchoredMatches)
         }
-        // A quoted fragment against a text without quotes anchors the bare
-        // span; an absent value stays dropped.
-        let odd = try MLXAnonymizationRecognizer.parse(
-            #"{"schemaVersion":1,"candidates":[{"dataType":"company","fragment":"«Ромашка»"}]}"#,
-            text: "Партнёр: Ромашка.", dataTypes: ["company"])
-        XCTAssertEqual(odd.candidates.map(\.fragment), ["Ромашка"])
-        let missing = try MLXAnonymizationRecognizer.parse(
-            #"{"schemaVersion":1,"candidates":[{"dataType":"company","fragment":"Нет такой"}]}"#,
-            text: "Партнёр: Ромашка.", dataTypes: ["company"])
-        XCTAssertTrue(missing.candidates.isEmpty)
     }
 
-    /// A recovered anchor must not extend into a word: the quote-insensitive
-    /// fallback keeps the word-boundary rule of the exact match.
-    func testRecoveredAnchorRespectsWordBoundaries() throws {
+    func testQuoteStrippedFragmentRecoversActualSpanOnReportedLine() throws {
+        let source = "ООО Ромашка\nООО «Ромашка»\nОООО «Ромашка»"
         let response = """
-        {"schemaVersion":1,"candidates":[{"dataType":"company","fragment":"ООО Ромашка"}]}
+        {"schemaVersion":1,"status":"ok","matches":[
+            {"line":1,"fragment":"ООО Ромашка","doubtful":false},
+            {"line":2,"fragment":"ООО Ромашка","doubtful":false},
+            {"line":3,"fragment":"ООО Ромашка","doubtful":false}
+        ]}
         """
-        let answer = try MLXAnonymizationRecognizer.parse(response, text: "Не компания: ООООО «Ромашка».",
-                                                          dataTypes: ["company"])
-        XCTAssertTrue(answer.candidates.isEmpty, "совпадение внутри слова не закрепляется")
+        let answer = try MLXAnonymizationRecognizer.parse(response, text: source, dataType: "company")
+        XCTAssertEqual(answer.candidates.map(\.fragment), ["ООО Ромашка", "ООО «Ромашка»"])
+        XCTAssertTrue(answer.hasUnanchoredMatches)
+    }
+
+    func testStructuredDetectionDistinguishesVerifiedAndAmbiguousMatches() throws {
+        let email = try XCTUnwrap(AnonymizationStructuredDetection.scan(
+            text: "🧪 [Почта](mailto:anna.p+tag@example.org), a@b@c.de", dataType: Names.emailType))
+        XCTAssertEqual(email.candidates.map(\.fragment), ["anna.p+tag@example.org"])
+        XCTAssertEqual(email.candidates.first?.start, 17)
+        XCTAssertTrue(email.needsModel)
+        XCTAssertNil(AnonymizationStructuredDetection.scan(text: "anna@example.org", dataType: "Рабочие email"))
+
+        let text = "Телефон: +7 (900) 555-01-02\nЗаказ: 1234567890\nДата: 12.11.2026\n<a href=\"tel:5550102\">"
+        let phones = try XCTUnwrap(AnonymizationStructuredDetection.scan(text: text, dataType: "Телефоны"))
+        XCTAssertEqual(phones.candidates.map(\.fragment), ["+7 (900) 555-01-02", "5550102"])
+        XCTAssertFalse(phones.needsModel)
+        let ambiguous = try XCTUnwrap(AnonymizationStructuredDetection.scan(text: "9005550102", dataType: "Телефоны"))
+        XCTAssertTrue(ambiguous.candidates.isEmpty)
+        XCTAssertTrue(ambiguous.needsModel)
     }
 
     private enum Names {
@@ -661,11 +665,45 @@ final class AnonymizationEngineTests: XCTestCase {
                 XCTAssertTrue(atWhitespace, "разрез проходит по границе слов")
             }
         }
-        // The first paragraph fits entirely, so the first cut follows its
-        // blank line rather than a space inside the oversized paragraph.
-        if windows.count > 1 {
-            XCTAssertEqual(scalars[windows[1].lowerBound - 1], "\n", "первый разрез — по пустой строке")
-        }
+        XCTAssertGreaterThanOrEqual(windows[0].count, 800, "ранний абзац не создаёт короткое окно")
+        let first = AnonymizationWindows.withContext(windows[0], scalarCount: scalars.count)
+        XCTAssertGreaterThan(first.upperBound, windows[1].lowerBound)
+    }
+
+    func testWindowContextKeepsNameAcrossABoundary() async throws {
+        let prefix = String(repeating: "Материал ", count: 162) + String(repeating: " ", count: 37)
+        let text = prefix + "Анна Петрова. " + String(repeating: "Продолжение ", count: 30)
+        let recognizer = ScriptedRecognizer(markers: [.init(Names.personType, "Анна Петрова")])
+        let (engine, _) = try makeEngine(text: text, recognizer: recognizer)
+        let outcome = try await engine.run()
+        XCTAssertEqual(outcome.artifact.result.bodyReplacementCount, 1)
+        XCTAssertFalse(outcome.artifact.result.text.text.contains("Анна Петрова"))
+    }
+
+    func testMaleObliqueFormsAndCompanyUseAppropriateSubstitutions() async throws {
+        let type = "Названия компаний"
+        let text = "Алексей Соколов и Алексея Соколова. Михаил Соколов и Михаилом Соколовым. Компания Северный Ветер."
+        let recognizer = ScriptedRecognizer(markers: [
+            .init(Names.personType, "Алексей Соколов"), .init(Names.personType, "Алексея Соколова"),
+            .init(Names.personType, "Михаил Соколов"), .init(Names.personType, "Михаилом Соколовым"),
+            .init(type, "Северный Ветер"),
+        ])
+        let (engine, _) = try makeEngine(text: text, dataTypes: [Names.personType, type], recognizer: recognizer)
+        let outcome = try await engine.run()
+        XCTAssertEqual(outcome.artifact.result.bodyReplacementCount, 5)
+        XCTAssertEqual(outcome.artifact.substitutions.count, 3)
+        let company = try XCTUnwrap(outcome.artifact.substitutions.first { $0.dataType == type })
+        XCTAssertEqual(company.sourceValue, "Северный Ветер")
+        XCTAssertTrue(company.substituteValue.hasPrefix("X-"))
+    }
+
+    func testWholeMarkdownDestinationEncodesPhoneReplacement() throws {
+        let source = "[Позвонить](+79001234567)"
+        let scalars = Array(source.unicodeScalars)
+        let start = try XCTUnwrap(scalars.firstIndex(of: "+"))
+        let output = try AnonymizationAssembly.assemble(scalars: scalars,
+            replacements: [.init(range: start..<(scalars.count - 1), text: "+7 900 555-01-02")], format: .markdown)
+        XCTAssertEqual(output.text, "[Позвонить](+7%20900%20555-01-02)")
     }
 
     func testRussianNameAnalysisAndDeclension() {

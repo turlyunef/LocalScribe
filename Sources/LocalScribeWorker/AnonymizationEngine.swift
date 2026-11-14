@@ -18,14 +18,6 @@ actor AnonymizationEngine {
         var metrics: [String: Double]
     }
 
-    /// Keyed rendering info of one substitution: the fictional base value and
-    /// how it must be declined per occurrence.
-    private struct KeyInfo {
-        var substitute: String
-        var feminine: Bool
-        var isRussianName: Bool
-    }
-
     let attemptURL: URL
     let input: AnonymizationAttemptInput
     private let recognizer: AnonymizationRecognizing
@@ -179,14 +171,18 @@ actor AnonymizationEngine {
         // 1. Detection over bounded windows; a failed window fails the whole
         //    attempt — a partial result must never be published.
         var bodyCandidates: [AnonymizationSpanCandidate] = []
+        var unverifiedBody: [Range<Int>] = []
+        var unverifiedName: [Range<Int>] = []
+        var modelCallCount = 0
         var reportedUninterpreted = Set<String>()
         let bodyWindows = AnonymizationWindows.ranges(in: sourceScalars)
         for (index, window) in bodyWindows.enumerated() {
             try Task.checkCancellation()
-            if index == 0 { emit("progress", "Загружаем модель…", nil) }
             emit("progress", "Обезличиваем текст — часть \(index + 1) из \(bodyWindows.count)", nil)
             let verified = try await detect(in: window, scalars: sourceScalars, types: types)
             bodyCandidates.append(contentsOf: verified.candidates)
+            if verified.unverified { unverifiedBody.append(window) }
+            modelCallCount += verified.modelCallCount
             reportedUninterpreted.formUnion(verified.uninterpreted)
         }
         emit("progress", "Обрабатываем имя файла…", nil)
@@ -195,6 +191,8 @@ actor AnonymizationEngine {
             try Task.checkCancellation()
             let verified = try await detect(in: window, scalars: nameScalars, types: types)
             nameCandidates.append(contentsOf: verified.candidates)
+            if verified.unverified { unverifiedName.append(window) }
+            modelCallCount += verified.modelCallCount
             reportedUninterpreted.formUnion(verified.uninterpreted)
         }
         try Task.checkCancellation()
@@ -210,50 +208,62 @@ actor AnonymizationEngine {
             historyByKey[Self.key(dataType: entry.dataType, canonical: entry.sourceValue)] = entry
             substitutesByType[entry.dataType, default: []].insert(entry.substituteValue)
         }
-        var keyInfo: [String: KeyInfo] = [:]
+        let allItems = (bodyPlan.replacements + namePlan.replacements).map { item in
+            (item: item, name: Self.nameAnalysis(item))
+        }
+        let itemsByKey = Dictionary(grouping: allItems) { entry in
+            Self.key(dataType: entry.item.dataType, canonical: entry.name?.canonical ?? entry.item.value)
+        }
+        var assigned: [String: String] = [:]
         var newSubstitutions: [AutomaticSubstitution] = []
         func prepared(_ items: [AnonymizationReplacementPlan.Item]) throws -> [AnonymizationAssemblyReplacement] {
             var assembled: [AnonymizationAssemblyReplacement] = []
             for item in items {
-                let analysis = AnonymizationNames.analyze(item.value)
+                let analysis = Self.nameAnalysis(item)
                 let canonical = analysis?.canonical ?? item.value
                 let key = Self.key(dataType: item.dataType, canonical: canonical)
-                let info: KeyInfo
-                if let existing = keyInfo[key] {
-                    info = existing
-                } else if let history = historyByKey[key] {
-                    let canonicalAnalysis = AnonymizationNames.analyze(history.sourceValue)
-                    info = KeyInfo(substitute: history.substituteValue,
-                                   feminine: canonicalAnalysis?.feminine ?? analysis?.feminine ?? false,
-                                   isRussianName: canonicalAnalysis != nil)
-                    keyInfo[key] = info
+                let base: String
+                if let existing = assigned[key] {
+                    base = existing
                 } else {
-                    let shape: AnonymizationValueShape = analysis
-                        .map { AnonymizationValueShape.russianName(feminine: $0.feminine) }
-                        ?? .of(item.value)
-                    // The value source already regenerates on collisions; the
-                    // bounded retry keeps the contract enforced even for an
-                    // injected source that returns an occupied value.
-                    let occupied = substitutesByType[item.dataType] ?? []
-                    var base: String?
-                    for _ in 0..<8 {
-                        let candidate = valueSource.value(for: canonical, shape: shape, occupied: occupied)
-                        if candidate != canonical, !occupied.contains(candidate) { base = candidate; break }
+                    let forms = itemsByKey[key] ?? []
+                    // Old runs may have stored an inflected surname in the key.
+                    // Look up the old keys from the current occurrences without
+                    // rewriting the archived substitution history.
+                    let previous = historyByKey[key] ?? forms.lazy.compactMap { form in
+                        let legacy = AnonymizationNames.analyze(form.item.value, legacy: true)?.canonical
+                        let legacyKey = Self.key(dataType: item.dataType, canonical: legacy ?? form.item.value)
+                        return historyByKey[legacyKey]
+                    }.first
+                    func differsFromSource(_ candidate: String) -> Bool {
+                        forms.allSatisfy { Self.render(candidate, for: $0.name) != $0.item.value }
                     }
-                    guard let base else { throw ScribeError.message("Не удалось подобрать уникальную подстановку") }
-                    substitutesByType[item.dataType, default: []].insert(base)
-                    newSubstitutions.append(AutomaticSubstitution(dataType: item.dataType,
-                                                                  sourceValue: canonical, substituteValue: base))
-                    info = KeyInfo(substitute: base, feminine: analysis?.feminine ?? false, isRussianName: analysis != nil)
-                    keyInfo[key] = info
+                    if let previous {
+                        guard differsFromSource(previous.substituteValue) else {
+                            throw ScribeError.message("Не удалось подобрать уникальную подстановку")
+                        }
+                        base = previous.substituteValue
+                    } else {
+                        let shape = Self.valueShape(item, name: analysis)
+                        var occupied = substitutesByType[item.dataType] ?? []
+                        var usable: String?
+                        for _ in 0..<8 {
+                            let candidate = valueSource.value(for: canonical, shape: shape, occupied: occupied)
+                            if candidate != canonical, !occupied.contains(candidate), differsFromSource(candidate) {
+                                usable = candidate
+                                break
+                            }
+                            occupied.insert(candidate)
+                        }
+                        guard let usable else { throw ScribeError.message("Не удалось подобрать уникальную подстановку") }
+                        base = usable
+                        substitutesByType[item.dataType, default: []].insert(base)
+                        newSubstitutions.append(AutomaticSubstitution(dataType: item.dataType,
+                                                                      sourceValue: canonical, substituteValue: base))
+                    }
+                    assigned[key] = base
                 }
-                let rendered: String
-                if let analysis, info.isRussianName {
-                    rendered = AnonymizationNames.decline(base: info.substitute, feminine: info.feminine, to: analysis.nameCase)
-                } else {
-                    rendered = info.substitute
-                }
-                assembled.append(AnonymizationAssemblyReplacement(range: item.range, text: rendered))
+                assembled.append(AnonymizationAssemblyReplacement(range: item.range, text: Self.render(base, for: analysis)))
             }
             return assembled
         }
@@ -275,13 +285,13 @@ actor AnonymizationEngine {
         // 5. Warnings: disputed body spans, disputed name spans, then the
         //    uninterpreted wordings in their saved order.
         var warnings: [AnonymizationWarning] = []
-        for range in bodyPlan.doubtfulRanges {
-            let generated = Self.generatedRange(of: range, mapping: bodyOutput.sourceToGenerated)
+        for range in bodyPlan.doubtfulRanges + unverifiedBody {
+            let generated = Self.generatedRange(of: range, output: bodyOutput)
             warnings.append(AnonymizationWarning(kind: .doubtfulFragment, target: .body,
                 inputRange: Self.textRange(range), generatedRange: generated))
         }
-        for range in namePlan.doubtfulRanges {
-            let generated = Self.generatedRange(of: range, mapping: nameOutput.sourceToGenerated)
+        for range in namePlan.doubtfulRanges + unverifiedName {
+            let generated = Self.generatedRange(of: range, output: nameOutput)
             warnings.append(AnonymizationWarning(kind: .doubtfulFragment, target: .importedName,
                 inputRange: Self.textRange(range), generatedRange: generated))
         }
@@ -320,6 +330,8 @@ actor AnonymizationEngine {
         }
         return Outcome(artifact: artifact, metrics: [
             "windowCount": Double(bodyWindows.count),
+            "modelCallCount": Double(modelCallCount),
+            "unverifiedWindowCount": Double(unverifiedBody.count + unverifiedName.count),
             "bodyCandidateCount": Double(bodyCandidates.count),
             "nameCandidateCount": Double(nameCandidates.count),
             "bodyReplacementCount": Double(bodyReplacements.count),
@@ -330,6 +342,33 @@ actor AnonymizationEngine {
         ])
     }
 
+    private static func nameAnalysis(_ item: AnonymizationReplacementPlan.Item) -> AnonymizationNames.Analysis? {
+        switch item.dataType {
+        case AnonymizationStructuredDetection.emails, AnonymizationStructuredDetection.phones,
+             AnonymizationStructuredDetection.addresses, "Названия компаний", "Company names", "Даты", "Dates":
+            return nil
+        default:
+            return AnonymizationNames.analyze(item.value)
+        }
+    }
+
+    private static func valueShape(_ item: AnonymizationReplacementPlan.Item,
+                                   name: AnonymizationNames.Analysis?) -> AnonymizationValueShape {
+        switch item.dataType {
+        case AnonymizationStructuredDetection.emails: return .emailAddress
+        case AnonymizationStructuredDetection.phones: return .phone
+        case AnonymizationStructuredDetection.addresses:
+            return .postalAddress(russian: item.value.unicodeScalars.contains { (0x0400...0x052F).contains($0.value) })
+        case "Названия компаний", "Company names": return .generic
+        default: return name.map { .russianName(feminine: $0.feminine) } ?? .of(item.value)
+        }
+    }
+
+    private static func render(_ base: String, for name: AnonymizationNames.Analysis?) -> String {
+        guard let name else { return base }
+        return AnonymizationNames.decline(base: base, feminine: name.feminine, to: name.nameCase)
+    }
+
     private static func key(dataType: String, canonical: String) -> String {
         dataType + "\u{1}" + canonical
     }
@@ -338,9 +377,10 @@ actor AnonymizationEngine {
         LocalScribeCore.TextRange(start: UInt(range.lowerBound), end: UInt(range.upperBound))
     }
 
-    private static func generatedRange(of range: Range<Int>, mapping: [Int]) -> LocalScribeCore.TextRange {
-        let start = mapping[range.lowerBound]
-        let end = mapping[range.upperBound - 1] + 1
+    private static func generatedRange(of range: Range<Int>, output: AnonymizationAssemblyOutput) -> LocalScribeCore.TextRange {
+        let start = output.sourceToGenerated[range.lowerBound]
+        let last = output.sourceToGenerated[range.upperBound - 1]
+        let end = output.replacementRanges.first { $0.lowerBound == last }?.upperBound ?? last + 1
         return LocalScribeCore.TextRange(start: UInt(start), end: UInt(end))
     }
 
@@ -352,18 +392,25 @@ actor AnonymizationEngine {
     /// verification are dropped as recognition noise; a thrown error
     /// propagates and fails the attempt.
     private func detect(in window: Range<Int>, scalars: [Unicode.Scalar], types: [String]) async throws
-        -> (candidates: [AnonymizationSpanCandidate], uninterpreted: Set<String>) {
+        -> (candidates: [AnonymizationSpanCandidate], uninterpreted: Set<String>, unverified: Bool, modelCallCount: Int) {
+        let core = window
+        let window = AnonymizationWindows.withContext(core, scalarCount: scalars.count)
         let windowText = String(String.UnicodeScalarView(scalars[window]))
         var verified: [AnonymizationSpanCandidate] = []
         var uninterpreted: Set<String> = []
-        for type in types {
+        var seenTypes = Set<String>()
+        var unverified = false
+        var modelCallCount = 0
+        for type in types where seenTypes.insert(type).inserted {
             let answer = try await recognizer.detect(text: windowText, dataType: type)
             try Task.checkCancellation()
+            unverified = unverified || answer.hasUnanchoredMatches
+            modelCallCount += answer.modelCallCount
             for candidate in answer.candidates {
                 guard candidate.dataType == type else { continue }
-                let start = Int(candidate.start), end = Int(candidate.end)
-                guard start >= 0, start < end, end <= window.count else { continue }
-                let lower = window.lowerBound + start, upper = window.lowerBound + end
+                guard candidate.start < candidate.end, candidate.end <= window.count else { continue }
+                let lower = window.lowerBound + Int(candidate.start), upper = window.lowerBound + Int(candidate.end)
+                guard core.contains(lower) else { continue }
                 let fragment = String(String.UnicodeScalarView(scalars[lower..<upper]))
                 guard !fragment.isEmpty, fragment == candidate.fragment else { continue }
                 verified.append(AnonymizationSpanCandidate(dataType: candidate.dataType,
@@ -371,6 +418,6 @@ actor AnonymizationEngine {
             }
             if answer.uninterpretedTypes.contains(type) { uninterpreted.insert(type) }
         }
-        return (verified, uninterpreted)
+        return (verified, uninterpreted, unverified, modelCallCount)
     }
 }
