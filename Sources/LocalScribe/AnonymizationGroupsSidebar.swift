@@ -13,12 +13,9 @@ struct AnonymizationGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @ObservedObject var workspace: AnonymizationWorkspaceModel
     @ObservedObject private var search: RecordingSearch
-    @Binding private var mode: WorkspaceMode
     private let deletion: Binding<SidebarTextDeletion?>?
-    init(model: AppModel, workspace: AnonymizationWorkspaceModel, mode: Binding<WorkspaceMode>,
-         deletion: Binding<SidebarTextDeletion?>? = nil) {
+    init(model: AppModel, workspace: AnonymizationWorkspaceModel, deletion: Binding<SidebarTextDeletion?>? = nil) {
         self.model = model; self.workspace = workspace; self.search = model.anonymizationSearch
-        _mode = mode
         self.deletion = deletion
     }
     @State private var editor: GroupNameDraft?
@@ -29,17 +26,16 @@ struct AnonymizationGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SidebarWorkspaceHeader(mode: $mode) {
+            SidebarActions {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
                 SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу текстов"), identifier: "texts.groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingTextJobs)
-            } archiveActions: {
+                SidebarEmptyAction()
                 SidebarActionButton(icon: "doc.badge.plus", title: L10n.text("Загрузить файл"), identifier: "texts.import",
                                     iconVerticalOffset: 1, action: workspace.presentImportPanel)
-                SidebarEmptyAction()
             }
             RecordingSearchField(search: search, identifierPrefix: "texts", placeholder: L10n.text("Поиск по названиям"),
                                  label: L10n.text("Поиск по названиям текстов"), shortcutActive: true)

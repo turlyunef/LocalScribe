@@ -27,15 +27,16 @@ struct ContentView: View {
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             VStack(spacing: 0) {
+                WorkspaceModePicker(mode: $mode)
                 switch mode {
                 case .recordings:
-                    RecordingGroupsSidebar(model: model, mode: $mode, deletion: $deletingRecordings) {
+                    RecordingGroupsSidebar(model: model, deletion: $deletingRecordings) {
                         recordingSheet = true
                     }
                 case .diagrams:
-                    DiagramGroupsSidebar(model: model, workspace: diagramWorkspace, mode: $mode, deletion: $deletingDiagrams)
+                    DiagramGroupsSidebar(model: model, workspace: diagramWorkspace, deletion: $deletingDiagrams)
                 case .anonymization:
-                    AnonymizationGroupsSidebar(model: model, workspace: textWorkspace, mode: $mode, deletion: $deletingTexts)
+                    AnonymizationGroupsSidebar(model: model, workspace: textWorkspace, deletion: $deletingTexts)
                 }
             }.navigationSplitViewColumnWidth(min: 300, ideal: 300)
             VStack(spacing: 6) {

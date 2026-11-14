@@ -1,68 +1,61 @@
 import SwiftUI
-import AppKit
 import LocalScribeCore
 
-/// Deterministic segmented switcher for the three archive sections. The
-/// SwiftUI-bridged picker keeps its intrinsic (equal-width) size in
-/// long-lived processes and overflows the fixed header frame; the pinned
-/// intrinsic size keeps the header layout identical in every process state.
-private struct WorkspaceModePicker: NSViewRepresentable {
+/// A compact, in-sidebar version of the Settings window's toolbar tabs.
+/// Keep it above the changing sidebar content so selection can slide between tabs.
+struct WorkspaceModePicker: View {
     @Binding var mode: WorkspaceMode
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var selection
 
-    final class Control: NSSegmentedControl {
-        override var intrinsicContentSize: NSSize { NSSize(width: 216, height: 20) }
-        override func sizeToFit() { bounds.size = intrinsicContentSize }
-    }
-
-    final class Coordinator: NSObject {
-        let mode: Binding<WorkspaceMode>
-        init(mode: Binding<WorkspaceMode>) { self.mode = mode }
-
-        @objc func changed(_ sender: NSSegmentedControl) {
-            let all = WorkspaceMode.allCases
-            guard sender.selectedSegment >= 0, sender.selectedSegment < all.count else { return }
-            mode.wrappedValue = all[sender.selectedSegment]
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(WorkspaceMode.allCases) { value in
+                Button {
+                    mode = value
+                } label: {
+                    Text(value.title)
+                        .fixedSize(horizontal: true, vertical: false)
+                        .padding(.horizontal, 8)
+                        .frame(height: 28)
+                        .foregroundStyle(mode == value ? .primary : .secondary)
+                        .background {
+                            if mode == value {
+                                Capsule()
+                                    .fill(.primary.opacity(0.09))
+                                    .matchedGeometryEffect(id: "selection", in: selection)
+                            }
+                        }
+                        .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(mode == value ? .isSelected : [])
+            }
         }
-    }
-
-    func makeCoordinator() -> Coordinator { Coordinator(mode: $mode) }
-
-    func makeNSView(context: Context) -> Control {
-        let control = Control()
-        control.segmentCount = WorkspaceMode.allCases.count
-        control.controlSize = .small
-        for (index, value) in WorkspaceMode.allCases.enumerated() {
-            control.setLabel(L10n.text(value.title), forSegment: index)
-        }
-        control.target = context.coordinator
-        control.action = #selector(Coordinator.changed(_:))
-        control.setAccessibilityLabel(L10n.text("Раздел архива"))
-        return control
-    }
-
-    func updateNSView(_ control: Control, context: Context) {
-        let index = WorkspaceMode.allCases.firstIndex(of: mode) ?? 0
-        if control.selectedSegment != index { control.selectedSegment = index }
+        .font(.system(size: 13, weight: .medium))
+        .padding(4)
+        .background(.background.opacity(0.55), in: Capsule())
+        .overlay { Capsule().strokeBorder(.primary.opacity(0.12)).allowsHitTesting(false) }
+        .animation(reduceMotion ? nil : .smooth(duration: 0.22), value: mode)
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(L10n.text("Раздел архива"))
+        .accessibilityIdentifier("workspace.mode")
+        .frame(maxWidth: .infinity)
+        .padding(.horizontal, 12)
+        .padding(.top, 10)
     }
 }
 
-struct SidebarWorkspaceHeader<GroupActions: View, ArchiveActions: View>: View {
-    @Binding var mode: WorkspaceMode
-    @ViewBuilder let groupActions: () -> GroupActions
-    @ViewBuilder let archiveActions: () -> ArchiveActions
+struct SidebarActions<Actions: View>: View {
+    @ViewBuilder let actions: () -> Actions
 
     var body: some View {
         HStack(spacing: 4) {
-            WorkspaceModePicker(mode: $mode)
-                .frame(width: 216)
-                .accessibilityIdentifier("workspace.mode")
-
             Spacer(minLength: 0)
-            groupActions()
-            archiveActions()
+            actions()
         }
         .padding(.horizontal, 12)
-        .padding(.vertical, 10)
+        .padding(.vertical, 6)
     }
 }
 

@@ -244,7 +244,7 @@ final class AnonymizationWorkspaceTests: XCTestCase {
         let firstCard = try await importCard(model, name: "Первый", groupID: group.id)
         let secondCard = try await importCard(model, name: "Второй", groupID: group.id)
         let thirdCard = try await importCard(model, name: "Третий", text: "Третий текст", groupID: group.id)
-        let (view, window) = host(AnonymizationGroupsSidebar(model: model, workspace: workspace, mode: .constant(.anonymization)))
+        let (view, window) = host(AnonymizationGroupsSidebar(model: model, workspace: workspace))
         defer { window.close() }
         try await settle(view)
         // The sidebar shows the newest import first.

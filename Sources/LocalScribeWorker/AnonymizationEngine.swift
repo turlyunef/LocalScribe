@@ -344,27 +344,33 @@ actor AnonymizationEngine {
         return LocalScribeCore.TextRange(start: UInt(start), end: UInt(end))
     }
 
-    /// One window through the recognizer with local verification: exact type
-    /// wordings, scalar bounds and the verbatim fragment check. Candidates
-    /// failing verification are dropped as recognition noise; a thrown error
+    /// One window through the recognizer, one saved type wording per call:
+    /// the qualified model silently drops whole types from multi-type
+    /// answers, so each wording gets a dedicated pass and the answers merge
+    /// here. Local verification still checks exact type wordings, scalar
+    /// bounds and the verbatim fragment check. Candidates failing
+    /// verification are dropped as recognition noise; a thrown error
     /// propagates and fails the attempt.
     private func detect(in window: Range<Int>, scalars: [Unicode.Scalar], types: [String]) async throws
         -> (candidates: [AnonymizationSpanCandidate], uninterpreted: Set<String>) {
         let windowText = String(String.UnicodeScalarView(scalars[window]))
-        let answer = try await recognizer.detect(text: windowText, dataTypes: types)
-        try Task.checkCancellation()
-        let allowed = Set(types)
         var verified: [AnonymizationSpanCandidate] = []
-        for candidate in answer.candidates {
-            guard allowed.contains(candidate.dataType) else { continue }
-            let start = Int(candidate.start), end = Int(candidate.end)
-            guard start >= 0, start < end, end <= window.count else { continue }
-            let lower = window.lowerBound + start, upper = window.lowerBound + end
-            let fragment = String(String.UnicodeScalarView(scalars[lower..<upper]))
-            guard !fragment.isEmpty, fragment == candidate.fragment else { continue }
-            verified.append(AnonymizationSpanCandidate(dataType: candidate.dataType,
-                range: lower..<upper, value: fragment, doubtful: candidate.doubtful))
+        var uninterpreted: Set<String> = []
+        for type in types {
+            let answer = try await recognizer.detect(text: windowText, dataType: type)
+            try Task.checkCancellation()
+            for candidate in answer.candidates {
+                guard candidate.dataType == type else { continue }
+                let start = Int(candidate.start), end = Int(candidate.end)
+                guard start >= 0, start < end, end <= window.count else { continue }
+                let lower = window.lowerBound + start, upper = window.lowerBound + end
+                let fragment = String(String.UnicodeScalarView(scalars[lower..<upper]))
+                guard !fragment.isEmpty, fragment == candidate.fragment else { continue }
+                verified.append(AnonymizationSpanCandidate(dataType: candidate.dataType,
+                    range: lower..<upper, value: fragment, doubtful: candidate.doubtful))
+            }
+            if answer.uninterpretedTypes.contains(type) { uninterpreted.insert(type) }
         }
-        return (verified, Set(answer.uninterpretedTypes.filter { allowed.contains($0) }))
+        return (verified, uninterpreted)
     }
 }

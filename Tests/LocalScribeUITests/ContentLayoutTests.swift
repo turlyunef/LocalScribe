@@ -751,7 +751,7 @@ final class ContentLayoutTests: XCTestCase {
     }
 }
 
-/// The mode switcher swaps the sidebar and detail area while both archives keep
+/// The mode switcher swaps the sidebar and detail area while the archives keep
 /// their independent selection and search state.
 @MainActor
 final class DiagramModeSwitchLayoutTests: XCTestCase {
@@ -820,7 +820,7 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
 
         let (hosting, window) = host(ContentView(model: model), width: 850)
         defer { window.close() }
-        try await settleFrames(hosting)
+        try await settle(hosting)
 
         func frame(_ id: String) throws -> NSRect {
             try XCTUnwrap(findElement(id, in: hosting)?.accessibilityFrame?(), id)
@@ -838,20 +838,26 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         let groupButtons = ["expandAll", "collapseAll", "add"]
         let groupFrames = try groupButtons.map { try frame("groups.\($0)") }
         let recordingActions = try ["recordings.sidebar.new", "recordings.sidebar.import"].map(frame)
-        let headerFrames = [switchFrame] + groupFrames + recordingActions
-        for (left, right) in zip(headerFrames, headerFrames.dropFirst()) {
+        for (left, right) in zip(segmentFrames, segmentFrames.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.maxX, right.minX + 1)
+            XCTAssertEqual(left.midY, right.midY, accuracy: 1)
+        }
+        let actionFrames = groupFrames + recordingActions
+        for (left, right) in zip(actionFrames, actionFrames.dropFirst()) {
             XCTAssertLessThanOrEqual(left.maxX, right.minX)
         }
-        for buttonFrame in groupFrames + recordingActions {
-            XCTAssertEqual(switchFrame.midY, buttonFrame.midY, accuracy: 1)
+        for buttonFrame in actionFrames {
+            XCTAssertLessThanOrEqual(buttonFrame.maxY, switchFrame.minY)
+            XCTAssertEqual(actionFrames[0].midY, buttonFrame.midY, accuracy: 1)
             XCTAssertEqual(buttonFrame.width, 20, accuracy: 1)
             XCTAssertEqual(buttonFrame.height, 24, accuracy: 1)
         }
+        XCTAssertLessThan(try frame("recordings.search").maxY, actionFrames[0].minY)
         XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
         XCTAssertNil(findElement("diagrams.import", in: hosting))
 
         _ = try segment("Схемы").accessibilityPerformPress?()
-        try await settleFrames(hosting)
+        try await settle(hosting)
         XCTAssertNotNil(findElement("diagrams.search", in: hosting))
         XCTAssertNotNil(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: hosting))
         XCTAssertNil(findElement("groups.add", in: hosting))
@@ -861,32 +867,22 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         XCTAssertEqual(try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?()) }, segmentFrames)
         XCTAssertEqual(try groupButtons.map { try frame("diagrams.groups.\($0)") }, groupFrames)
         let importFrame = try frame("diagrams.import")
-        XCTAssertEqual(importFrame, recordingActions[0])
+        XCTAssertEqual(importFrame, recordingActions[1])
         XCTAssertEqual(model.selection, recording.id)
 
+        _ = try segment("Обезличивание").accessibilityPerformPress?()
+        try await settle(hosting)
+        XCTAssertNotNil(findElement("texts.search", in: hosting))
+        XCTAssertEqual(try frame("texts.import"), importFrame)
+        XCTAssertEqual(try groupButtons.map { try frame("texts.groups.\($0)") }, groupFrames)
+
         _ = try segment("Записи").accessibilityPerformPress?()
-        try await settleFrames(hosting)
+        try await settle(hosting)
         XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
         XCTAssertNil(findElement("diagrams.import", in: hosting))
         XCTAssertEqual(try frame("workspace.mode"), switchFrame)
         await model.shutdown()
     }
-    /// The AppKit segmented control sizes itself asynchronously: the first
-    /// layout pass reports intrinsic equal-width segments and only the next
-    /// pass applies the fixed header frame. Poll until two consecutive reads
-    /// agree before capturing geometry, otherwise the test races that resize.
-    private func settleFrames(_ hosting: NSHostingView<some View>) async throws {
-        var last: [NSRect] = []
-        for _ in 0..<40 {
-            try await Task.sleep(for: .milliseconds(50))
-            hosting.layoutSubtreeIfNeeded()
-            let picker = try XCTUnwrap(findElement("workspace.mode", in: hosting))
-            let current = ([picker.accessibilityFrame?() ?? .zero] + descendants(picker).map { $0.accessibilityFrame?() ?? .zero })
-            if current == last, current.allSatisfy({ $0.width > 0 }) { return }
-            last = current
-        }
-    }
-
     private func labelText(_ object: NSObject) -> String? {
         for name in ["accessibilityLabel", "accessibilityTitle", "accessibilityValue"] {
             let selector = NSSelectorFromString(name)

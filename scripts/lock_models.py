@@ -32,15 +32,12 @@ RANKS = {key: rank for keys in (
     ['summary-2b', 'summary-4b', 'summary', 'summary-9b-8bit', 'summary-27b', 'summary-27b-6bit', 'summary-27b-8bit', 'summary-122b'],
 ) for rank, key in enumerate(keys, 1)}
 
-# Verified `supportedTasks` stamps for text-capable profiles; only tasks
-# confirmed by shipped behavior belong here. Diagram profiles are separately
-# reviewed, live in the catalog itself (preserved by the passthrough below)
-# and carry DIAGRAM_RECOGNITION there. ANONYMIZATION and
-# anonymizationInputLimitBytes are filled only by qualification on target
-# Macs — see docs/TextAnonymization/Qualification.md. packageID is never
-# written: the app derives it from the pinned files (ModelPackage.identity),
-# so equal file sets share one physical installation automatically.
+# Verified task stamps. Anonymization qualification applies only to the
+# measured revision and limit (docs/TextAnonymization/Qualification.md).
 VERIFIED_TASKS = {'summary': ['SUMMARY']}
+VERIFIED_ANONYMIZATION = {
+    ('diagram-qwen3-vl-8b', 'defcdea7cc7a4b0858fea563cbbce171d328e457'): 8192,
+}
 
 catalog = {'schemaVersion': 1, 'models': []}
 repos = {}
@@ -82,8 +79,20 @@ for key, role, name, repo, prefix, license, ram, working, tokenizer in profiles:
     catalog['models'].append(model)
     print(key, model['revision'], len(model['files']), sum(f['size'] for f in model['files']), flush=True)
 # Keep separately reviewed backend profiles and their immutable dependencies.
-# Their own metadata fields (ASR backend policy, experiment flags, the
-# DIAGRAM_RECOGNITION task stamp of the diagram profiles) stay untouched.
 known = {m['id'] for m in catalog['models']}
 catalog['models'].extend(model for key, model in existing.items() if key not in known)
+
+for model in catalog['models']:
+    limit = VERIFIED_ANONYMIZATION.get((model['id'], model['revision']))
+    if limit is not None:
+        tasks = model.setdefault('supportedTasks', [])
+        if 'ANONYMIZATION' not in tasks:
+            tasks.append('ANONYMIZATION')
+        model['anonymizationInputLimitBytes'] = limit
+        continue
+    tasks = model.get('supportedTasks', [])
+    if 'ANONYMIZATION' in tasks:
+        tasks.remove('ANONYMIZATION')
+    model.pop('anonymizationInputLimitBytes', None)
+
 write_catalog(OUTPUT, catalog)

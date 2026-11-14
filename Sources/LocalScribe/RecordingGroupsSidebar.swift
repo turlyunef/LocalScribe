@@ -6,13 +6,10 @@ import LocalScribeCore
 struct RecordingGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @ObservedObject private var search: RecordingSearch
-    @Binding private var mode: WorkspaceMode
     private let deletion: Binding<SidebarDeletion?>?
     private let newRecording: (() -> Void)?
-    init(model: AppModel, mode: Binding<WorkspaceMode> = .constant(.recordings),
-         deletion: Binding<SidebarDeletion?>? = nil, newRecording: (() -> Void)? = nil) {
+    init(model: AppModel, deletion: Binding<SidebarDeletion?>? = nil, newRecording: (() -> Void)? = nil) {
         self.model = model; self.search = model.recordingSearch
-        _mode = mode
         self.deletion = deletion
         self.newRecording = newRecording
     }
@@ -25,22 +22,19 @@ struct RecordingGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SidebarWorkspaceHeader(mode: $mode) {
+            SidebarActions {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
                 SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу"), identifier: "groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingGroupID != nil)
-            } archiveActions: {
                 if let newRecording {
                     SidebarActionButton(icon: "mic", title: L10n.text("Новая запись"), identifier: "recordings.sidebar.new",
                                         action: newRecording)
                         .disabled(!model.canStartRecording)
                     SidebarActionButton(icon: "square.and.arrow.down", title: L10n.text("Импортировать аудио"),
                                         identifier: "recordings.sidebar.import", action: model.chooseImport)
-                } else {
-                    SidebarEmptyAction()
                 }
             }
             RecordingSearchField(search: search)

@@ -17,9 +17,10 @@ private final class EventLog: @unchecked Sendable {
 }
 
 /// Recognizer fake without weights: locates every occurrence of each marker
-/// value in the analyzed text by scalar range and reports it verbatim. It
-/// never filters by the passed data types — dropping unknown wordings is the
-/// engine's contract under test. A marker may be limited to one 1-based
+/// value of the requested data type in the analyzed text by scalar range and
+/// reports it verbatim. The engine's contract under test is the per-type
+/// pass, so the fake answers only the requested wording; values of other
+/// types are never returned. A marker may be limited to one 1-based
 /// occurrence so overlapping scenarios stay precise.
 private final class ScriptedRecognizer: AnonymizationRecognizing, @unchecked Sendable {
     struct Marker {
@@ -42,12 +43,12 @@ private final class ScriptedRecognizer: AnonymizationRecognizing, @unchecked Sen
     init(markers: [Marker], uninterpretedTypes: [String] = []) {
         self.markers = markers; self.uninterpretedTypes = uninterpretedTypes
     }
-    func detect(text: String, dataTypes: [String]) async throws -> AnonymizationWindowAnswer {
+    func detect(text: String, dataType: String) async throws -> AnonymizationWindowAnswer {
         let call = calls.withLock { $0 += 1; return $0 }
         if let first = failFromCall, call >= first { throw ScribeError.message("Ошибка части входа") }
         let scalars = Array(text.unicodeScalars)
         var candidates: [AnonymizationCandidate] = []
-        for marker in markers {
+        for marker in markers where marker.dataType == dataType {
             var seen = 0
             var searchStart = 0
             while let range = Self.scalarRange(of: marker.value, in: scalars, from: searchStart) {
@@ -61,7 +62,8 @@ private final class ScriptedRecognizer: AnonymizationRecognizing, @unchecked Sen
                 searchStart = range.lowerBound + 1
             }
         }
-        return AnonymizationWindowAnswer(candidates: candidates, uninterpretedTypes: uninterpretedTypes)
+        let uninterpreted = uninterpretedTypes.contains(dataType) ? [dataType] : []
+        return AnonymizationWindowAnswer(candidates: candidates, uninterpretedTypes: uninterpreted)
     }
 
     /// Scalar-subsequence search of `needle` in `haystack` from an offset.
@@ -97,6 +99,71 @@ private final class ScriptedValueSource: AnonymizationValueSourcing, @unchecked 
 }
 
 final class AnonymizationEngineTests: XCTestCase {
+    func testModelFragmentsResolveToExactStandaloneScalarRanges() throws {
+        let source = "👩‍💻 Anna, Annabelle\r\n\r\nAnna: North\nAnna: North\nMain Street\n_Anna_"
+        let response = """
+        {"schemaVersion":1,"candidates":[
+            {"dataType":"name","fragment":"Anna"},
+            {"dataType":"place","line":4,"fragment":"North\\nMain Street","doubtful":true},
+            {"dataType":"place","line":3,"fragment":"North\\nMain Street"},
+            {"dataType":"place","line":0,"fragment":"North"},
+            {"dataType":"place","fragment":"Missing"},
+            {"dataType":"unknown","fragment":"Main Street"}
+        ]}
+        """
+        let answer = try MLXAnonymizationRecognizer.parse(response, text: source, dataTypes: ["name", "place"])
+        let scalars = Array(source.unicodeScalars)
+        XCTAssertEqual(answer.candidates.map(\.fragment), ["Anna", "Anna", "Anna", "Anna", "North\nMain Street"])
+        XCTAssertEqual(answer.candidates.map(\.start), [4, 23, 35, 60, 41])
+        XCTAssertEqual(answer.candidates.map(\.doubtful), [false, false, false, false, true])
+        for candidate in answer.candidates {
+            XCTAssertEqual(String(String.UnicodeScalarView(scalars[Int(candidate.start)..<Int(candidate.end)])),
+                           candidate.fragment)
+        }
+    }
+
+    /// The model regularly drops quotation marks from a company name
+    /// («ООО Ромашка» for ООО «Ромашка»); the verbatim miss is anchored by a
+    /// unique quote-insensitive match, and the fragment names the actual text
+    /// span so the engine's verification still passes.
+    func testQuoteStrippedFragmentRecoversActualSpan() throws {
+        let source = "Работа: ООО «Ромашка» и Ростелеком ИТ."
+        let response = """
+        {"schemaVersion":1,"candidates":[
+            {"dataType":"company","fragment":"ООО Ромашка"},
+            {"dataType":"company","fragment":"Ростелеком ИТ"}
+        ]}
+        """
+        let answer = try MLXAnonymizationRecognizer.parse(response, text: source, dataTypes: ["company"])
+        XCTAssertEqual(answer.candidates.map(\.fragment), ["ООО «Ромашка»", "Ростелеком ИТ"])
+        let scalars = Array(source.unicodeScalars)
+        for candidate in answer.candidates {
+            XCTAssertEqual(String(String.UnicodeScalarView(scalars[Int(candidate.start)..<Int(candidate.end)])),
+                           candidate.fragment)
+        }
+        // A quoted fragment against a text without quotes anchors the bare
+        // span; an absent value stays dropped.
+        let odd = try MLXAnonymizationRecognizer.parse(
+            #"{"schemaVersion":1,"candidates":[{"dataType":"company","fragment":"«Ромашка»"}]}"#,
+            text: "Партнёр: Ромашка.", dataTypes: ["company"])
+        XCTAssertEqual(odd.candidates.map(\.fragment), ["Ромашка"])
+        let missing = try MLXAnonymizationRecognizer.parse(
+            #"{"schemaVersion":1,"candidates":[{"dataType":"company","fragment":"Нет такой"}]}"#,
+            text: "Партнёр: Ромашка.", dataTypes: ["company"])
+        XCTAssertTrue(missing.candidates.isEmpty)
+    }
+
+    /// A recovered anchor must not extend into a word: the quote-insensitive
+    /// fallback keeps the word-boundary rule of the exact match.
+    func testRecoveredAnchorRespectsWordBoundaries() throws {
+        let response = """
+        {"schemaVersion":1,"candidates":[{"dataType":"company","fragment":"ООО Ромашка"}]}
+        """
+        let answer = try MLXAnonymizationRecognizer.parse(response, text: "Не компания: ООООО «Ромашка».",
+                                                          dataTypes: ["company"])
+        XCTAssertTrue(answer.candidates.isEmpty, "совпадение внутри слова не закрепляется")
+    }
+
     private enum Names {
         static let personType = "Имена и фамилии"
         static let emailType = "Адреса электронной почты"
@@ -649,6 +716,85 @@ final class AnonymizationEngineTests: XCTestCase {
         if case .englishName = AnonymizationValueShape.of("Anna Petrova") {} else { XCTFail("en name") }
         if case .generic = AnonymizationValueShape.of("AB-2741") {} else { XCTFail("generic") }
         if case .postalAddress = AnonymizationValueShape.of("ул. Лесная, д. 12") {} else { XCTFail("address") }
+    }
+
+    /// Dates are classified before phones: an eight-digit dotted value like
+    /// «12.11.2026» used to draw a phone-number substitute. Month ranges keep
+    /// numeric IDs out of the date shape.
+    func testDateValueShapeAndSubstitutes() {
+        guard case .date(let order, let separator) = AnonymizationValueShape.of("12.11.2026") else {
+            return XCTFail("дата день.месяц.год не распознана")
+        }
+        XCTAssertEqual(order, .dayMonthYear)
+        XCTAssertEqual(separator, ".")
+        guard case .date(let monthYear, let slash) = AnonymizationValueShape.of("10/2021") else {
+            return XCTFail("дата месяц/год не распознана")
+        }
+        XCTAssertEqual(monthYear, .monthYear)
+        XCTAssertEqual(slash, "/")
+        guard case .date(let isoOrder, _) = AnonymizationValueShape.of("2026-11-14") else {
+            return XCTFail("ISO-дата не распознана")
+        }
+        XCTAssertEqual(isoOrder, .yearMonthDay)
+        if case .phone = AnonymizationValueShape.of("12.11.2026") { XCTFail("дата не является телефоном") }
+        if case .phone = AnonymizationValueShape.of("+7 916 254-83-19") {} else { XCTFail("телефон остаётся телефоном") }
+        if case .date = AnonymizationValueShape.of("1234.5678.90") { XCTFail("числовой ID не является датой") }
+        // A drawn substitute keeps the source format and stays a valid date.
+        for (source, order) in [("12.11.2026", AnonymizationValueShape.DateOrder.dayMonthYear),
+                                ("10/2021", .monthYear), ("2026-11-14", .yearMonthDay)] {
+            let shape = AnonymizationValueShape.of(source)
+            var rng = SplitMix64(seed: 7)
+            for _ in 0..<32 {
+                let value = AnonymizationValueFactory.draw(shape: shape, using: &rng)
+                let parts = value.components(separatedBy: order == .monthYear ? "/" : (source.contains(".") ? "." : "-"))
+                    .compactMap(Int.init)
+            if order == .monthYear {
+                XCTAssertEqual(parts.count, 2, value)
+                XCTAssertTrue((1...12).contains(parts[0]), "месяц корректен: \(value)")
+                XCTAssertTrue((1990...2035).contains(parts[1]), "год корректен: \(value)")
+            } else {
+                XCTAssertEqual(parts.count, 3, value)
+                let dayIndex = order == .yearMonthDay ? 2 : 0
+                let yearIndex = order == .yearMonthDay ? 0 : 2
+                XCTAssertTrue((1...28).contains(parts[dayIndex]), "день корректен: \(value)")
+                XCTAssertTrue((1...12).contains(parts[1]), "месяц корректен: \(value)")
+                XCTAssertTrue((1990...2035).contains(parts[yearIndex]), "год корректен: \(value)")
+            }
+                XCTAssertFalse(value.contains("X-"), "дата не получает маркерное значение")
+                XCTAssertFalse(value.contains("@"), "дата не получает адрес")
+            }
+        }
+    }
+
+    /// Regression of the user report: types added to the saved settings list
+    /// (company names, dates) get their own recognition pass and are
+    /// substituted even when other types find nothing in the same window.
+    func testAddedTypesGetTheirOwnPassAndSubstitution() async throws {
+        let text = "Период 10/2021 - 12/2023, работодатель ООО «Ромашка»,руководитель Анна Петрова."
+        let company = "Названия компаний", date = "Даты"
+        let recognizer = ScriptedRecognizer(markers: [
+            .init(company, "ООО «Ромашка»"),
+            .init(date, "10/2021"), .init(date, "12/2023"),
+            .init(Names.personType, "Анна Петрова"),
+        ])
+        let (engine, _) = try makeEngine(text: text,
+            dataTypes: [Names.personType, company, date, Names.emailType],
+            recognizer: recognizer)
+        let outcome = try await engine.run()
+        let result = outcome.artifact.result
+        XCTAssertFalse(result.text.text.contains("Ромашка"), "компания заменена")
+        XCTAssertFalse(result.text.text.contains("10/2021"), "дата заменена")
+        XCTAssertFalse(result.text.text.contains("12/2023"), "дата заменена")
+        XCTAssertFalse(result.text.text.contains("Анна Петрова"), "имя заменено")
+        XCTAssertTrue(result.text.text.contains("Период "), "текст между заменами сохранён")
+        let types = Set(outcome.artifact.substitutions.map(\.dataType))
+        XCTAssertEqual(types, [Names.personType, company, date])
+        // A date substitute stays a plausible date, never a phone number.
+        for substitution in outcome.artifact.substitutions where substitution.dataType == date {
+            XCTAssertFalse(substitution.substituteValue.contains("@"), "не адрес")
+            XCTAssertTrue(substitution.substituteValue.contains("/") || substitution.substituteValue.contains("."),
+                          "формат даты сохранён: \(substitution.substituteValue)")
+        }
     }
 
     func testSeededSourceRegeneratesOnCollision() {

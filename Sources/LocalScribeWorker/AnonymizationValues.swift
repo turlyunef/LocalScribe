@@ -25,11 +25,20 @@ enum AnonymizationValueShape: Sendable, Equatable {
     case phone
     case emailAddress
     case postalAddress(russian: Bool)
+    /// A numeric calendar date with its component order and source separator.
+    case date(order: DateOrder, separator: String)
     case generic
+
+    enum DateOrder: Sendable, Equatable {
+        case dayMonthYear
+        case monthYear
+        case yearMonthDay
+    }
 
     /// Deterministic shape classification of one confirmed value.
     static func of(_ value: String) -> AnonymizationValueShape {
         if isEmailAddress(value) { return .emailAddress }
+        if let date = dateComponents(value) { return date }
         if isPhoneNumber(value) { return .phone }
         if let analysis = AnonymizationNames.analyze(value) {
             return .russianName(feminine: analysis.feminine)
@@ -37,6 +46,31 @@ enum AnonymizationValueShape: Sendable, Equatable {
         if isEnglishName(value) { return .englishName }
         if isPostalAddress(value) { return .postalAddress(russian: value.unicodeScalars.contains { (0x0410...0x044F).contains($0.value) }) }
         return .generic
+    }
+
+    /// Numeric date recognition before the phone classifier: an eight-digit
+    /// dotted value like «12.11.2026» is a date, not a phone number. Month
+    /// ranges bound the components, so IDs such as «1234.5678.90» stay out.
+    private static func dateComponents(_ value: String) -> AnonymizationValueShape? {
+        let scalars = Array(value.unicodeScalars)
+        guard scalars.allSatisfy({ ($0.value >= 48 && $0.value <= 57) || $0 == "." || $0 == "/" || $0 == "-" }) else { return nil }
+        for separator in [".", "/", "-"] {
+            let parts = value.components(separatedBy: separator).filter { !$0.isEmpty }
+            guard parts.allSatisfy({ $0.allSatisfy(\.isNumber) }) else { continue }
+            if parts.count == 3, (1...2).contains(parts[0].count), parts[1].count == 2, parts[2].count == 4,
+               let month = Int(parts[1]), (1...12).contains(month) {
+                return .date(order: .dayMonthYear, separator: separator)
+            }
+            if parts.count == 3, parts[0].count == 4, parts[1].count == 2, parts[2].count == 2,
+               let month = Int(parts[1]), (1...12).contains(month) {
+                return .date(order: .yearMonthDay, separator: separator)
+            }
+            if parts.count == 2, (1...2).contains(parts[0].count), parts[1].count == 4,
+               let month = Int(parts[0]), (1...12).contains(month) {
+                return .date(order: .monthYear, separator: separator)
+            }
+        }
+        return nil
     }
 
     private static func isEmailAddress(_ value: String) -> Bool {
@@ -136,6 +170,16 @@ enum AnonymizationValueFactory {
                 return "ул. " + russianStreets.randomElement(using: &rng)! + ", д. " + String(Int.random(in: 1...199, using: &rng))
             }
             return String(Int.random(in: 1...999, using: &rng)) + " " + englishStreets.randomElement(using: &rng)! + " Street"
+        case .date(let order, let separator):
+            // Days stay within 28 so every drawn month keeps the date valid.
+            let day = String(Int.random(in: 1...28, using: &rng))
+            let month = String(Int.random(in: 1...12, using: &rng))
+            let year = String(Int.random(in: 1990...2035, using: &rng))
+            switch order {
+            case .dayMonthYear: return day + separator + month + separator + year
+            case .monthYear: return month + separator + year
+            case .yearMonthDay: return year + separator + month + separator + day
+            }
         case .generic:
             return "X-" + String(Int.random(in: 1000...9999, using: &rng))
         }

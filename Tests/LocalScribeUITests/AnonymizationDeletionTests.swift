@@ -326,7 +326,7 @@ final class AnonymizationDeletionTests: XCTestCase {
                               styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = NSHostingView(rootView: AnonymizationGroupsSidebar(
-            model: model, workspace: workspace, mode: .constant(.anonymization)))
+            model: model, workspace: workspace))
         window.makeKeyAndOrderFront(nil)
         try await settle(window)
         // Two cards are selected, but only one is visible in the filtered

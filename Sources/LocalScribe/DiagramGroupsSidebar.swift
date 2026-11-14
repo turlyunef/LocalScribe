@@ -7,12 +7,9 @@ struct DiagramGroupsSidebar: View {
     @ObservedObject var model: AppModel
     @ObservedObject var workspace: DiagramWorkspaceModel
     @ObservedObject private var search: RecordingSearch
-    @Binding private var mode: WorkspaceMode
     @Binding private var deletingDiagrams: SidebarDiagramDeletion?
-    init(model: AppModel, workspace: DiagramWorkspaceModel, mode: Binding<WorkspaceMode>,
-         deletion: Binding<SidebarDiagramDeletion?>) {
+    init(model: AppModel, workspace: DiagramWorkspaceModel, deletion: Binding<SidebarDiagramDeletion?>) {
         self.model = model; self.workspace = workspace; self.search = model.diagramSearch
-        _mode = mode
         _deletingDiagrams = deletion
     }
     @State private var editor: GroupNameDraft?
@@ -23,17 +20,16 @@ struct DiagramGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            SidebarWorkspaceHeader(mode: $mode) {
+            SidebarActions {
                 expansionButton(expanded: true)
                 expansionButton(expanded: false)
                 SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу схем"), identifier: "diagrams.groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingDiagramJobs)
-            } archiveActions: {
+                SidebarEmptyAction()
                 SidebarActionButton(icon: "photo.badge.plus", title: L10n.text("Загрузить изображение"), identifier: "diagrams.import",
                                     iconVerticalOffset: 2, action: workspace.presentImportPanel)
-                SidebarEmptyAction()
             }
             RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: L10n.text("Поиск по названиям"),
                                  label: L10n.text("Поиск по названиям схем"), shortcutActive: true)
