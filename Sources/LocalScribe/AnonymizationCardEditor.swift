@@ -33,6 +33,11 @@ struct AnonymizationPanelContent: Equatable, Sendable {
     let highlightSlices: [String]
 }
 
+struct AnonymizationRestorationPanels: Sendable {
+    let source: AnonymizationPanelContent
+    let result: AnonymizationPanelContent
+}
+
 /// One warning of the published result prepared for display: the localized
 /// title, the verbatim fragment (user text — never rephrased), the traceable
 /// review position in the current right text and the exact uninterpreted type
@@ -61,6 +66,7 @@ struct AnonymizationWarningItem: Identifiable, Equatable, Sendable {
     @Published private(set) var loadFailure: String?
     @Published private(set) var sourcePanel: AnonymizationPanelContent?
     @Published private(set) var resultPanel: AnonymizationPanelContent?
+    @Published private(set) var restorationPanels: AnonymizationRestorationPanels?
     @Published private(set) var warnings: [AnonymizationWarningItem] = []
     @Published private(set) var jumpRequest: PanelJumpRequest?
 
@@ -127,9 +133,11 @@ struct AnonymizationWarningItem: Identifiable, Equatable, Sendable {
     }
 
     private func applyDocument(_ doc: AnonymizationCardDocument) {
+        let restorationChanged = document?.restoration?.result.id != doc.restoration?.result.id
         document = doc
         loadFailure = nil
         rebuildPanels()
+        if restorationChanged { rebuildRestorationPanels(cardID: doc.id, restoration: doc.restoration) }
     }
 
     private func clearPanels() {
@@ -138,6 +146,7 @@ struct AnonymizationWarningItem: Identifiable, Equatable, Sendable {
         presentationKey = nil
         sourcePanel = nil
         resultPanel = nil
+        restorationPanels = nil
         warnings = []
         jumpRequest = nil
     }
@@ -270,6 +279,10 @@ struct AnonymizationWarningItem: Identifiable, Equatable, Sendable {
         jumpRequest = PanelJumpRequest(range: range)
     }
 
+    func clearWarningJump() {
+        jumpRequest = nil
+    }
+
     // MARK: - Panel preparation (off the main actor, keyed by content)
 
     private struct PresentationKey: Equatable {
@@ -324,6 +337,30 @@ struct AnonymizationWarningItem: Identifiable, Equatable, Sendable {
             result = document.publishedResult
             importedNameStem = document.importedNameStem
         }
+    }
+
+    private func rebuildRestorationPanels(cardID: String, restoration: AnonymizationRestoration?) {
+        guard let restoration else { restorationPanels = nil; return }
+        Task { [weak self] in
+            let panels = await Task.detached(priority: .userInitiated) {
+                AnonymizationRestorationPanels(
+                    source: Self.restorationPanel(restoration.source, ranges: restoration.pairs.map(\.sourceRange)),
+                    result: Self.restorationPanel(restoration.result, ranges: restoration.pairs.map(\.resultRange)))
+            }.value
+            guard let self, self.cardID == cardID,
+                  self.document?.restoration?.result.id == restoration.result.id else { return }
+            self.restorationPanels = panels
+        }
+    }
+
+    nonisolated private static func restorationPanel(_ revision: TextRevision,
+                                                     ranges: [LocalScribeCore.TextRange]) -> AnonymizationPanelContent {
+        let bridge = TextUTF16Bridge(text: revision.text)
+        let text = revision.text as NSString
+        let converted = ranges.compactMap(bridge.nsRange)
+        return AnonymizationPanelContent(revisionID: revision.id, text: revision.text,
+                                         highlights: converted.map(PanelHighlightRange.init(nsRange:)),
+                                         highlightSlices: converted.map(text.substring(with:)))
     }
     private struct PreparedPanels: Sendable {
         let source: AnonymizationPanelContent
@@ -440,12 +477,14 @@ struct AnonymizationWarningItem: Identifiable, Equatable, Sendable {
         let warningCount: Int
         let bodyReplacements: UInt?
         let displayName: String
+        let restorationResultRevisionID: String?
         init(_ summary: AnonymizationCardSummary) {
             state = summary.attemptState
             hasResult = summary.hasPublishedResult
             warningCount = summary.resultWarningCount
             bodyReplacements = summary.bodyReplacementCount
             displayName = summary.displayName
+            restorationResultRevisionID = summary.restorationResultRevisionID
         }
     }
     private var observedSummary: SummarySignature?
@@ -483,6 +522,8 @@ struct AnonymizationTextEditor: NSViewRepresentable {
     let value: Value?
     let editable: Bool
     let jump: PanelJumpRequest?
+    var scrollSync: AnonymizationScrollSync? = nil
+    var scrollSide: AnonymizationScrollSync.Side = .left
     let onEdit: (ScalarEdit) -> Void
 
     func makeCoordinator() -> Coordinator { Coordinator(onEdit: onEdit) }
@@ -506,6 +547,7 @@ struct AnonymizationTextEditor: NSViewRepresentable {
 
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         let view = scroll.documentView as! NSTextView
+        context.coordinator.connect(scroll, to: scrollSync, side: scrollSide)
         context.coordinator.onEdit = onEdit
         view.isEditable = editable
         guard let value else {
@@ -542,9 +584,14 @@ struct AnonymizationTextEditor: NSViewRepresentable {
         if let jump, context.coordinator.handledJump != jump.id {
             context.coordinator.handledJump = jump.id
             let range = jump.range.nsRange
+            guard NSMaxRange(range) <= (view.textStorage?.length ?? 0) else { return }
             view.scrollRangeToVisible(range)
             view.setSelectedRange(range)
         }
+    }
+
+    static func dismantleNSView(_ scroll: NSScrollView, coordinator: Coordinator) {
+        coordinator.connect(scroll, to: nil, side: .left)
     }
 
     /// Rebuilds all attributes in place — never touching characters or
@@ -565,7 +612,17 @@ struct AnonymizationTextEditor: NSViewRepresentable {
         var revision: String?
         var highlights: [PanelHighlightRange] = []
         var handledJump: UUID?
+        private weak var scrollSync: AnonymizationScrollSync?
+        private var scrollSide: AnonymizationScrollSync.Side = .left
         init(onEdit: @escaping (ScalarEdit) -> Void) { self.onEdit = onEdit }
+
+        @MainActor func connect(_ scroll: NSScrollView, to sync: AnonymizationScrollSync?, side: AnonymizationScrollSync.Side) {
+            guard scrollSync !== sync || scrollSide != side else { return }
+            scrollSync?.disconnect(scroll, side: scrollSide)
+            scrollSync = sync
+            scrollSide = side
+            sync?.connect(scroll, side: side)
+        }
 
         func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange,
                       replacementString: String?) -> Bool {

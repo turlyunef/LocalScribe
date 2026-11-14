@@ -833,9 +833,10 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         }
 
         let switchFrame = try frame("workspace.mode")
+        let searchFrame = try frame("recordings.search")
         let titles = ["Записи", "Схемы", "Обезличивание"]
         let segmentFrames = try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?(), $0) }
-        let groupButtons = ["expandAll", "collapseAll", "add"]
+        let groupButtons = ["collapseAll", "expandAll", "add"]
         let groupFrames = try groupButtons.map { try frame("groups.\($0)") }
         let recordingActions = try ["recordings.sidebar.new", "recordings.sidebar.import"].map(frame)
         for (left, right) in zip(segmentFrames, segmentFrames.dropFirst()) {
@@ -847,18 +848,21 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
             XCTAssertLessThanOrEqual(left.maxX, right.minX)
         }
         for buttonFrame in actionFrames {
-            XCTAssertLessThanOrEqual(buttonFrame.maxY, switchFrame.minY)
+            XCTAssertLessThanOrEqual(buttonFrame.maxY, searchFrame.minY)
             XCTAssertEqual(actionFrames[0].midY, buttonFrame.midY, accuracy: 1)
             XCTAssertEqual(buttonFrame.width, 20, accuracy: 1)
             XCTAssertEqual(buttonFrame.height, 24, accuracy: 1)
         }
-        XCTAssertLessThan(try frame("recordings.search").maxY, actionFrames[0].minY)
+        XCTAssertLessThan(searchFrame.maxY, switchFrame.minY)
+        XCTAssertEqual(groupFrames[0].minX, searchFrame.minX, accuracy: 1)
+        XCTAssertGreaterThan(recordingActions[0].minX - groupFrames[2].maxX, 4)
+        XCTAssertEqual(recordingActions[1].maxX, searchFrame.maxX, accuracy: 1)
         XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
         XCTAssertNil(findElement("diagrams.import", in: hosting))
 
         _ = try segment("Схемы").accessibilityPerformPress?()
         try await settle(hosting)
-        XCTAssertNotNil(findElement("diagrams.search", in: hosting))
+        XCTAssertEqual(try frame("diagrams.search"), searchFrame)
         XCTAssertNotNil(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: hosting))
         XCTAssertNil(findElement("groups.add", in: hosting))
         XCTAssertNil(findElement("recordings.sidebar.new", in: hosting))
@@ -872,7 +876,7 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
 
         _ = try segment("Обезличивание").accessibilityPerformPress?()
         try await settle(hosting)
-        XCTAssertNotNil(findElement("texts.search", in: hosting))
+        XCTAssertEqual(try frame("texts.search"), searchFrame)
         XCTAssertEqual(try frame("texts.import"), importFrame)
         XCTAssertEqual(try groupButtons.map { try frame("texts.groups.\($0)") }, groupFrames)
 

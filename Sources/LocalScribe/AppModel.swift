@@ -2556,14 +2556,15 @@ struct QueueJobID: Hashable, Sendable {
     func copy(_ part: ExportPart) {
         copyResult { try await self.rendered(part) }
     }
-    func copyResult(_ render: @escaping @MainActor () async throws -> String) {
+    func copyResult(to pasteboard: NSPasteboard = .general, _ render: @escaping @MainActor () async throws -> String) {
         copyTask?.cancel()
         copyTask = Task {
             do {
                 let text = try await render()
                 try Task.checkCancellation()
                 guard !shuttingDown else { return }
-                NSPasteboard.general.clearContents(); NSPasteboard.general.setString(text, forType: .string)
+                pasteboard.clearContents()
+                pasteboard.setString(text, forType: .string)
                 status = L10n.message("Скопировано")
             } catch { errorHandler.report(error) }
         }

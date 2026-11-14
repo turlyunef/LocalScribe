@@ -163,6 +163,7 @@ import LocalScribeCore
     struct TextOpenPanelRequest: Sendable {
         let messageText: String
         let limitText: String
+        var allowsMultipleSelection = true
     }
 
     /// Byte-identical duplicate resolution (AC-35); the test seam.
@@ -255,39 +256,12 @@ import LocalScribeCore
             guard let format = AnonymizationSourceFormat.importFormat(pathExtension: url.pathExtension) else {
                 throw ScribeError.message("Неподдерживаемый формат файла. Допустимы TXT и Markdown.")
             }
-            let accessed = url.startAccessingSecurityScopedResource()
-            defer { if accessed { url.stopAccessingSecurityScopedResource() } }
-            // One pinned byte sequence per candidate: descriptor capture and
-            // reading run off the main actor (the ImportSource pattern).
-            let bytes: Data
-            do {
-                bytes = try await Task.detached(priority: .userInitiated) {
-                    let source = try ImportSource(url)
-                    defer { source.close() }
-                    return try source.readBytes()
-                }.value
-            } catch is POSIXError {
-                throw ScribeError.message("Не удалось прочитать файл")
-            }
+            let bytes = try await Self.readImportBytes(url)
             try Task.checkCancellation()
             if let limit = model.anonymizationImportLimitBytes, UInt(bytes.count) > limit {
                 throw ScribeError.message("Файл больше предела для выбранной модели: размер \(Self.sizeText(UInt(bytes.count))) при пределе \(Self.sizeText(limit)).")
             }
-            var text: String
-            switch TextImportDecoder.decode(bytes) {
-            case .undecodable:
-                throw ScribeError.message("Кодировка файла не поддерживается или повреждена. Допустимы UTF-8, UTF-16 с BOM и Windows-1251.")
-            case .resolved(let option):
-                text = option.text
-            case .ambiguous(let options):
-                try Task.checkCancellation()
-                guard !model.shuttingDown else { return }
-                // Only the confirmed encoding creates a card; cancel skips
-                // this candidate without touching the rest of the batch.
-                guard let encoding = resolveAmbiguousEncoding(options, url.lastPathComponent),
-                      let option = options.first(where: { $0.encoding == encoding }) else { return }
-                text = option.text
-            }
+            guard let text = try await decodeImportText(bytes, filename: url.lastPathComponent) else { return }
             try Task.checkCancellation()
             guard text.contains(where: { !$0.isWhitespace }) else {
                 throw ScribeError.message("Файл пуст или состоит из одних пробелов.")
@@ -330,7 +304,127 @@ import LocalScribeCore
         catch { model.errorHandler.report(error) }
     }
 
-    // MARK: - Download (work 12)
+    private static func readImportBytes(_ url: URL, forRestoration: Bool = false) async throws -> Data {
+        do {
+            return try await Task.detached(priority: .userInitiated) {
+                let accessed = url.startAccessingSecurityScopedResource()
+                defer { if accessed { url.stopAccessingSecurityScopedResource() } }
+                let source = try ImportSource(url)
+                defer { source.close() }
+                if forRestoration, source.size > AnonymizationRestoration.maximumImportFileBytes {
+                    throw ScribeError.message("Текст для обратного преобразования слишком большой для карточки")
+                }
+                return try source.readBytes()
+            }.value
+        } catch is POSIXError {
+            throw ScribeError.message("Не удалось прочитать файл")
+        }
+    }
+
+    private func decodeImportText(_ bytes: Data, filename: String) async throws -> String? {
+        let decoding = await Task.detached(priority: .userInitiated) { TextImportDecoder.decode(bytes) }.value
+        try Task.checkCancellation()
+        guard !model.shuttingDown else { return nil }
+        switch decoding {
+        case .undecodable:
+            throw ScribeError.message("Кодировка файла не поддерживается или повреждена. Допустимы UTF-8, UTF-16 с BOM и Windows-1251.")
+        case .resolved(let option):
+            return option.text
+        case .ambiguous(let options):
+            guard let encoding = resolveAmbiguousEncoding(options, filename) else { return nil }
+            return options.first(where: { $0.encoding == encoding })?.text
+        }
+    }
+
+    // MARK: - Restoration
+
+    @Published private(set) var restorationBusyCardID: String?
+
+    func canStartRestoration(_ cardID: String) -> Bool {
+        canImportFiles && restorationBusyCardID == nil && selected?.id == cardID &&
+            cardEditor.cardID == cardID && cardEditor.hasPublishedResult
+    }
+
+    func importRestoration(_ cardID: String) async {
+        await updateRestoration(cardID) { archive in
+            let expected = try await savedMappingRevisions(cardID)
+            let request = TextOpenPanelRequest(
+                messageText: L10n.text("Выберите файл TXT или Markdown для обратного преобразования."),
+                limitText: "", allowsMultipleSelection: false)
+            guard let url = await chooseImportFiles(request)?.first else { return false }
+            try Task.checkCancellation()
+            guard !model.shuttingDown else { return false }
+            guard let format = AnonymizationSourceFormat.importFormat(pathExtension: url.pathExtension) else {
+                throw ScribeError.message("Неподдерживаемый формат файла. Допустимы TXT и Markdown.")
+            }
+            let bytes = try await Self.readImportBytes(url, forRestoration: true)
+            guard let text = try await decodeImportText(bytes, filename: url.lastPathComponent) else { return false }
+            try Task.checkCancellation()
+            guard !model.shuttingDown else { return false }
+            try await archive.restoreText(cardID, text: text, sourceFormat: format,
+                                          expectedResultID: expected.resultID, expectedSourceID: expected.sourceID)
+            return true
+        }
+    }
+
+    func pasteRestoration(_ cardID: String, pasteboard: NSPasteboard = .general) async {
+        await updateRestoration(cardID) { archive in
+            guard let text = pasteboard.string(forType: .string), !text.isEmpty else {
+                throw ScribeError.message("В буфере обмена нет текста.")
+            }
+            let expected = try await savedMappingRevisions(cardID)
+            try await archive.restoreText(cardID, text: text, sourceFormat: .txt,
+                                          expectedResultID: expected.resultID, expectedSourceID: expected.sourceID)
+            return true
+        }
+    }
+
+    func repeatRestoration(_ cardID: String) async {
+        await updateRestoration(cardID) { archive in
+            guard let expectedRestorationID = cardEditor.document?.restoration?.result.id else { return false }
+            try await archive.repeatRestoration(cardID, expectedRestorationID: expectedRestorationID)
+            return true
+        }
+    }
+
+    private func savedMappingRevisions(_ cardID: String) async throws -> (resultID: String, sourceID: String) {
+        await cardEditor.flushEdits()
+        try Task.checkCancellation()
+        guard !model.shuttingDown, cardEditor.cardID == cardID, let document = cardEditor.document,
+              let result = document.publishedResult else { throw CancellationError() }
+        return (result.text.id, document.source.id)
+    }
+
+    private func updateRestoration(_ cardID: String, operation: (AnonymizationCoordinator) async throws -> Bool) async {
+        guard canStartRestoration(cardID), let archive = model.textArchive else { return }
+        restorationBusyCardID = cardID
+        defer { restorationBusyCardID = nil }
+        do {
+            try Task.checkCancellation()
+            if try await operation(archive) { await model.reloadTexts(); await cardEditor.flushEdits() }
+        } catch is CancellationError { }
+        catch { model.errorHandler.report(error) }
+    }
+
+    // MARK: - Result export
+
+    func copyText(_ cardID: String, to pasteboard: NSPasteboard = .general) {
+        model.copyResult(to: pasteboard) { [weak self] in
+            guard let snapshot = try await self?.exportSnapshot(cardID, format: .plainText) else {
+                throw CancellationError()
+            }
+            return snapshot.resultText
+        }
+    }
+
+    func copyRestoration(_ cardID: String, to pasteboard: NSPasteboard = .general) {
+        model.copyResult(to: pasteboard) { [weak self] in
+            guard let snapshot = try await self?.restorationSnapshot(cardID, format: .plainText) else {
+                throw CancellationError()
+            }
+            return snapshot.resultText
+        }
+    }
 
     /// The system save panel of the download; it receives the frozen snapshot
     /// and returns the confirmed URL or nil on cancellation. Tests inject
@@ -347,38 +441,57 @@ import LocalScribeCore
         Task { [weak self] in await self?.performTextDownload(cardID, format: format) }
     }
 
+    func downloadRestoration(_ cardID: String, format: AnonymizationTextDownloadFormat) {
+        Task { [weak self] in await self?.performRestorationDownload(cardID, format: format) }
+    }
+
     /// Flush → snapshot → panel → write. Everything after the snapshot works
     /// on the captured values: an edit saved later goes to the next export,
     /// and a cancelled panel creates no file (AC-19). Internal (not private)
     /// so tests await the whole flow deterministically.
     func performTextDownload(_ cardID: String, format: AnonymizationTextDownloadFormat) async {
-        guard !model.shuttingDown, let archive = model.textArchive else { return }
-        // The last local edits land first; the snapshot below then captures
-        // the actually saved right version of the card.
-        await cardEditor.flushEdits()
-        guard !model.shuttingDown else { return }
-        let snapshot: AnonymizationExportSnapshot
+        await performDownload { try await exportSnapshot(cardID, format: format) }
+    }
+
+    func performRestorationDownload(_ cardID: String, format: AnonymizationTextDownloadFormat) async {
+        await performDownload { try await restorationSnapshot(cardID, format: format) }
+    }
+
+    private func performDownload(_ capture: () async throws -> AnonymizationExportSnapshot?) async {
         do {
-            let document = try await archive.loadCard(cardID)
-            // Without a published result there is nothing to download; the
-            // menu itself stays hidden until the first success.
-            guard let result = document.publishedResult else { return }
-            // The stem is a valid single component already; the export only
-            // ever adds the extension (AC-34).
-            try AnonymizationCardDocument.validateFileStem(result.downloadNameStem)
-            snapshot = AnonymizationExportSnapshot(
-                resultText: result.text.text,
-                sourceFormat: document.sourceFormat,
-                outputFormat: format,
-                suggestedNameStem: result.downloadNameStem)
+            guard let snapshot = try await capture(), let url = await chooseDownloadURL(snapshot),
+                  !model.shuttingDown else { return }
+            // Save UTF-8 without BOM off the main actor, tracked for shutdown.
+            model.saveResultExport(to: url) { await snapshot.renderedText() }
         } catch {
             model.errorHandler.report(error)
-            return
         }
-        guard let url = await chooseDownloadURL(snapshot) else { return }
-        // The write itself is UTF-8 without BOM, off the main actor, tracked
-        // with the app's export tasks (shutdown waits for it).
-        model.saveResultExport(to: url) { await snapshot.renderedText() }
+    }
+
+    private func restorationSnapshot(_ cardID: String, format: AnonymizationTextDownloadFormat) async throws
+        -> AnonymizationExportSnapshot? {
+        guard !model.shuttingDown, let archive = model.textArchive else { return nil }
+        let document = try await archive.loadCard(cardID)
+        try Task.checkCancellation()
+        guard !model.shuttingDown, let result = document.restoration else { return nil }
+        return AnonymizationExportSnapshot(resultText: result.result.text, sourceFormat: result.sourceFormat,
+                                           outputFormat: format, suggestedNameStem: document.importedNameStem)
+    }
+
+    private func exportSnapshot(_ cardID: String, format: AnonymizationTextDownloadFormat) async throws
+        -> AnonymizationExportSnapshot? {
+        guard !model.shuttingDown, let archive = model.textArchive else { return nil }
+        await cardEditor.flushEdits()
+        try Task.checkCancellation()
+        guard !model.shuttingDown else { return nil }
+        let document = try await archive.loadCard(cardID)
+        guard let result = document.publishedResult else { return nil }
+        try AnonymizationCardDocument.validateFileStem(result.downloadNameStem)
+        return AnonymizationExportSnapshot(
+            resultText: result.text.text,
+            sourceFormat: document.sourceFormat,
+            outputFormat: format,
+            suggestedNameStem: result.downloadNameStem)
     }
 
     // MARK: - System panels and dialogs
@@ -387,11 +500,13 @@ import LocalScribeCore
         guard let window = NSApp.keyWindow else { return nil }
         return await withCheckedContinuation { continuation in
             let panel = NSOpenPanel()
-            panel.canChooseFiles = true; panel.canChooseDirectories = false; panel.allowsMultipleSelection = true
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowsMultipleSelection = request.allowsMultipleSelection
             // `UTType.markdown` needs a newer SDK floor; the filename
             // extension covers both .md and .markdown on this target.
-            panel.allowedContentTypes = [.plainText, UTType(filenameExtension: "md") ?? .data]
-            panel.message = request.messageText + "\n" + request.limitText
+            panel.allowedContentTypes = [.plainText] + ["md", "markdown"].compactMap { UTType(filenameExtension: $0) }
+            panel.message = request.limitText.isEmpty ? request.messageText : request.messageText + "\n" + request.limitText
             panel.beginSheetModal(for: window) { response in
                 continuation.resume(returning: response == .OK ? panel.urls : nil)
             }

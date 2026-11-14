@@ -368,15 +368,19 @@ public struct AnonymizationCardDocument: Codable, Identifiable, Equatable, Senda
     /// Nil until the first successful publication.
     public var publishedResult: AnonymizationResult?
     public var automaticSubstitutions: [AutomaticSubstitution] = []
+    /// Optional for documents written before reverse transformations existed.
+    public var restoration: AnonymizationRestoration?
     public init(id: String, importOrder: UInt, importContentIdentity: ByteContentIdentity,
                 importedNameStem: String, sourceFormat: AnonymizationSourceFormat,
                 displayName: String, source: TextRevision, latestAttempt: AnonymizationAttempt,
                 publishedResult: AnonymizationResult? = nil,
-                automaticSubstitutions: [AutomaticSubstitution] = []) {
+                automaticSubstitutions: [AutomaticSubstitution] = [],
+                restoration: AnonymizationRestoration? = nil) {
         self.id = id; self.importOrder = importOrder; self.importContentIdentity = importContentIdentity
         self.importedNameStem = importedNameStem; self.sourceFormat = sourceFormat
         self.displayName = displayName; self.source = source; self.latestAttempt = latestAttempt
         self.publishedResult = publishedResult; self.automaticSubstitutions = automaticSubstitutions
+        self.restoration = restoration
     }
 }
 
@@ -391,12 +395,14 @@ public struct AnonymizationCardSummary: Codable, Identifiable, Equatable, Sendab
     public var hasPublishedResult: Bool
     public var resultWarningCount: Int
     public var bodyReplacementCount: UInt?
+    public var restorationResultRevisionID: String?
     public init(document: AnonymizationCardDocument) {
         id = document.id; importOrder = document.importOrder; displayName = document.displayName
         sourceFormat = document.sourceFormat; attemptState = document.latestAttempt.state
         hasPublishedResult = document.publishedResult != nil
         resultWarningCount = document.publishedResult?.warnings.count ?? 0
         bodyReplacementCount = document.publishedResult?.bodyReplacementCount
+        restorationResultRevisionID = document.restoration?.result.id
     }
 }
 
@@ -433,6 +439,12 @@ extension AnonymizationCardDocument {
         if let publishedResult {
             try publishedResult.validate(sourceScalarCount: source.text.unicodeScalars.count,
                                          importedNameScalarCount: importedNameStem.unicodeScalars.count)
+        }
+        if let restoration {
+            guard publishedResult != nil else {
+                throw ScribeError.message("Некорректный результат обратного преобразования")
+            }
+            try restoration.validate()
         }
         try Self.validateSubstitutions(automaticSubstitutions)
     }

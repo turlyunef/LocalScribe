@@ -534,14 +534,36 @@ final class AnonymizationCardEditorTests: XCTestCase {
         let body = try XCTUnwrap(editor.warnings.first { $0.jump != nil })
         XCTAssertEqual(body.fragment, "позвонила")
         XCTAssertNil(editor.warnings.first { $0.uninterpretedType != nil })
-        // The jump selects the review place in the right editor.
-        let (view, window) = host(AnonymizationDetailColumn(workspace: workspace))
+        var requestedDeletion: String?
+        let (view, window) = host(AnonymizationDetailColumn(workspace: workspace) { requestedDeletion = $0 })
         defer { window.close() }
         try await settle(view)
-        editor.requestWarningJump(body)
+        XCTAssertNil(findElement("texts.detail.warning.\(body.id)", in: view))
+        let status = try element("texts.detail.status", in: view)
+        let warningsTab = try element("texts.detail.warningsTab", in: view)
+        let statusFrame = try XCTUnwrap(status.accessibilityFrame?())
+        let warningsFrame = try XCTUnwrap(warningsTab.accessibilityFrame?())
+        XCTAssertGreaterThanOrEqual(warningsFrame.minX, statusFrame.maxX)
+        try press("texts.detail.warningsTab", in: view)
+        try await settle(view)
+        _ = try element("texts.detail.warning.\(body.id)", in: view)
+        XCTAssertTrue(textViews(in: view).isEmpty)
+        // Opening a warning location returns to the right text and selects it.
+        try press("texts.detail.warning.jump.\(body.id)", in: view)
         try await settle(view)
         let resultView = try XCTUnwrap(textViews(in: view).first { $0.string == editor.resultPanel?.text })
         XCTAssertEqual(resultView.selectedRange(), body.jump?.nsRange)
+        _ = try element("texts.detail.syncScrolling", in: view)
+        try press("texts.detail.restorationTab", in: view)
+        try await settle(view)
+        _ = try element("texts.detail.syncScrolling", in: view)
+        _ = try element("texts.detail.restoration.retry", in: view)
+        XCTAssertNil(findElement("texts.detail.retry", in: view))
+        try press("texts.detail.delete", in: view)
+        XCTAssertEqual(requestedDeletion, id)
+        try press("texts.detail.restorationTab", in: view)
+        try await settle(view)
+        _ = try element("texts.detail.retry", in: view)
         // A failed retry keeps the previous result and its warnings; the card
         // shows the error of the new attempt (AC-46).
         try FileManager.default.removeItem(at: fixture.release)
@@ -592,13 +614,17 @@ final class AnonymizationCardEditorTests: XCTestCase {
         let (view, window) = host(AnonymizationDetailColumn(workspace: workspace))
         defer { window.close() }
         try await settle(view)
+        try press("texts.detail.warningsTab", in: view)
+        try await settle(view)
         _ = try element("texts.detail.warning.settings.0", in: view)
         // The download menu exists exactly when a result is published (the
         // hook makes its items actionable); the retry action stays offered.
         _ = try element("texts.detail.download", in: view)
         _ = try element("texts.detail.retry", in: view)
         XCTAssertTrue(model.anonymizationModelsReady)
-        XCTAssertFalse(textViews(in: view).isEmpty, "the right editor stays available")
+        try press("texts.detail.warningsTab", in: view)
+        try await settle(view)
+        XCTAssertFalse(textViews(in: view).isEmpty)
         await model.shutdown()
     }
 
@@ -672,6 +698,9 @@ final class AnonymizationCardEditorTests: XCTestCase {
     }
     private func element(_ id: String, in view: NSView) throws -> AnyObject {
         try XCTUnwrap(findElement(id, in: view), id)
+    }
+    private func press(_ id: String, in view: NSView) throws {
+        XCTAssertEqual(try element(id, in: view).accessibilityPerformPress?(), true, id)
     }
     private func text(_ element: AnyObject) -> String? {
         guard let object = element as? NSObject else { return nil }

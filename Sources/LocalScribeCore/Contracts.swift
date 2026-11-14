@@ -6,18 +6,23 @@ public enum ScribeError: LocalizedError {
     public var errorDescription: String? { if case .message(let s) = self { return s }; return nil }
 }
 public enum Disk {
+    static let maximumJSONBytes = 64 * 1024 * 1024
+
     public static func directory(_ url: URL) throws { try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true) }
-    public static func write<T: Encodable>(_ value: T, to url: URL) throws {
-        try directory(url.deletingLastPathComponent())
+    public static func write<T: Encodable>(_ value: T, to url: URL, requireReadableSize: Bool = false) throws {
         let encoder = JSONEncoder(); encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
-        try encoder.encode(value).write(to: url, options: .atomic)
+        let data = try encoder.encode(value)
+        guard !requireReadableSize || data.count <= maximumJSONBytes else {
+            throw ScribeError.message("Файл JSON превышает допустимый размер")
+        }
+        try directory(url.deletingLastPathComponent())
+        try data.write(to: url, options: .atomic)
     }
     public static func read<T: Decodable>(_ type: T.Type, at url: URL) throws -> T {
-        let maximumBytes = 64 * 1024 * 1024
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        guard size.map({ $0 <= maximumBytes }) == true else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
+        guard size.map({ $0 <= maximumJSONBytes }) == true else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
-        guard data.count <= maximumBytes else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
+        guard data.count <= maximumJSONBytes else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         return try decoder.decode(type, from: data)
     }

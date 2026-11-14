@@ -156,6 +156,43 @@ public actor AnonymizationCoordinator {
         }
     }
 
+    /// Commit a pasted or imported text and its reverse transformation in the
+    /// same card. The two revisions checked here identify the visible map.
+    @discardableResult public func restoreText(_ id: String, text: String, sourceFormat: AnonymizationSourceFormat,
+                                               expectedResultID: String,
+                                               expectedSourceID: String) throws -> AnonymizationCardDocument {
+        try ensureCardsAreNotBeingDeleted([id])
+        return try updateCard(id) { card in
+            try Task.checkCancellation()
+            guard let result = card.publishedResult else {
+                throw ScribeError.message("Результат ещё не опубликован")
+            }
+            guard result.text.id == expectedResultID, card.source.id == expectedSourceID else {
+                throw ScribeError.message("Исходник или обезличенный текст изменился. Запустите обратное преобразование снова.")
+            }
+            let source = TextRevision(id: UUID().uuidString, text: text)
+            card.restoration = try AnonymizationRestoration.transform(
+                source, sourceFormat: sourceFormat, original: card.source.text, anonymized: result)
+            try Task.checkCancellation()
+        }
+    }
+
+    /// Reapply the current card's replacement pairs to the saved input.
+    @discardableResult public func repeatRestoration(_ id: String,
+                                                      expectedRestorationID: String) throws -> AnonymizationCardDocument {
+        try ensureCardsAreNotBeingDeleted([id])
+        return try updateCard(id) { card in
+            try Task.checkCancellation()
+            guard let published = card.publishedResult, let previous = card.restoration,
+                  previous.result.id == expectedRestorationID else {
+                throw ScribeError.message("Текст для обратного преобразования изменился. Повторите действие.")
+            }
+            card.restoration = try AnonymizationRestoration.transform(
+                previous.source, sourceFormat: previous.sourceFormat, original: card.source.text, anonymized: published)
+            try Task.checkCancellation()
+        }
+    }
+
     /// Import transaction: intention journal → card document → catalog commit
     /// (membership + consumed import position) → journal removal. The document
     /// becomes visible only through the catalog commit; a vanished or deleted
@@ -351,6 +388,10 @@ public actor AnonymizationCoordinator {
 
     private func ensureMovable(_ ids: Set<String>, to groupID: String) throws {
         if groupDeletionID == groupID { throw ScribeError.message("Дождитесь удаления группы") }
+        try ensureCardsAreNotBeingDeleted(ids)
+    }
+
+    private func ensureCardsAreNotBeingDeleted(_ ids: Set<String>) throws {
         if case .cards(let confirmed) = deletion, !confirmed.isDisjoint(with: ids) {
             throw ScribeError.message("Дождитесь удаления карточек")
         }

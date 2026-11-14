@@ -22,13 +22,16 @@ struct RecordingGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            RecordingSearchField(search: search)
+                .padding(.horizontal, 12).padding(.top, 8)
             SidebarActions {
-                expansionButton(expanded: true)
                 expansionButton(expanded: false)
+                expansionButton(expanded: true)
                 SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу"), identifier: "groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingGroupID != nil)
+            } itemActions: {
                 if let newRecording {
                     SidebarActionButton(icon: "mic", title: L10n.text("Новая запись"), identifier: "recordings.sidebar.new",
                                         action: newRecording)
@@ -37,8 +40,6 @@ struct RecordingGroupsSidebar: View {
                                         identifier: "recordings.sidebar.import", action: model.chooseImport)
                 }
             }
-            RecordingSearchField(search: search)
-                .padding(.horizontal, 12).padding(.bottom, 8)
             if search.active && search.completed {
                 SidebarSearchStatus(
                     countTitle: L10n.text("Найдено: %1$@", String(search.matchingIDs.count)),

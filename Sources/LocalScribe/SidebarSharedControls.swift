@@ -46,13 +46,15 @@ struct WorkspaceModePicker: View {
     }
 }
 
-struct SidebarActions<Actions: View>: View {
-    @ViewBuilder let actions: () -> Actions
+struct SidebarActions<GroupActions: View, ItemActions: View>: View {
+    @ViewBuilder let groupActions: () -> GroupActions
+    @ViewBuilder let itemActions: () -> ItemActions
 
     var body: some View {
         HStack(spacing: 4) {
+            groupActions()
             Spacer(minLength: 0)
-            actions()
+            itemActions()
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
@@ -77,12 +79,6 @@ struct SidebarActionButton: View {
         .help(title)
         .accessibilityLabel(title)
         .accessibilityIdentifier(identifier)
-    }
-}
-
-struct SidebarEmptyAction: View {
-    var body: some View {
-        Color.clear.frame(width: 20, height: 24).allowsHitTesting(false).accessibilityHidden(true)
     }
 }
 

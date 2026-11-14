@@ -20,20 +20,20 @@ struct DiagramGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: L10n.text("Поиск по названиям"),
+                                 label: L10n.text("Поиск по названиям схем"), shortcutActive: true)
+                .padding(.horizontal, 12).padding(.top, 8)
             SidebarActions {
-                expansionButton(expanded: true)
                 expansionButton(expanded: false)
+                expansionButton(expanded: true)
                 SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу схем"), identifier: "diagrams.groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingDiagramJobs)
-                SidebarEmptyAction()
+            } itemActions: {
                 SidebarActionButton(icon: "photo.badge.plus", title: L10n.text("Загрузить изображение"), identifier: "diagrams.import",
                                     iconVerticalOffset: 2, action: workspace.presentImportPanel)
             }
-            RecordingSearchField(search: search, identifierPrefix: "diagrams", placeholder: L10n.text("Поиск по названиям"),
-                                 label: L10n.text("Поиск по названиям схем"), shortcutActive: true)
-                .padding(.horizontal, 12).padding(.bottom, 8)
             if search.active && search.completed {
                 SidebarSearchStatus(
                     countTitle: L10n.text("Найдено: %1$@", String(search.matchingIDs.count)),

@@ -3,16 +3,16 @@ import AppKit
 import UniformTypeIdentifiers
 import LocalScribeCore
 
-/// Right-hand area of the text-anonymization section. The card (work 10)
-/// shows the two panels — «Исходный текст» and «Обезличенный текст» — with
-/// pair highlighting, warnings, notices, status and retry; below the header
-/// actions are the mount points of the deletion confirmation (work 11) and
-/// the download menu (work 12). The empty state keeps the import entry points
-/// of work 6.
+/// The selected text card with comparison, warnings and reverse transformation tabs.
 struct AnonymizationDetailColumn: View {
+    private enum Tab { case text, warnings, restoration }
+
     @ObservedObject var model: AppModel
     @ObservedObject var workspace: AnonymizationWorkspaceModel
     @ObservedObject private var editor: AnonymizationCardEditor
+    @State private var tab = Tab.text
+    @StateObject private var textScrollSync = AnonymizationScrollSync()
+    @StateObject private var restorationScrollSync = AnonymizationScrollSync()
     /// Mount point of work 11: the trash button appears only when the host
     /// provides the deletion-confirmation handler.
     var requestDeletion: ((String) -> Void)?
@@ -26,8 +26,8 @@ struct AnonymizationDetailColumn: View {
 
     var body: some View {
         Group {
-            if workspace.selected != nil {
-                cardBody
+            if let card = workspace.selected {
+                cardBody(card)
             } else {
                 ContentUnavailableView {
                     Label(L10n.text("Тексты"), systemImage: "doc.text")
@@ -47,33 +47,49 @@ struct AnonymizationDetailColumn: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .contentShape(Rectangle())
-        .onDrop(of: [.fileURL], isTargeted: nil) { workspace.importProviders($0, groupID: nil) }
+        .onDrop(of: [.fileURL], isTargeted: nil) {
+            guard tab != .restoration else { return false }
+            return workspace.importProviders($0, groupID: nil)
+        }
+        .onChange(of: workspace.selected?.id) { tab = .text }
+        .onChange(of: workspace.selected?.resultWarningCount) {
+            if tab == .warnings, workspace.selected?.resultWarningCount == 0 { tab = .text }
+        }
     }
 
     // MARK: - Card
 
-    private var cardBody: some View {
+    private func cardBody(_ card: AnonymizationCardSummary) -> some View {
         VStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(alignment: .top) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        if let card = workspace.selected {
-                            RecordingTitleView(title: card.displayName, itemName: L10n.text("текста")) { title in
-                                Task { await model.renameTextCard(card.id, to: title) }
-                            }
-                            .id(card.id)
-                            .accessibilityIdentifier("texts.detail.title")
-                            statusLine(card)
-                        }
+                VStack(alignment: .leading, spacing: 6) {
+                    RecordingTitleView(title: card.displayName, itemName: L10n.text("текста")) { title in
+                        Task { await model.renameTextCard(card.id, to: title) }
                     }
-                    Spacer()
-                    if let card = workspace.selected { cardActions(card) }
+                    .id(card.id)
+                    .accessibilityIdentifier("texts.detail.title")
+                    statusLine(card)
                 }
+                ViewThatFits(in: .horizontal) {
+                    cardActions(card)
+                    cardActions(card).labelStyle(.iconOnly)
+                }
+                .frame(maxWidth: .infinity, alignment: .trailing)
             }
             .padding(20)
             Divider()
-            panels
-                .padding(20)
+            Group {
+                switch tab {
+                case .text:
+                    panels
+                case .warnings:
+                    warningsSection(card.id)
+                case .restoration:
+                    AnonymizationRestorationView(workspace: workspace, cardID: card.id,
+                                                 scrollSync: restorationScrollSync)
+                }
+            }
+            .padding(20)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color(nsColor: .textBackgroundColor))
@@ -85,6 +101,16 @@ struct AnonymizationDetailColumn: View {
                 Label(card.statusTitle, systemImage: card.statusIcon)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("texts.detail.status")
+                if card.resultWarningCount > 0 {
+                    Button {
+                        openTab(tab == .warnings ? .text : .warnings)
+                    } label: {
+                        Label(L10n.text(tab == .warnings ? "К тексту" : "Предупреждения"),
+                              systemImage: tab == .warnings ? "arrow.left" : "exclamationmark.triangle")
+                    }
+                    .controlSize(.small)
+                    .accessibilityIdentifier("texts.detail.warningsTab")
+                }
                 if card.attemptState == .queued, let position = model.textQueuePosition(for: card.id) {
                     Text(L10n.text("Позиция в очереди: %1$@", String(position)))
                         .font(.caption).foregroundStyle(.secondary)
@@ -126,17 +152,30 @@ struct AnonymizationDetailColumn: View {
 
     private func cardActions(_ card: AnonymizationCardSummary) -> some View {
         HStack(spacing: 8) {
-            if editor.hasPublishedResult { downloadMenu(card) }
-            switch card.attemptState {
-            case .queued, .running:
-                Button(L10n.text("Отменить"), role: .destructive) {
-                    Task { await model.cancelTextCard(card.id) }
+            if tab == .restoration || (editor.cardID == card.id && editor.hasPublishedResult) {
+                resultActions(card)
+            }
+            if tab == .restoration {
+                Button {
+                    Task { await workspace.repeatRestoration(card.id) }
+                } label: {
+                    Label(L10n.text("Преобразовать снова"), systemImage: "arrow.clockwise")
                 }
-                .accessibilityIdentifier("texts.detail.cancel")
-            case .waitingModel:
-                EmptyView()
-            default:
-                retryButton(card)
+                .disabled(!hasRestoration(card) || !workspace.canStartRestoration(card.id))
+                .help(L10n.text("Преобразовать снова"))
+                .accessibilityIdentifier("texts.detail.restoration.retry")
+            } else {
+                switch card.attemptState {
+                case .queued, .running:
+                    Button(L10n.text("Отменить"), role: .destructive) {
+                        Task { await model.cancelTextCard(card.id) }
+                    }
+                    .accessibilityIdentifier("texts.detail.cancel")
+                case .waitingModel:
+                    EmptyView()
+                default:
+                    retryButton(card)
+                }
             }
             if let requestDeletion {
                 Button(role: .destructive) {
@@ -153,6 +192,42 @@ struct AnonymizationDetailColumn: View {
         }
         .controlSize(.small)
         .fixedSize()
+    }
+
+    private func hasRestoration(_ card: AnonymizationCardSummary) -> Bool {
+        editor.cardID == card.id && editor.document?.restoration != nil
+    }
+
+    private func openTab(_ tab: Tab) {
+        if tab != .text { editor.clearWarningJump() }
+        self.tab = tab
+    }
+
+    private func resultActions(_ card: AnonymizationCardSummary) -> some View {
+        let restoring = tab == .restoration
+        let resultAvailable = !restoring || hasRestoration(card)
+        return Group {
+            Button {
+                if restoring { workspace.copyRestoration(card.id) }
+                else { workspace.copyText(card.id) }
+            } label: {
+                Label(L10n.text("Скопировать"), systemImage: "doc.on.doc")
+            }
+            .disabled(!resultAvailable)
+            .accessibilityIdentifier("texts.detail.copy")
+            .help(L10n.text(restoring ? "Скопировать восстановленный текст" : "Скопировать обезличенный текст"))
+
+            Button {
+                openTab(restoring ? .text : .restoration)
+            } label: {
+                Label(L10n.text(restoring ? "К обезличиванию" : "Обратное преобразование"),
+                      systemImage: restoring ? "arrow.left" : "arrow.uturn.backward")
+            }
+            .accessibilityIdentifier("texts.detail.restorationTab")
+            .help(L10n.text(restoring ? "К обезличиванию" : "Обратное преобразование"))
+
+            downloadMenu(card, restoration: restoring).disabled(!resultAvailable)
+        }
     }
 
     /// Retry (AC-17/18): «Обезличить заново» in the card's top-right. Before
@@ -175,8 +250,9 @@ struct AnonymizationDetailColumn: View {
     /// The download menu (AC-19, work 12): it appears with the first
     /// published result; the items act through the workspace handler (the
     /// export implementation attaches it; tests may observe or replace it).
-    private func downloadMenu(_ card: AnonymizationCardSummary) -> some View {
-        let handler = workspace.requestTextDownload
+    private func downloadMenu(_ card: AnonymizationCardSummary, restoration: Bool) -> some View {
+        let handler: ((String, AnonymizationTextDownloadFormat) -> Void)? = restoration
+            ? workspace.downloadRestoration(_:format:) : workspace.requestTextDownload
         return Menu {
             Button(L10n.text("Markdown (.md)")) { handler?(card.id, .markdown) }
                 .disabled(handler == nil)
@@ -186,22 +262,20 @@ struct AnonymizationDetailColumn: View {
             Label(L10n.text("Скачать"), systemImage: "square.and.arrow.down")
         }
         .accessibilityIdentifier("texts.detail.download")
-        .help(L10n.text("Скачать обезличенный текст"))
+        .help(L10n.text(restoration ? "Скачать восстановленный текст" : "Скачать обезличенный текст"))
     }
 
     // MARK: - Panels
 
     private var panels: some View {
-        HStack(alignment: .top, spacing: 16) {
-            leftColumn
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            rightColumn
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        AnonymizationComparisonView(scrollSync: textScrollSync) { sync in
+            leftColumn(sync)
+        } right: { sync in
+            rightColumn(sync)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
-    private var leftColumn: some View {
+    private func leftColumn(_ sync: AnonymizationScrollSync) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(L10n.text("Исходный текст")).font(.headline)
@@ -213,13 +287,14 @@ struct AnonymizationDetailColumn: View {
                 value: editor.sourcePanel.map { AnonymizationTextEditor.Value($0) },
                 editable: editor.sourceEditable,
                 jump: nil,
+                scrollSync: sync,
                 onEdit: { edit in Task { await editor.applySourceEdit(edit) } })
                 .accessibilityIdentifier("texts.detail.sourceEditor")
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
-    private var rightColumn: some View {
+    private func rightColumn(_ sync: AnonymizationScrollSync) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
                 Text(L10n.text("Обезличенный текст")).font(.headline)
@@ -247,14 +322,13 @@ struct AnonymizationDetailColumn: View {
                     .font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("texts.detail.noMatches")
             }
-            if !editor.warnings.isEmpty {
-                warningsSection
-            }
             if editor.hasPublishedResult {
                 AnonymizationTextEditor(
                     value: editor.resultPanel.map { AnonymizationTextEditor.Value($0) },
                     editable: editor.resultEditable,
                     jump: editor.jumpRequest,
+                    scrollSync: sync,
+                    scrollSide: .right,
                     onEdit: { edit in Task { await editor.applyResultEdit(edit) } })
                     .accessibilityIdentifier("texts.detail.resultEditor")
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -275,28 +349,26 @@ struct AnonymizationDetailColumn: View {
     /// A doubtful body fragment jumps to its review position in the right
     /// text; an uninterpreted type is quoted verbatim with a link into the
     /// anonymization settings tab.
-    private var warningsSection: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            ForEach(editor.warnings) { warning in
-                HStack(alignment: .top, spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                        .font(.caption)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(warning.title).font(.caption)
-                        if let type = warning.uninterpretedType {
-                            Text(type).font(.caption).foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                        if let fragment = warning.fragment {
-                            Text(fragment).font(.caption).foregroundStyle(.secondary)
-                                .textSelection(.enabled)
-                        }
-                        HStack(spacing: 8) {
+    private func warningsSection(_ cardID: String) -> some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 14) {
+                ForEach(editor.cardID == cardID ? editor.warnings : []) { warning in
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.orange)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(warning.title)
+                            if let detail = warning.uninterpretedType ?? warning.fragment {
+                                Text(detail).foregroundStyle(.secondary).textSelection(.enabled)
+                            }
                             if warning.jump != nil {
-                                Button(L10n.text("Показать в тексте")) { editor.requestWarningJump(warning) }
-                                    .controlSize(.small)
-                                    .accessibilityIdentifier("texts.detail.warning.jump.\(warning.id)")
+                                Button(L10n.text("Показать в тексте")) {
+                                    openTab(.text)
+                                    editor.requestWarningJump(warning)
+                                }
+                                .controlSize(.small)
+                                .accessibilityIdentifier("texts.detail.warning.jump.\(warning.id)")
                             }
                             if warning.uninterpretedType != nil {
                                 Button(L10n.text("Открыть настройки типов")) {
@@ -307,11 +379,13 @@ struct AnonymizationDetailColumn: View {
                             }
                         }
                     }
+                    .accessibilityElement(children: .contain)
+                    .accessibilityIdentifier("texts.detail.warning.\(warning.id)")
                 }
-                .accessibilityElement(children: .contain)
-                .accessibilityIdentifier("texts.detail.warning.\(warning.id)")
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
+        .accessibilityIdentifier("texts.detail.warnings")
     }
 
     /// The right panel before the first successful publication (AC-15).

@@ -77,7 +77,7 @@ public struct AnonymizationRepository: Sendable {
     }
     public func saveCard(_ card: AnonymizationCardDocument) throws {
         try card.validate()
-        try Disk.write(card, to: cardURL(card.id))
+        try Disk.write(card, to: cardURL(card.id), requireReadableSize: true)
     }
     /// Removes the card document and all working files of its attempts. The
     /// working files go first and the document last: when a removal fails

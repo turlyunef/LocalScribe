@@ -26,20 +26,20 @@ struct AnonymizationGroupsSidebar: View {
 
     var body: some View {
         VStack(spacing: 0) {
+            RecordingSearchField(search: search, identifierPrefix: "texts", placeholder: L10n.text("Поиск по названиям"),
+                                 label: L10n.text("Поиск по названиям текстов"), shortcutActive: true)
+                .padding(.horizontal, 12).padding(.top, 8)
             SidebarActions {
-                expansionButton(expanded: true)
                 expansionButton(expanded: false)
+                expansionButton(expanded: true)
                 SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу текстов"), identifier: "texts.groups.add") {
                     if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
                 }
                 .disabled(model.deletingTextJobs)
-                SidebarEmptyAction()
-                SidebarActionButton(icon: "doc.badge.plus", title: L10n.text("Загрузить файл"), identifier: "texts.import",
-                                    iconVerticalOffset: 1, action: workspace.presentImportPanel)
+            } itemActions: {
+                SidebarActionButton(icon: "square.and.arrow.down", title: L10n.text("Загрузить файл"),
+                                    identifier: "texts.import", action: workspace.presentImportPanel)
             }
-            RecordingSearchField(search: search, identifierPrefix: "texts", placeholder: L10n.text("Поиск по названиям"),
-                                 label: L10n.text("Поиск по названиям текстов"), shortcutActive: true)
-                .padding(.horizontal, 12).padding(.bottom, 8)
             if search.active && search.completed {
                 SidebarSearchStatus(
                     countTitle: L10n.text("Найдено: %1$@", String(search.matchingIDs.count)),
