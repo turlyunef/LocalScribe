@@ -19,7 +19,7 @@ final class DiagramWorkspaceTests: XCTestCase {
         c = json.loads(sys.stdin.readline())
         root = pathlib.Path(c['modelsPath']).parent
         def emit(kind, message=''):
-            print(json.dumps(dict(version=1, jobId=c['jobId'], runId=c['runId'], type=kind, message=message)), flush=True)
+            print(json.dumps(dict(version=1, jobId=c['jobId'], runId=c['runId'], kind=c.get('kind'), type=kind, message=message)), flush=True)
         with (root / 'events.jsonl').open('a') as f:
             f.write(json.dumps(c) + '\n')
         if c.get('kind') == 'diagram':

@@ -1,5 +1,50 @@
 import SwiftUI
+import AppKit
 import LocalScribeCore
+
+/// Deterministic segmented switcher for the three archive sections. The
+/// SwiftUI-bridged picker keeps its intrinsic (equal-width) size in
+/// long-lived processes and overflows the fixed header frame; the pinned
+/// intrinsic size keeps the header layout identical in every process state.
+private struct WorkspaceModePicker: NSViewRepresentable {
+    @Binding var mode: WorkspaceMode
+
+    final class Control: NSSegmentedControl {
+        override var intrinsicContentSize: NSSize { NSSize(width: 216, height: 20) }
+        override func sizeToFit() { bounds.size = intrinsicContentSize }
+    }
+
+    final class Coordinator: NSObject {
+        let mode: Binding<WorkspaceMode>
+        init(mode: Binding<WorkspaceMode>) { self.mode = mode }
+
+        @objc func changed(_ sender: NSSegmentedControl) {
+            let all = WorkspaceMode.allCases
+            guard sender.selectedSegment >= 0, sender.selectedSegment < all.count else { return }
+            mode.wrappedValue = all[sender.selectedSegment]
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(mode: $mode) }
+
+    func makeNSView(context: Context) -> Control {
+        let control = Control()
+        control.segmentCount = WorkspaceMode.allCases.count
+        control.controlSize = .small
+        for (index, value) in WorkspaceMode.allCases.enumerated() {
+            control.setLabel(L10n.text(value.title), forSegment: index)
+        }
+        control.target = context.coordinator
+        control.action = #selector(Coordinator.changed(_:))
+        control.setAccessibilityLabel(L10n.text("Раздел архива"))
+        return control
+    }
+
+    func updateNSView(_ control: Control, context: Context) {
+        let index = WorkspaceMode.allCases.firstIndex(of: mode) ?? 0
+        if control.selectedSegment != index { control.selectedSegment = index }
+    }
+}
 
 struct SidebarWorkspaceHeader<GroupActions: View, ArchiveActions: View>: View {
     @Binding var mode: WorkspaceMode
@@ -8,17 +53,9 @@ struct SidebarWorkspaceHeader<GroupActions: View, ArchiveActions: View>: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Picker(L10n.text("Раздел архива"), selection: $mode) {
-                ForEach(WorkspaceMode.allCases) { value in
-                    Text(value.title).tag(value)
-                }
-            }
-            .labelsHidden()
-            .pickerStyle(.segmented)
-            .controlSize(.small)
-            .tint(.blue)
-            .frame(width: 144)
-            .accessibilityIdentifier("workspace.mode")
+            WorkspaceModePicker(mode: $mode)
+                .frame(width: 216)
+                .accessibilityIdentifier("workspace.mode")
 
             Spacer(minLength: 0)
             groupActions()

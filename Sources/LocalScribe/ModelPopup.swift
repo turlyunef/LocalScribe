@@ -10,8 +10,14 @@ struct ModelMenuOption {
     var enabled: Bool { reason == nil }
 
     init(profile: ModelProfile, hardware: ModelHardware, recommended: Bool) {
+        self.init(profile: profile, reason: hardware.warning(for: profile), recommended: recommended)
+    }
+
+    /// Task-aware option: the caller supplies the combined incompatibility
+    /// reasons of the task and the Mac (already localized for display).
+    init(profile: ModelProfile, reason: String?, recommended: Bool) {
         id = profile.id
-        reason = hardware.warning(for: profile)
+        self.reason = reason
         self.recommended = recommended && reason == nil
         let size = profile.bytes.formatted(.byteCount(style: .file).locale(L10n.locale))
         let details = "\(profile.displayName) · \(size)"

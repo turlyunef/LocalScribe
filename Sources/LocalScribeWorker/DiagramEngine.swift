@@ -140,7 +140,10 @@ actor DiagramEngine {
         do { catalog = try Disk.read(ModelCatalog.self, at: catalogURL) }
         catch { throw ScribeError.message("Не удалось прочитать каталог моделей") }
         guard catalog.schemaVersion == 1 else { throw ScribeError.message("Несовместимая версия каталога моделей") }
-        let matches = catalog.models.filter { $0.id == info.modelID && $0.purpose == .diagram }
+        // A shared-mode run may pin a task-qualified profile of another catalog
+        // purpose (the shared model serves three tasks); the pinned identity —
+        // id, revision and files — is unchanged, so the run hash still matches.
+        let matches = catalog.models.filter { $0.id == info.modelID && ($0.purpose == .diagram || $0.supports(.diagramRecognition)) }
         guard matches.count == 1 else { throw ScribeError.message("Закреплённая модель схем недоступна в каталоге") }
         let profile = matches[0]
         guard ModelCatalog(models: [profile]).fingerprint == info.profileHash else {

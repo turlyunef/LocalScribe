@@ -21,6 +21,17 @@ public struct RecordingGroups: Codable, Equatable, Sendable {
     public private(set) var defaultID = RecordingGroup.ungroupedID
     public private(set) var membership: [String: String] = [:]
     public init() {}
+    /// Full-data initializer for projections of sibling archives that reuse
+    /// this group model while owning their own catalog ids (for example the
+    /// text-anonymization archive). The result is validated exactly like a
+    /// catalog read; no partial state is ever produced.
+    public init(groups: [RecordingGroup], defaultID: String, membership: [String: String]) throws {
+        self.init()
+        self.groups = groups
+        self.defaultID = defaultID
+        self.membership = membership
+        try validate()
+    }
     public func groupID(for recordingID: String) -> String { membership[recordingID] ?? RecordingGroup.ungroupedID }
     public var defaultGroup: RecordingGroup { groups.first { $0.id == defaultID }! }
 

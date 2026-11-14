@@ -66,7 +66,7 @@ struct WorkerFailureError: LocalizedError, Sendable {
                 guard buffer.count < 1_000_000 else { throw ScribeError.message("Нарушен протокол worker: слишком длинное сообщение") }
                 while let end = buffer.firstIndex(of: 10) {
                     let line = buffer[..<end]; buffer.removeSubrange(...end)
-                    guard let event = try? JSONDecoder().decode(WorkerEvent.self, from: line), event.version == 1, event.jobId == command.jobId, event.runId == command.runId else { throw ScribeError.message("Нарушена версия или формат протокола worker") }
+                    guard let event = try? JSONDecoder().decode(WorkerEvent.self, from: line), event.version == 1, event.jobId == command.jobId, event.runId == command.runId, event.kind == command.kind else { throw ScribeError.message("Нарушена версия или формат протокола worker") }
                     last = event
                     if event.type == "failed" { failure = event }
                     await onEvent(event)
@@ -136,7 +136,7 @@ struct WorkerFailureError: LocalizedError, Sendable {
     nonisolated private static func failureContext(command: WorkerCommand, process: Process,
                                                    last: WorkerEvent?, started: Date) -> [(String, String)] {
         var context: [(String, String)] = []
-        context.append((L10n.text("вид задания"), command.isDiagram ? L10n.text("схема") : L10n.text("запись")))
+        context.append((L10n.text("вид задания"), command.isAnonymization ? L10n.text("обезличивание") : command.isDiagram ? L10n.text("схема") : L10n.text("запись")))
         if let stage = command.stage {
             context.append((L10n.text("этап"), command.liveCapture == true ? stage.rawValue + " (live)" : stage.rawValue))
         } else if command.isDiagram {

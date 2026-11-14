@@ -374,7 +374,10 @@
       "name": "Qwen3.5 · 9B · 4-bit",
       "recommendedMemoryGB": 16,
       "workingMemoryGB": 10,
-      "recommendationRank": 3
+      "recommendationRank": 3,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "tokenizer",
@@ -897,7 +900,10 @@
       "name": "Qwen3.5 · 4B · 4-bit",
       "recommendedMemoryGB": 8,
       "workingMemoryGB": 5,
-      "recommendationRank": 2
+      "recommendationRank": 2,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "summary-27b",
@@ -994,7 +1000,10 @@
       "name": "Qwen3.5 · 27B · 4-bit",
       "recommendedMemoryGB": 32,
       "workingMemoryGB": 24,
-      "recommendationRank": 5
+      "recommendationRank": 5,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "tokenizer-multilingual",
@@ -1255,7 +1264,10 @@
       "name": "Qwen3.5 · 2B · 4-bit",
       "recommendedMemoryGB": 8,
       "workingMemoryGB": 3,
-      "recommendationRank": 1
+      "recommendationRank": 1,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "summary-9b-8bit",
@@ -1340,7 +1352,10 @@
       "name": "Qwen3.5 · 9B · 8-bit",
       "recommendedMemoryGB": 24,
       "workingMemoryGB": 16,
-      "recommendationRank": 4
+      "recommendationRank": 4,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "summary-27b-6bit",
@@ -1449,7 +1464,10 @@
       "name": "Qwen3.5 · 27B · 6-bit",
       "recommendedMemoryGB": 48,
       "workingMemoryGB": 32,
-      "recommendationRank": 6
+      "recommendationRank": 6,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "summary-27b-8bit",
@@ -1564,7 +1582,10 @@
       "name": "Qwen3.5 · 27B · 8-bit",
       "recommendedMemoryGB": 64,
       "workingMemoryGB": 40,
-      "recommendationRank": 7
+      "recommendationRank": 7,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "summary-122b",
@@ -1727,7 +1748,10 @@
       "name": "Qwen3.5 · 122B-A10B · 4-bit",
       "recommendedMemoryGB": 128,
       "workingMemoryGB": 88,
-      "recommendationRank": 8
+      "recommendationRank": 8,
+      "supportedTasks": [
+        "SUMMARY"
+      ]
     },
     {
       "id": "tokenizer-qwen3",
@@ -2139,7 +2163,10 @@
       "recommendedMemoryGB": 8,
       "workingMemoryGB": 5,
       "profileDescription": "Локальное распознавание блок-схем и архитектурных схем на изображениях PNG/JPEG для режима «Схемы». Не влияет на комплект моделей записей.",
-      "recommendationRank": 1
+      "recommendationRank": 1,
+      "supportedTasks": [
+        "DIAGRAM_RECOGNITION"
+      ]
     },
     {
       "id": "diagram-qwen3-vl-8b",
@@ -2248,7 +2275,10 @@
       "name": "Qwen3-VL · 8B · 4-bit",
       "recommendedMemoryGB": 16,
       "workingMemoryGB": 10,
-      "recommendationRank": 2
+      "recommendationRank": 2,
+      "supportedTasks": [
+        "DIAGRAM_RECOGNITION"
+      ]
     },
     {
       "id": "diagram-qwen3-vl-32b",
@@ -2369,7 +2399,10 @@
       "name": "Qwen3-VL · 32B · 4-bit",
       "recommendedMemoryGB": 32,
       "workingMemoryGB": 24,
-      "recommendationRank": 3
+      "recommendationRank": 3,
+      "supportedTasks": [
+        "DIAGRAM_RECOGNITION"
+      ]
     }
   ]
 }

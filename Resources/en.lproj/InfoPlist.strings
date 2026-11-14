@@ -4,4 +4,6 @@
 "Группа LocalScribe" = "LocalScribe Group";
 "Схема LocalScribe" = "LocalScribe Diagram";
 "Группа схем LocalScribe" = "LocalScribe Diagram Group";
+"Текст LocalScribe" = "LocalScribe Text";
+"Группа текстов LocalScribe" = "LocalScribe Text Group";
 "NSAudioCaptureUsageDescription" = "LocalScribe records audio played by apps on your Mac and saves it locally.";

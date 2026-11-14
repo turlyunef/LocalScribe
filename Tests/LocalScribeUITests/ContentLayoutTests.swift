@@ -820,7 +820,7 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
 
         let (hosting, window) = host(ContentView(model: model), width: 850)
         defer { window.close() }
-        try await settle(hosting)
+        try await settleFrames(hosting)
 
         func frame(_ id: String) throws -> NSRect {
             try XCTUnwrap(findElement(id, in: hosting)?.accessibilityFrame?(), id)
@@ -833,8 +833,8 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         }
 
         let switchFrame = try frame("workspace.mode")
-        let titles = ["Записи", "Схемы"]
-        let segmentFrames = try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?()) }
+        let titles = ["Записи", "Схемы", "Обезличивание"]
+        let segmentFrames = try titles.map { try XCTUnwrap(segment($0).accessibilityFrame?(), $0) }
         let groupButtons = ["expandAll", "collapseAll", "add"]
         let groupFrames = try groupButtons.map { try frame("groups.\($0)") }
         let recordingActions = try ["recordings.sidebar.new", "recordings.sidebar.import"].map(frame)
@@ -851,7 +851,7 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         XCTAssertNil(findElement("diagrams.import", in: hosting))
 
         _ = try segment("Схемы").accessibilityPerformPress?()
-        try await settle(hosting)
+        try await settleFrames(hosting)
         XCTAssertNotNil(findElement("diagrams.search", in: hosting))
         XCTAssertNotNil(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: hosting))
         XCTAssertNil(findElement("groups.add", in: hosting))
@@ -865,12 +865,28 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         XCTAssertEqual(model.selection, recording.id)
 
         _ = try segment("Записи").accessibilityPerformPress?()
-        try await settle(hosting)
+        try await settleFrames(hosting)
         XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
         XCTAssertNil(findElement("diagrams.import", in: hosting))
         XCTAssertEqual(try frame("workspace.mode"), switchFrame)
         await model.shutdown()
     }
+    /// The AppKit segmented control sizes itself asynchronously: the first
+    /// layout pass reports intrinsic equal-width segments and only the next
+    /// pass applies the fixed header frame. Poll until two consecutive reads
+    /// agree before capturing geometry, otherwise the test races that resize.
+    private func settleFrames(_ hosting: NSHostingView<some View>) async throws {
+        var last: [NSRect] = []
+        for _ in 0..<40 {
+            try await Task.sleep(for: .milliseconds(50))
+            hosting.layoutSubtreeIfNeeded()
+            let picker = try XCTUnwrap(findElement("workspace.mode", in: hosting))
+            let current = ([picker.accessibilityFrame?() ?? .zero] + descendants(picker).map { $0.accessibilityFrame?() ?? .zero })
+            if current == last, current.allSatisfy({ $0.width > 0 }) { return }
+            last = current
+        }
+    }
+
     private func labelText(_ object: NSObject) -> String? {
         for name in ["accessibilityLabel", "accessibilityTitle", "accessibilityValue"] {
             let selector = NSSelectorFromString(name)

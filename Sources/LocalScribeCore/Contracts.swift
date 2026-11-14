@@ -234,23 +234,34 @@ public struct Summary: Codable, Sendable, Equatable {
 }
 public struct WorkerCommand: Codable, Sendable {
     public var version = 1
-    /// Nil preserves the historical audio wire format; only "diagram" is accepted today.
+    /// Nil preserves the historical audio wire format; "diagram" and
+    /// "anonymization" route to their own handlers. Unknown kinds exit 64.
     public var kind: String?
     public var jobId: String; public var runId: String
     public var stage: Stage?
     public var recordingPath: String?
     public var diagramPath: String?
+    public var anonymizationPath: String?
     public var modelsPath: String
     public var toolsPath: String?
     public var liveCapture: Bool?
     public init(jobId: String, runId: String, stage: Stage, recordingPath: String, modelsPath: String, toolsPath: String) { self.jobId = jobId; self.runId = runId; self.stage = stage; self.recordingPath = recordingPath; self.modelsPath = modelsPath; self.toolsPath = toolsPath }
     public init(diagramJobId: String, runId: String, diagramPath: String, modelsPath: String, toolsPath: String? = nil) { kind = "diagram"; jobId = diagramJobId; self.runId = runId; self.diagramPath = diagramPath; self.modelsPath = modelsPath; self.toolsPath = toolsPath }
+    /// Text anonymization: `anonymizationPath` names the attempt workspace whose
+    /// local artifacts carry the document; the text never travels over JSONL.
+    public init(anonymizationJobId: String, runId: String, anonymizationPath: String, modelsPath: String, toolsPath: String? = nil) { kind = "anonymization"; jobId = anonymizationJobId; self.runId = runId; self.anonymizationPath = anonymizationPath; self.modelsPath = modelsPath; self.toolsPath = toolsPath }
     public var isDiagram: Bool { kind == "diagram" }
+    public var isAnonymization: Bool { kind == "anonymization" }
 }
 public struct WorkerEvent: Codable, Sendable {
     public var version = 1; public var jobId: String; public var runId: String
+    /// Job-kind discriminator echoed from the command ("diagram", "anonymization");
+    /// absent for the historical kindless audio events.
+    public var kind: String?
     public var type: String; public var message: String; public var artifact: String?
-    public init(command: WorkerCommand, type: String, message: String = "", artifact: String? = nil) { jobId = command.jobId; runId = command.runId; self.type = type; self.message = message; self.artifact = artifact }
+    public init(command: WorkerCommand, type: String, message: String = "", artifact: String? = nil) { jobId = command.jobId; runId = command.runId; kind = command.kind; self.type = type; self.message = message; self.artifact = artifact }
+    public var isDiagram: Bool { kind == "diagram" }
+    public var isAnonymization: Bool { kind == "anonymization" }
 }
 public func timecode(_ ms: Int) -> String { let s = max(0, ms) / 1000; return String(format: "%02d:%02d:%02d", s / 3600, s / 60 % 60, s % 60) }
 public func speakerName(_ id: String?) -> String {

@@ -4,12 +4,12 @@ import Foundation
 
 /// Pins the selected file before hashing so path/symlink replacement cannot change
 /// the input of the copy. The caller keeps its security scope for this lifetime.
-final class ImportSource {
+public final class ImportSource {
     private let file: FileHandle
-    let size: Int64
+    public let size: Int64
     private let allowsAppendedBytes: Bool
 
-    init(_ url: URL, allowsAppendedBytes: Bool = false) throws {
+    public init(_ url: URL, allowsAppendedBytes: Bool = false) throws {
         // Nonblocking open lets us reject a FIFO without waiting for a writer.
         let descriptor = url.withUnsafeFileSystemRepresentation { path in
             path.map { Darwin.open($0, O_RDONLY | O_CLOEXEC | O_NONBLOCK) } ?? -1
@@ -52,15 +52,26 @@ final class ImportSource {
         try requireUnchangedSize()
     }
 
-    func hash() throws -> String {
+    public func hash() throws -> String {
         var hash = SHA256()
         try readPinnedBytes { hash.update(data: $0) }
         return hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
-    func close() { try? file.close() }
+    /// One full pinned byte snapshot of the source, read in bounded chunks.
+    /// The local text import fixes its byte sequence with this single read:
+    /// a path/symlink swap or size change during it becomes a read error
+    /// instead of silently mixing two files.
+    public func readBytes() throws -> Data {
+        var data = Data()
+        data.reserveCapacity(Int(size))
+        try readPinnedBytes { data.append($0) }
+        return data
+    }
 
-    func copy(to destination: URL, verifying digest: String) throws {
+    public func close() { try? file.close() }
+
+    public func copy(to destination: URL, verifying digest: String) throws {
         // Always create a fresh regular file, never follow an existing destination.
         let descriptor = destination.withUnsafeFileSystemRepresentation { path in
             path.map { Darwin.open($0, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) } ?? -1

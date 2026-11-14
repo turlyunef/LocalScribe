@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 import LocalScribeCore
 
 enum WorkspaceMode: String, CaseIterable, Identifiable {
-    case recordings = "Записи", diagrams = "Схемы"
+    case recordings = "Записи", diagrams = "Схемы", anonymization = "Обезличивание"
     var id: String { rawValue }
     var title: String { L10n.text(rawValue) }
 }
@@ -12,31 +12,37 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
 struct ContentView: View {
     @ObservedObject var model: AppModel
     @StateObject private var diagramWorkspace: DiagramWorkspaceModel
+    @StateObject private var textWorkspace: AnonymizationWorkspaceModel
     @State private var mode: WorkspaceMode = .recordings
     @State private var columnVisibility: NavigationSplitViewVisibility = .all
     @State private var recordingSheet = false
     @State private var deletingRecordings: SidebarDeletion?
     @State private var deletingDiagrams: SidebarDiagramDeletion?
+    @State private var deletingTexts: SidebarTextDeletion?
     init(model: AppModel) {
         _model = ObservedObject(wrappedValue: model)
         _diagramWorkspace = StateObject(wrappedValue: DiagramWorkspaceModel(model: model))
+        _textWorkspace = StateObject(wrappedValue: AnonymizationWorkspaceModel(model: model))
     }
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
             VStack(spacing: 0) {
-                if mode == .recordings {
+                switch mode {
+                case .recordings:
                     RecordingGroupsSidebar(model: model, mode: $mode, deletion: $deletingRecordings) {
                         recordingSheet = true
                     }
-                } else {
+                case .diagrams:
                     DiagramGroupsSidebar(model: model, workspace: diagramWorkspace, mode: $mode, deletion: $deletingDiagrams)
+                case .anonymization:
+                    AnonymizationGroupsSidebar(model: model, workspace: textWorkspace, mode: $mode, deletion: $deletingTexts)
                 }
             }.navigationSplitViewColumnWidth(min: 300, ideal: 300)
             VStack(spacing: 6) {
                 Label(L10n.text("Всё обрабатывается на Mac"), systemImage: "lock.shield").font(.caption)
                     .accessibilityIdentifier("sidebar.localProcessing")
-                Button((mode == .recordings ? model.modelsReady : model.diagramModelsReady) ? L10n.text("Модели готовы") : L10n.text("Установить модели")) {
-                    model.settingsWindow.show(tab: mode == .recordings ? .recordings : .diagrams)
+                Button(modelsReadyLabel) {
+                    model.settingsWindow.show(tab: settingsTab)
                 }
                 .buttonStyle(.link).font(.caption).help(L10n.text("Открыть настройки и управление моделями"))
                 .accessibilityIdentifier("sidebar.models")
@@ -44,9 +50,14 @@ struct ContentView: View {
         } detail: {
             if mode == .recordings {
                 RecordingDetailColumn(model: model, recordingSheet: $recordingSheet)
-            } else {
+            } else if mode == .diagrams {
                 DiagramDetailColumn(model: model, workspace: diagramWorkspace) { id in
                     SidebarDiagramDeletion.request([id], model: model, presentation: $deletingDiagrams)
+                }
+            } else {
+                AnonymizationDetailColumn(workspace: textWorkspace) { id in
+                    // The card's trash button concerns only the open card.
+                    SidebarTextDeletion.request([id], model: model, presentation: $deletingTexts)
                 }
             }
         }
@@ -64,28 +75,61 @@ struct ContentView: View {
         .sheet(item: $deletingDiagrams) { deletion in
             DeleteDiagramsView(workspace: diagramWorkspace, ids: deletion.ids) { deletingDiagrams = nil }
         }
+        .sheet(item: $deletingTexts) { deletion in
+            DeleteTextCardsView(model: model, ids: deletion.ids) { deletingTexts = nil }
+        }
         .background(WorkspaceKeyboardShortcut(handle: handleShortcut))
+        // Leaving the texts section is explicit navigation: imported cards of
+        // a running batch stop auto-opening afterwards (AC-36).
+        .onChange(of: mode) { previous, current in
+            if previous == .anonymization, current != previous {
+                textWorkspace.stopImportAutoReveal()
+            }
+        }
         .disabled(blocked)
     }
 
     private var blocked: Bool { model.preparingStorage || model.shuttingDown }
 
+    private var settingsTab: SettingsTab {
+        switch mode {
+        case .recordings: return .recordings
+        case .diagrams: return .diagrams
+        case .anonymization: return .anonymization
+        }
+    }
+
+    private var modelsReadyLabel: String {
+        let ready: Bool
+        switch mode {
+        case .recordings: ready = model.modelsReady
+        case .diagrams: ready = model.diagramModelsReady
+        case .anonymization: ready = model.anonymizationModelsReady
+        }
+        return ready ? L10n.text("Модели готовы") : L10n.text("Установить модели")
+    }
+
     private func handleShortcut(_ shortcut: WorkspaceKeyboardShortcut.Action) -> Bool {
         guard !blocked, !recordingSheet, deletingRecordings == nil, deletingDiagrams == nil,
-              model.resultEdit == nil else { return false }
+              deletingTexts == nil, model.resultEdit == nil else { return false }
         switch shortcut {
         case .closeSelection:
-            if mode == .diagrams {
+            switch mode {
+            case .diagrams:
                 guard diagramWorkspace.selected != nil else { return false }
                 diagramWorkspace.selection = nil
-            } else {
+            case .anonymization:
+                guard textWorkspace.selected != nil else { return false }
+                textWorkspace.selection = nil
+            case .recordings:
                 guard model.selected != nil else { return false }
                 model.selection = nil
             }
             return true
         case .deleteSelection:
             guard columnVisibility != .detailOnly else { return false }
-            if mode == .diagrams {
+            switch mode {
+            case .diagrams:
                 let search = diagramWorkspace.search
                 var ids = diagramWorkspace.sidebarSelection.ids
                 if search.active {
@@ -93,14 +137,26 @@ struct ContentView: View {
                     ids.formIntersection(diagramWorkspace.sidebarDiagramOrder)
                 }
                 return SidebarDiagramDeletion.request(ids, model: model, presentation: $deletingDiagrams)
+            case .anonymization:
+                // The confirmation set comes from the section selection,
+                // narrowed to the current search results while a filter is
+                // active (AC-24).
+                let search = textWorkspace.search
+                var ids = textWorkspace.sidebarSelection.ids
+                if search.active {
+                    guard search.hasCurrentQueryResults else { return false }
+                    ids.formIntersection(textWorkspace.sidebarTextOrder)
+                }
+                return SidebarTextDeletion.request(ids, model: model, presentation: $deletingTexts)
+            case .recordings:
+                let search = model.recordingSearch
+                var ids = model.sidebarSelection.ids
+                if search.active {
+                    guard search.hasCurrentQueryResults else { return false }
+                    ids.formIntersection(model.sidebarRecordingOrder)
+                }
+                return SidebarDeletion.request(ids, model: model, presentation: $deletingRecordings)
             }
-            let search = model.recordingSearch
-            var ids = model.sidebarSelection.ids
-            if search.active {
-                guard search.hasCurrentQueryResults else { return false }
-                ids.formIntersection(model.sidebarRecordingOrder)
-            }
-            return SidebarDeletion.request(ids, model: model, presentation: $deletingRecordings)
         }
     }
 }
@@ -154,7 +210,7 @@ struct ResultTextView: NSViewRepresentable {
 }
 
 enum SettingsTab {
-    case recordings, diagrams, general
+    case recordings, diagrams, anonymization, general
 }
 
 struct ModelSettings: View {
@@ -168,8 +224,16 @@ struct ModelSettings: View {
     private var profiles: [ModelProfile] { model.catalog?.models ?? [] }
     private var recordingProfiles: [ModelProfile] { profiles.filter { $0.purpose != .diagram } }
     private var diagramProfiles: [ModelProfile] { profiles.filter { $0.purpose == .diagram } }
-    private var downloads: [ModelProfile] { model.profilesToInstall(asrID: asrID, summaryID: summaryID) }
+    private var downloads: [ModelProfile] {
+        draft.anonymizationMode == .shared
+            ? model.audioStackToInstall(asrID: asrID)
+            : model.profilesToInstall(asrID: asrID, summaryID: summaryID)
+    }
     private var downloadSelectionCompatible: Bool {
+        if draft.anonymizationMode == .shared {
+            guard let asr = profiles.first(where: { $0.id == asrID && $0.purpose == .asr }) else { return false }
+            return model.hardware.compatibility(for: asr).isCompatible
+        }
         let selected = profiles.filter { $0.id == asrID || $0.id == summaryID || $0.purpose == .diarization }
         return selected.contains { $0.id == asrID && $0.purpose == .asr } &&
             selected.contains { $0.id == summaryID && $0.purpose == .summary } &&
@@ -179,6 +243,7 @@ struct ModelSettings: View {
         TabView(selection: $model.settingsTab) {
             Tab(L10n.text("Записи"), systemImage: "waveform", value: .recordings) { recordingSettings }
             Tab(L10n.text("Схемы"), systemImage: "square.grid.2x2", value: .diagrams) { diagramSettings }
+            Tab(L10n.text("Обезличивание"), systemImage: "character.cursor.ibeam", value: .anonymization) { anonymizationSettingsTab }
             Tab(L10n.text("Общие"), systemImage: "gearshape", value: .general) { generalSettings }
         }
         .onAppear { initializeSelection() }
@@ -186,6 +251,13 @@ struct ModelSettings: View {
         .onChange(of: model.modelLibrary.selectedByRole) { _, _ in initializeSelection() }
         .onChange(of: model.modelLibrary.installedAt) { _, installed in
             draft.modelIDs = draft.modelIDs.filter { installed[$0.value] != nil }
+        }
+        .onChange(of: model.installedAnonymizationCandidateID) { _, candidateID in
+            // A compatible profile installed from the recordings tab fills the
+            // still-empty anonymization slot of the draft; applied on «ОК».
+            guard let candidateID, draft.anonymizationMode == .separate,
+                  draft.anonymizationProfileID.isEmpty else { return }
+            draft.anonymizationProfileID = candidateID
         }
     }
 
@@ -202,8 +274,14 @@ struct ModelSettings: View {
             }
             Section(L10n.text("Загрузить модели записей")) {
                 modelPicker(L10n.text("Распознавание"), role: .asr, selection: $asrID)
-                modelPicker(L10n.text("Итоги"), role: .summary, selection: $summaryID)
-                ForEach(profiles.filter { $0.id == asrID || $0.id == summaryID }) { profile in
+                if draft.anonymizationMode == .shared {
+                    // The shared mode governs summaries; the recordings tab only
+                    // links to the shared profile settings (AC-2).
+                    sharedModelRow(title: L10n.text("Итоги"), identifier: "settings.models.sharedSummary")
+                } else {
+                    modelPicker(L10n.text("Итоги"), role: .summary, selection: $summaryID)
+                }
+                ForEach(profiles.filter { draft.anonymizationMode == .shared ? $0.id == asrID : $0.id == asrID || $0.id == summaryID }) { profile in
                     if profile.experimental == true {
                         Text(L10n.text("Экспериментальный профиль · качество на встречах ещё не принято"))
                             .font(.caption).foregroundStyle(.secondary)
@@ -224,7 +302,7 @@ struct ModelSettings: View {
                     }
                 }
                 HStack {
-                    Button(L10n.text("Загрузить выбранные")) { model.installModels(downloads) }.buttonStyle(.borderedProminent).disabled(downloads.isEmpty).help(L10n.text("Скачать выбранные модели и необходимые зависимости"))
+                    Button(L10n.text("Загрузить выбранные")) { model.installModels(downloads, mayFillAnonymizationSlot: true) }.buttonStyle(.borderedProminent).disabled(downloads.isEmpty).help(L10n.text("Скачать выбранные модели и необходимые зависимости"))
                     Text(!downloadSelectionCompatible ? L10n.text("Нет совместимого комплекта") : downloads.isEmpty ? L10n.text("Уже установлены") : L10n.text("Всего: %1$@", size(downloads.reduce(0) { $0 + $1.bytes }))).font(.caption).foregroundStyle(.secondary)
                 }
                 Text(L10n.text("Нужные токенизатор, выравниватель и модель участников загрузятся автоматически. После успешной установки новая модель станет выбранной; ранее загруженные останутся на диске."))
@@ -273,14 +351,15 @@ struct ModelSettings: View {
         Form {
             modelActivity
             Section(L10n.text("Модели схем")) {
-                Group {
-                    if let active = selectedProfile(for: .diagram), model.hardware.compatibility(for: active).isCompatible {
-                        Text(L10n.text("Выбрана %1$@ · распознавание без интернета", active.displayName))
-                    } else {
-                        Text(L10n.text("Загрузите или выберите совместимую модель схем"))
-                    }
+                if draft.anonymizationMode == .shared {
+                    sharedModelRow(title: L10n.text("Распознавание схем"), identifier: "settings.diagramModels.shared")
+                } else if let active = selectedProfile(for: .diagram), model.hardware.compatibility(for: active).isCompatible {
+                    Text(L10n.text("Выбрана %1$@ · распознавание без интернета", active.displayName))
+                        .accessibilityIdentifier("settings.diagramModels.status")
+                } else {
+                    Text(L10n.text("Загрузите или выберите совместимую модель схем"))
+                        .accessibilityIdentifier("settings.diagramModels.status")
                 }
-                .accessibilityIdentifier("settings.diagramModels.status")
                 Text(L10n.text("Выбранная модель применяется к новым запускам распознавания схем."))
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -308,7 +387,7 @@ struct ModelSettings: View {
                         }
                     }
                     importPicker(diagramProfiles, identifier: "settings.diagramModels.import")
-                }.disabled(!model.canManageModels)
+                }.disabled(!model.canManageModels || draft.anonymizationMode == .shared)
             }
             Section(L10n.text("Загруженные модели")) {
                 let installed = diagramProfiles.filter(model.modelLibrary.isInstalled)
@@ -348,6 +427,145 @@ struct ModelSettings: View {
                 Text(L10n.text("LocalScribe %1$@ · локальная предварительная сборка", AppInfo.version)).font(.caption).foregroundStyle(.secondary)
             }
         }.formStyle(.grouped)
+    }
+
+    /// The anonymization tab: the data-type list on top and the «Модели» block
+    /// below with the mode switch, the shared-profile picker or the separate
+    /// anonymization slot, and the installation state (AC-1, AC-3, AC-5).
+    private var anonymizationSettingsTab: some View {
+        Form {
+            Section(L10n.text("Типы данных для замены")) {
+                TextEditor(text: $draft.dataTypesText)
+                    .font(.system(size: NSFont.systemFontSize))
+                    .frame(minHeight: 96)
+                    .accessibilityLabel(L10n.text("Типы данных для замены"))
+                    .accessibilityIdentifier("settings.anonymization.dataTypes")
+                Text(L10n.text("Один тип данных на строку"))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("settings.anonymization.dataTypes.hint")
+                if AnonymizationSettings.sanitizeDataTypes(draft.dataTypesLines).isEmpty {
+                    Label(L10n.message("Укажите хотя бы один тип данных"), systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .accessibilityIdentifier("settings.anonymization.dataTypes.error")
+                }
+            }
+            modelActivity
+            Section(L10n.text("Модели")) {
+                Picker(L10n.text("Назначение моделей"), selection: $draft.anonymizationMode) {
+                    Text(L10n.text("Общая модель")).tag(ModelAssignmentMode.shared)
+                    Text(L10n.text("Отдельные модели")).tag(ModelAssignmentMode.separate)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel(L10n.text("Назначение моделей"))
+                .accessibilityIdentifier("settings.anonymization.mode")
+                if draft.anonymizationMode == .shared {
+                    HStack {
+                        Text(L10n.text("Профиль"))
+                        taskModelPicker(candidates: profiles,
+                                        compatibility: { ModelTaskSupport.sharedCompatibility(profile: $0, hardware: model.hardware) },
+                                        selection: $draft.sharedProfileID)
+                            .accessibilityLabel(L10n.text("Профиль"))
+                            .accessibilityIdentifier("settings.anonymization.sharedProfile")
+                    }
+                    anonymizationInstallControls(profileID: draft.sharedProfileID, shared: true)
+                    Text(L10n.text("После установки и сохранения общий профиль применяется к новым итогам записей, схемам и обезличиванию. Распознавание речи и определение участников используют отдельные модели в обоих режимах."))
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    HStack {
+                        Text(L10n.text("Обезличивание"))
+                        taskModelPicker(candidates: profiles,
+                                        compatibility: { ModelTaskSupport.compatibility(task: .anonymization, profile: $0, hardware: model.hardware) },
+                                        selection: $draft.anonymizationProfileID)
+                            .accessibilityLabel(L10n.text("Обезличивание"))
+                            .accessibilityIdentifier("settings.anonymization.profile")
+                    }
+                    anonymizationInstallControls(profileID: draft.anonymizationProfileID, shared: false)
+                    Text(L10n.text("Профили итогов и схем выбираются на их вкладках. Распознавание речи и определение участников используют отдельные модели в обоих режимах."))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }.disabled(!model.canManageModels)
+            Section(L10n.text("Загруженные модели")) {
+                let relevant = profiles.filter { profile in
+                    model.modelLibrary.isInstalled(profile)
+                        && (profile.supports(.anonymization) || profile.effectiveSupportedTasks == Set(ModelTask.allCases))
+                }
+                if relevant.isEmpty {
+                    Text(L10n.text("Пока нет загруженных моделей")).foregroundStyle(.secondary)
+                } else {
+                    ForEach(relevant) { profile in installedRow(profile) }
+                }
+            }
+        }.formStyle(.grouped)
+    }
+
+    /// The download button, size and installation state of the selected
+    /// anonymization/shared profile: compatible-but-not-installed keeps the
+    /// assignment while its jobs wait for the model.
+    @ViewBuilder private func anonymizationInstallControls(profileID: String, shared: Bool) -> some View {
+        if let profile = profiles.first(where: { $0.id == profileID }) {
+            let compatibility = shared
+                ? ModelTaskSupport.sharedCompatibility(profile: profile, hardware: model.hardware)
+                : ModelTaskSupport.compatibility(task: .anonymization, profile: profile, hardware: model.hardware)
+            if let reasons = compatibility.explanation {
+                Label(L10n.message(reasons), systemImage: "exclamationmark.triangle.fill")
+                    .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                    .accessibilityIdentifier("settings.anonymization.incompatible.\(profile.id)")
+            } else {
+                HStack {
+                    Button(L10n.text("Загрузить выбранную")) { model.installModels([profile]) }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(model.installing || model.packageIsReady(profile))
+                        .accessibilityIdentifier("settings.anonymization.install.\(profile.id)")
+                    if model.packageIsReady(profile) {
+                        Label(L10n.text("Установлена · готова к новым заданиям"), systemImage: "checkmark.circle.fill")
+                            .foregroundStyle(.green)
+                            .font(.caption)
+                            .accessibilityIdentifier("settings.anonymization.ready.\(profile.id)")
+                    } else {
+                        Text(L10n.text("Не установлена · задания будут ждать модель: %1$@", size(profile.bytes)))
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("settings.anonymization.waiting.\(profile.id)")
+                    }
+                }
+            }
+        } else {
+            Text(L10n.text("Выберите совместимый профиль; до установки задания будут ждать модель"))
+                .font(.caption).foregroundStyle(.secondary)
+                .accessibilityIdentifier("settings.anonymization.emptySlot")
+        }
+    }
+
+    /// Task-aware picker: profiles incompatible for the task or this Mac stay
+    /// visible but disabled with the combined reason (AC-3).
+    private func taskModelPicker(candidates: [ModelProfile], compatibility: @escaping (ModelProfile) -> ModelCompatibility,
+                                 selection: Binding<String>) -> some View {
+        let options = candidates.map { profile in
+            let reasons = compatibility(profile).reasons
+            return ModelMenuOption(profile: profile,
+                                   reason: reasons.isEmpty ? nil : reasons.map(L10n.message).joined(separator: "; "),
+                                   recommended: false)
+        }
+        return ModelPopup(options: options, selection: selection)
+    }
+
+    /// The shared-mode link row shown next to the summary and diagram model
+    /// settings: the shared model name and a jump into the anonymization tab
+    /// (AC-2).
+    private func sharedModelRow(title: String, identifier: String) -> some View {
+        let name = draft.sharedProfileID.isEmpty
+            ? L10n.text("Профиль не выбран")
+            : profiles.first { $0.id == draft.sharedProfileID }?.displayName ?? draft.sharedProfileID
+        return HStack {
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).foregroundStyle(.secondary)
+                Text(L10n.text("Общая модель: %1$@", name))
+            }
+            Spacer()
+            Button(L10n.text("Настроить общую модель")) { model.settingsTab = .anonymization }
+                .accessibilityIdentifier(identifier + ".configureShared")
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier(identifier)
     }
 
     @ViewBuilder private var modelActivity: some View {
@@ -407,9 +625,13 @@ struct ModelSettings: View {
                         .fontWeight(model.isRecommended(profile) ? .bold : .regular)
                 }
                 .toggleStyle(.checkbox)
-                .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible)
+                .disabled(!model.canManageModels || !model.hardware.compatibility(for: profile).isCompatible
+                    || (draft.anonymizationMode == .shared && (role == .summary || role == .diagram)))
                 .foregroundStyle(model.hardware.compatibility(for: profile).isCompatible ? Color.primary : Color.secondary)
-                .help(model.hardware.warning(for: profile) ?? L10n.text("Использовать %1$@ для новых заданий", profile.displayName))
+                .help(model.hardware.warning(for: profile)
+                      ?? (draft.anonymizationMode == .shared && (role == .summary || role == .diagram)
+                          ? L10n.text("В общем режиме назначением управляет общая модель на вкладке «Обезличивание»")
+                          : L10n.text("Использовать %1$@ для новых заданий", profile.displayName)))
                 .accessibilityIdentifier("settings.\(profile.purpose == .diagram ? "diagramModels" : "models").installed.\(profile.id)")
                 .accessibilityHint(model.hardware.warning(for: profile) ?? L10n.text("Модель совместима с этим Mac"))
             } else {

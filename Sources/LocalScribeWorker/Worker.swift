@@ -56,6 +56,10 @@ import LocalScribeSpeakerKit
         } else if (4...5).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "--probe-diagram" {
             // Developer probe: raw recognizer errors, no user content.
             outcome = Outcome(code: await probeDiagram(output: protocolOutput))
+        } else if (4...5).contains(CommandLine.arguments.count), CommandLine.arguments[1] == "--probe-anonymization" {
+            // Developer qualification probe: raw pipeline result or error,
+            // no neutral wrapper.
+            outcome = Outcome(code: await probeAnonymization(output: protocolOutput))
         } else {
             outcome = await runCommand(output: protocolOutput, control: control)
         }
@@ -66,10 +70,13 @@ import LocalScribeSpeakerKit
 
     private static func runCommand(output: FileHandle, control: WorkerControl) async -> Outcome {
         guard let command = readCommand() else { return Outcome(code: 64) }
-        // The audio wire format stays kindless; only the diagram discriminator may appear.
-        guard command.kind == nil || command.isDiagram else { return Outcome(code: 64) }
+        // The audio wire format stays kindless; diagram and anonymization
+        // commands carry their own discriminator and never mix audio fields.
+        guard command.kind == nil || command.isDiagram || command.isAnonymization else { return Outcome(code: 64) }
         if command.isDiagram { return await runDiagram(command: command, output: output, control: control) }
-        guard command.stage != nil, command.recordingPath != nil, command.toolsPath != nil, command.diagramPath == nil else { return Outcome(code: 64) }
+        if command.isAnonymization { return await runAnonymization(command: command, output: output, control: control) }
+        guard command.stage != nil, command.recordingPath != nil, command.toolsPath != nil,
+              command.diagramPath == nil, command.anonymizationPath == nil else { return Outcome(code: 64) }
         let emit: @Sendable (String, String, String?) -> Void = { type, message, artifact in
             write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
         }
@@ -93,7 +100,8 @@ import LocalScribeSpeakerKit
     /// Diagram recognition runs on the same one-process lifecycle, control and
     /// protocol channel as audio; only the engine differs.
     private static func runDiagram(command: WorkerCommand, output: FileHandle, control: WorkerControl) async -> Outcome {
-        guard let diagramPath = command.diagramPath, command.stage == nil, command.recordingPath == nil else { return Outcome(code: 64) }
+        guard let diagramPath = command.diagramPath, command.stage == nil, command.recordingPath == nil,
+              command.anonymizationPath == nil else { return Outcome(code: 64) }
         let emit: @Sendable (String, String, String?) -> Void = { type, message, artifact in
             write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
         }
@@ -108,6 +116,40 @@ import LocalScribeSpeakerKit
             // Metrics are diagnostics only; a failed write must not fail a finished stage.
             try? Disk.write(metrics, to: engine.run.appendingPathComponent("metrics-diagram.json"))
             return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: artifact))
+        } catch {
+            let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
+            return Outcome(code: 1, event: WorkerEvent(command: command, type: "failed", message: safe))
+        }
+    }
+
+    /// Text anonymization runs on the same one-process lifecycle, control and
+    /// protocol channel. The document text and the complete result travel
+    /// through the attempt's local working artifacts; the protocol carries
+    /// identifiers, progress and safe statuses only.
+    private static func runAnonymization(command: WorkerCommand, output: FileHandle, control: WorkerControl) async -> Outcome {
+        guard command.anonymizationPath != nil, command.stage == nil, command.recordingPath == nil,
+              command.diagramPath == nil else { return Outcome(code: 64) }
+        let emit: @Sendable (String, String, String?) -> Void = { type, message, artifact in
+            write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
+        }
+        await control.watchInput { emit("cancelled", "Обработка отменена", nil); terminateGroup(72) }
+        do {
+            emit("started", "", nil)
+            // Input validation happens before any progress: a missing or
+            // mismatched input keeps the started → failed event contract.
+            let input = try AnonymizationEngine.loadInput(command: command)
+            try Task.checkCancellation()
+            emit("progress", "Проверяем задание обезличивания…", nil)
+            let started = Date()
+            let engine = try AnonymizationEngine(command: command, input: input, emit: emit)
+            let outcome = try await engine.run()
+            var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
+            var metrics = outcome.metrics
+            metrics["seconds"] = Date().timeIntervalSince(started)
+            metrics["maxResidentBytes"] = Double(usage.ru_maxrss)
+            // Metrics are diagnostics only; a failed write must not fail a finished stage.
+            try? Disk.write(metrics, to: engine.attemptURL.appendingPathComponent("metrics-anonymization.json"))
+            return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: AnonymizationRunArtifact.filename))
         } catch {
             let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
             return Outcome(code: 1, event: WorkerEvent(command: command, type: "failed", message: safe))
@@ -131,6 +173,57 @@ import LocalScribeSpeakerKit
                 "finished": String(answer.finished), "prefix": String(answer.output.prefix(200)),
                 "maxResidentBytes": String(usage.ru_maxrss)]
             try output.write(contentsOf: JSONEncoder().encode(metrics) + Data([10]))
+            return 0
+        } catch {
+            let text = ["status": "failed", "error": "\(error)", "type": String(describing: type(of: error))]
+            if let data = try? JSONEncoder().encode(text) { try? output.write(contentsOf: data + Data([10])) }
+            return 1
+        }
+    }
+
+    /// Developer qualification probe for the anonymization pipeline
+    /// (docs/TextAnonymization/Qualification.md): resolves the profile pinned
+    /// in the input artifact from the catalog, verifies package identity,
+    /// hardware compatibility and the full size/SHA of the installed files,
+    /// then runs the real recognizer pipeline and reports the raw result or
+    /// error without the neutral production wrapper. The catalog ANONYMIZATION
+    /// gate is bypassed on purpose — the probe qualifies profiles before the
+    /// task is stamped. Arguments: models root, input.json path, optional
+    /// result.json output path. The worker network denial applies, so the
+    /// probe run is offline by construction.
+    private static func probeAnonymization(output: FileHandle) async -> Int32 {
+        do {
+            let started = Date()
+            let models = URL(fileURLWithPath: CommandLine.arguments[2])
+            let inputURL = URL(fileURLWithPath: CommandLine.arguments[3])
+            let input: AnonymizationAttemptInput
+            do { input = try Disk.read(AnonymizationAttemptInput.self, at: inputURL) }
+            catch { throw ScribeError.message("Не удалось прочитать вход пробы обезличивания") }
+            try input.validate()
+            guard let profile = try AnonymizationEngine.lookupPinnedProfile(models: models, toolsPath: nil, input: input, task: nil) else {
+                throw ScribeError.message("Закреплённая модель обезличивания недоступна в каталоге")
+            }
+            try AnonymizationEngine.verifyResolved(profile: profile, models: models, input: input)
+            let workspace = inputURL.deletingLastPathComponent()
+            let command = WorkerCommand(anonymizationJobId: input.fileId, runId: input.attemptId,
+                                        anonymizationPath: workspace.path, modelsPath: models.path)
+            let engine = try AnonymizationEngine(command: command, input: input, resolvedProfile: profile) { type, message, _ in
+                fputs("probe-anonymization \(type): \(message)\n", stderr)
+            }
+            let outcome = try await engine.run()
+            var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
+            var metrics: [String: String] = ["status": "ok",
+                "seconds": String(Date().timeIntervalSince(started)),
+                "maxResidentBytes": String(usage.ru_maxrss)]
+            for (key, value) in outcome.metrics { metrics[key] = String(format: "%.0f", value) }
+            try output.write(contentsOf: JSONEncoder().encode(metrics) + Data([10]))
+            if CommandLine.arguments.count > 4 {
+                let resultURL = workspace.appendingPathComponent(AnonymizationRunArtifact.filename)
+                let target = URL(fileURLWithPath: CommandLine.arguments[4])
+                if target.path != resultURL.path {
+                    try Data(contentsOf: resultURL).write(to: target)
+                }
+            }
             return 0
         } catch {
             let text = ["status": "failed", "error": "\(error)", "type": String(describing: type(of: error))]

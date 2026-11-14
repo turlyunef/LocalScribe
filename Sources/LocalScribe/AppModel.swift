@@ -3,15 +3,18 @@ import AppKit
 import AVFoundation
 import LocalScribeCore
 
-/// Jobs of both archives share one FIFO and one worker slot; the kind keeps
-/// identical UUIDs in the recording and diagram archives from colliding.
-enum QueueJobKind: Hashable, Sendable { case recording, diagram }
+/// Jobs of all three archives share one FIFO and one worker slot; the kind
+/// keeps identical UUIDs in the recording, diagram and text archives from
+/// colliding. Cancelling or deleting one kind never touches the others.
+enum QueueJobKind: Hashable, Sendable { case recording, diagram, text }
 struct QueueJobID: Hashable, Sendable {
     let kind: QueueJobKind
     let id: String
     static func recording(_ id: String) -> QueueJobID { QueueJobID(kind: .recording, id: id) }
     static func diagram(_ id: String) -> QueueJobID { QueueJobID(kind: .diagram, id: id) }
+    static func text(_ id: String) -> QueueJobID { QueueJobID(kind: .text, id: id) }
     var isRecording: Bool { kind == .recording }
+    var isText: Bool { kind == .text }
 }
 
 @MainActor final class AppModel: ObservableObject {
@@ -35,6 +38,34 @@ struct QueueJobID: Hashable, Sendable {
     private var reportedUnreadableDiagramIDs: [String] = []
     @Published private(set) var deletingDiagramJobs = false
     @Published private(set) var deletingGroupID: String?
+    // Text-anonymization archive state (work 5): a third independent snapshot
+    // pipeline fed by AnonymizationCoordinator. The coordinator owns the
+    // authoritative AnonymizationArchiveCatalog; the GUI works with a bridged
+    // RecordingGroups projection so the shared sidebar/search infrastructure
+    // is reused without a second stored group source of truth.
+    let anonymizationSearch = RecordingSearch()
+    private var textCardsByID: [String: AnonymizationCardSummary] = [:]
+    @Published private(set) var textCards: [AnonymizationCardSummary] = [] {
+        didSet {
+            textCardsByID = Dictionary(textCards.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+            // The summary carries no date; the import position is a stable
+            // descending order key for the shared title-search engine.
+            anonymizationSearch.update(textCards.map {
+                RecordingSearch.TitleSearchEntry(id: $0.id, title: $0.displayName,
+                                                date: Date(timeIntervalSince1970: TimeInterval($0.importOrder)))
+            }, groups: textGroups)
+        }
+    }
+    @Published private(set) var textGroups = RecordingGroups()
+    let textRepository: AnonymizationRepository?
+    let textArchive: AnonymizationCoordinator?
+    private var textArchiveRevision: UInt64 = 0
+    private var reportedTextGroupsError: String?
+    private var reportedUnreadableTextIDs: [String] = []
+    /// True while confirmed text cards (or a group with its files) are being
+    /// deleted: the queue admits no new job, so the stopped worker's slot
+    /// passes to the deletion before the order of the other jobs resumes.
+    @Published private(set) var deletingTextJobs = false
     @Published var sidebarRevealID: String?
     @Published private(set) var sidebarSelection = SidebarSelection()
     @Published private(set) var deletingSidebarRecordings = false
@@ -91,12 +122,58 @@ struct QueueJobID: Hashable, Sendable {
     @Published var modelLibrary = ModelLibrary()
     @Published var downloadProgress: ModelInstallProgress?
     @Published var downloadBatch = ""
+    // Anonymization model assignments (work 4): the settings record is the
+    // source of truth for the mode and the slots; the package registry owns
+    // the published verified installations shared by all compatible tabs.
+    @Published private(set) var anonymizationSettings = AnonymizationSettings()
+    @Published private(set) var anonymizationSettingsDamaged = false
+    @Published private(set) var readyPackageIDs: Set<String> = []
+    /// A profile installed from the recordings tab that fits the still-empty
+    /// anonymization slot; consumed by the settings draft (applied on «ОК»).
+    @Published private(set) var installedAnonymizationCandidateID: String?
+    let packageRegistry = ModelPackageRegistry()
+    private var anonymizationStore: AnonymizationSettingsStore?
     let hardware: ModelHardware
     var canManageModels: Bool { !savingResult && resultEdit == nil && !preparingStorage && !installing && !verifyingModels && !busy && queued.isEmpty && !resourcesPaused && !startingRecording && !finalizingRecording && recordingID == nil && !shuttingDown }
     var activeCatalog: ModelCatalog? {
         guard let catalog, let selected = modelLibrary.activeCatalog(from: catalog),
               selected.models.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return nil }
-        return selected
+        guard let shared = readySharedProfile() else { return selected }
+        var substituted = selected
+        if let index = substituted.models.firstIndex(where: { $0.purpose == .summary }) {
+            // The role view keeps the native pinning contract (RunInfo.modelIDs
+            // and `ModelCatalog.pinned(to:)`); the pinned identity — id,
+            // revision and files — stays the shared profile itself.
+            var summaryView = shared
+            summaryView.role = .summary
+            substituted.models[index] = summaryView
+        }
+        return substituted
+    }
+    /// The shared-mode profile: assigned, compatible with all three tasks on
+    /// this Mac and backed by a published verified package installation. Until
+    /// the shared package is verified the native assignments stay effective, so
+    /// audio jobs never wait for a download. Speech recognition and diarization
+    /// are never resolved through the shared profile.
+    func readySharedProfile() -> ModelProfile? {
+        guard let catalog, anonymizationSettings.modelAssignmentMode == .shared,
+              let id = anonymizationSettings.sharedProfileID,
+              let profile = catalog.models.first(where: { $0.id == id }),
+              ModelTaskSupport.sharedCompatibility(profile: profile, hardware: hardware).isCompatible,
+              readyPackageIDs.contains(profile.effectivePackageID) else { return nil }
+        return profile
+    }
+    /// Whether the profile's package has a published verified installation
+    /// that is not pending a confirmed removal.
+    func packageIsReady(_ profile: ModelProfile) -> Bool {
+        readyPackageIDs.contains(profile.effectivePackageID)
+    }
+    /// The active record with the two library-coupled slots mirroring the live
+    /// native selections; used for package removal plans and readiness.
+    var effectiveAnonymizationSettings: AnonymizationSettings {
+        anonymizationSettings.syncingNativeAssignments(
+            summaryID: modelLibrary.selectedByRole[ModelRole.summary.rawValue],
+            diagramID: modelLibrary.selectedByRole[ModelRole.diagram.rawValue])
     }
     func isRecommended(_ profile: ModelProfile) -> Bool {
         guard let catalog, let role = profile.purpose else { return false }
@@ -234,8 +311,21 @@ struct QueueJobID: Hashable, Sendable {
                 errorHandler.report(message: L10n.text("Хранилище схем недоступно: %1$@. Записи продолжают работать.", L10n.message(error.localizedDescription)))
             }
         } else { diagramRepository = nil; diagramArchive = nil }
+        // The text-anonymization archive is a sibling branch of the same root
+        // (the "texts" folder opened by AnonymizationBootstrap); its failure
+        // never blocks the recording or diagram workspaces.
+        if let repository {
+            do {
+                let repo = try AnonymizationRepository(root: repository.root.appendingPathComponent("texts"))
+                textRepository = repo; textArchive = AnonymizationCoordinator(repository: repo)
+            } catch {
+                textRepository = nil; textArchive = nil
+                errorHandler.report(message: L10n.text("Хранилище текстов недоступно: %1$@. Записи продолжают работать.", L10n.message(error.localizedDescription)))
+            }
+        } else { textRepository = nil; textArchive = nil }
+        if let repository { anonymizationStore = AnonymizationSettingsStore(root: repository.root) }
         recordingSearch.onVisibilityChange = { [weak self] in self?.retainSearchSelection() }
-        if !startServices { preparingStorage = false; Task { await reload(); await reloadDiagrams() }; return }
+        if !startServices { preparingStorage = false; Task { await reload(); await reloadDiagrams(); await reloadTexts() }; return }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical, .normal], queue: .main)
         memorySource?.setEventHandler { [weak self] in
             guard let self else { return }
@@ -267,6 +357,15 @@ struct QueueJobID: Hashable, Sendable {
                 catch {
                     errorHandler.report(message: L10n.text("Не удалось восстановить хранилище схем: %1$@. Записи продолжают работать.", L10n.message(error.localizedDescription)))
                     await reloadDiagrams()
+                }
+            }
+            if let textArchive {
+                // Recovery resolves import/deletion journals and interrupts
+                // leftover queued/running attempts of text cards.
+                do { applyTextSnapshot(try await textArchive.recover()) }
+                catch {
+                    errorHandler.report(message: L10n.text("Не удалось восстановить хранилище текстов: %1$@. Записи продолжают работать.", L10n.message(error.localizedDescription)))
+                    await reloadTexts()
                 }
             }
             preparingStorage = false
@@ -376,6 +475,45 @@ struct QueueJobID: Hashable, Sendable {
             }.value
             updateModelsStatus()
         } catch { modelsReady = false; modelsStatus = L10n.text("Не удалось проверить модели"); errorHandler.report(error) }
+        await reloadAnonymizationState()
+    }
+
+    /// Load or migrate the anonymization settings record (first open copies the
+    /// previous summary and diagram selections) and refresh the shared package
+    /// readiness snapshot from the freshly verified library. File reads happen
+    /// off the main actor; a damaged record is reported and never replaced.
+    func reloadAnonymizationState() async {
+        guard let repository else { return }
+        let store = anonymizationStore ?? AnonymizationSettingsStore(root: repository.root)
+        anonymizationStore = store
+        do {
+            let catalog = catalog ?? ModelCatalog(models: [])
+            let library = modelLibrary
+            let (settings, installations) = try await Task.detached(priority: .utility) {
+                let settings = try store.loadOrMigrate(catalog: catalog, library: library)
+                // Verified packages: the first member profile (in catalog order)
+                // whose files the library just verified owns the installation,
+                // exactly like `ModelPackageRegistry.scanInstallations`.
+                var verified: [String: ModelPackageInstallation] = [:]
+                for profile in catalog.models where library.isInstalled(profile) {
+                    let packageID = profile.effectivePackageID
+                    if verified[packageID] == nil {
+                        verified[packageID] = ModelPackageInstallation(packageID: packageID, installedProfileID: profile.id)
+                    }
+                }
+                return (settings, verified)
+            }.value
+            anonymizationSettings = settings
+            anonymizationSettingsDamaged = false
+            await packageRegistry.replaceInstallations(installations)
+            readyPackageIDs = await packageRegistry.readyPackageIDs()
+            // A readiness change wakes the waiting cards of the text archive
+            // only: settings changes never start pending recordings (AC-30).
+            await wakeWaitingTextCards()
+        } catch {
+            anonymizationSettingsDamaged = true
+            errorHandler.report(error)
+        }
     }
     private func updateModelsStatus() {
         modelsReady = activeCatalog != nil
@@ -399,6 +537,22 @@ struct QueueJobID: Hashable, Sendable {
         guard profiles.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return [] }
         return profiles.filter { !modelLibrary.isInstalled($0) }
     }
+    /// The speech stack without the summary profile: in the shared mode the
+    /// summaries are governed by the shared profile of the anonymization tab,
+    /// so the recordings batch installs only the native audio complect.
+    func audioStackToInstall(asrID: String) -> [ModelProfile] {
+        guard let catalog,
+              let asr = catalog.models.first(where: { $0.id == asrID && $0.purpose == .asr }),
+              let tokenizer = catalog.models.first(where: { $0.id == (asr.tokenizerID ?? "tokenizer") && $0.purpose == .tokenizer }),
+              let diarization = catalog.models.first(where: { $0.id == "diarization" && $0.purpose == .diarization }) else { return [] }
+        var stack = [tokenizer, asr, diarization]
+        if let id = asr.alignerID {
+            guard let aligner = catalog.models.first(where: { $0.id == id && $0.purpose == nil }) else { return [] }
+            stack.insert(aligner, at: 1)
+        }
+        guard stack.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return [] }
+        return stack.filter { !modelLibrary.isInstalled($0) }
+    }
     private func compatibleProfiles(_ requested: [ModelProfile]) -> [ModelProfile]? {
         do {
             guard let catalog else { return nil }
@@ -411,7 +565,7 @@ struct QueueJobID: Hashable, Sendable {
             }
         } catch { errorHandler.report(error); return nil }
     }
-    func installModels(_ profiles: [ModelProfile]) {
+    func installModels(_ profiles: [ModelProfile], mayFillAnonymizationSlot: Bool = false) {
         guard let repository, let catalog, canManageModels, !profiles.isEmpty,
               let profiles = compatibleProfiles(profiles) else { return }
         downloadingModels = true; installing = true; downloadProgress = nil
@@ -433,6 +587,7 @@ struct QueueJobID: Hashable, Sendable {
                     var updated = modelLibrary
                     updated.installed(profile, catalog: catalog, hardware: hardware)
                     try updated.save(at: repository.models); modelLibrary = updated
+                    await noteInstalled(profile, mayFillAnonymizationSlot: mayFillAnonymizationSlot)
                 }
                 updateModelsStatus()
             } catch {
@@ -441,6 +596,24 @@ struct QueueJobID: Hashable, Sendable {
                 else { errorHandler.report(error); modelsStatus += L10n.text(" · загрузка не завершена") }
             }
         }
+    }
+
+    /// Publish one verified installation to the package registry (the physical
+    /// installation is shared per package by all compatible tabs) and stage the
+    /// anonymization-slot substitution: a profile installed from the recordings
+    /// tab in the separate mode fills the still-empty slot in the settings
+    /// draft. The draft assignment itself is applied only by «ОК».
+    func noteInstalled(_ profile: ModelProfile, mayFillAnonymizationSlot: Bool) async {
+        await packageRegistry.publishInstallation(packageID: profile.effectivePackageID, profileID: profile.id)
+        readyPackageIDs = await packageRegistry.readyPackageIDs()
+        // A finished installation can make the waiting text cards admissible.
+        await wakeWaitingTextCards()
+        guard mayFillAnonymizationSlot,
+              anonymizationSettings.modelAssignmentMode == .separate,
+              anonymizationSettings.profileID(for: .anonymization) == nil,
+              profile.supports(.anonymization),
+              hardware.compatibility(for: profile).isCompatible else { return }
+        installedAnonymizationCandidateID = profile.id
     }
     private func receiveProgress(_ progress: ModelInstallProgress) {
         guard installing, downloadProgress?.profileID == progress.profileID else { return }
@@ -475,6 +648,7 @@ struct QueueJobID: Hashable, Sendable {
                 try await installer.install(profile, root: repository.models, localSource: url) { progress in Task { @MainActor in self.receiveProgress(progress) } }
                 var updated = modelLibrary; updated.installed(profile, catalog: catalog, hardware: hardware)
                 try updated.save(at: repository.models); modelLibrary = updated; updateModelsStatus()
+                await noteInstalled(profile, mayFillAnonymizationSlot: false)
             } catch {
                 updateModelsStatus()
                 if !Task.isCancelled { errorHandler.report(error) }
@@ -489,8 +663,12 @@ struct QueueJobID: Hashable, Sendable {
         catch { errorHandler.report(error) }
     }
     func applySettings(_ draft: SettingsDraft) throws {
+        // Build and validate the anonymization record first: a rejected «ОК»
+        // must leave both the library selection and the record untouched.
+        let anonymization = try buildAnonymizationSettings(from: draft)
         let changes = draft.changedModels(in: modelLibrary)
         if !changes.isEmpty { try selectModels(Array(changes.values)) }
+        try commitAnonymizationSettings(anonymization, changed: draft.hasAnonymizationChanges(from: self))
         if backgroundRecognition != draft.backgroundRecognition { backgroundRecognition = draft.backgroundRecognition }
         if automaticSummaries != draft.automaticSummaries { automaticSummaries = draft.automaticSummaries }
         if recordingSources != draft.recordingSources {
@@ -500,6 +678,52 @@ struct QueueJobID: Hashable, Sendable {
         if applicationLanguage != draft.applicationLanguage {
             userDefaults.set(draft.applicationLanguage.rawValue, forKey: ApplicationLanguage.defaultsKey)
         }
+    }
+
+    /// Pure draft → record conversion: the mode, the assignments and the data
+    /// types are validated without any mutation.
+    private func buildAnonymizationSettings(from draft: SettingsDraft) throws -> AnonymizationSettings {
+        var settings = AnonymizationSettings()
+        settings.modelAssignmentMode = draft.anonymizationMode
+        // Whitespace-only lines are dropped; an empty remainder is rejected and
+        // the active record keeps its previous list.
+        try settings.applyDataTypes(draft.dataTypesLines)
+        // The separate anonymization assignment is saved in both modes: the
+        // record keeps the last separate choice and restores it when the user
+        // returns to the separate mode (AC-4).
+        if let id = draft.nonEmptyAnonymizationProfileID {
+            guard let profile = catalog?.models.first(where: { $0.id == id }),
+                  ModelTaskSupport.compatibility(task: .anonymization, profile: profile, hardware: hardware).isCompatible else {
+                throw ScribeError.message("Модель не поддерживает эту задачу")
+            }
+            settings.setSeparateProfile(id, for: .anonymization)
+        }
+        if draft.anonymizationMode == .shared {
+            guard let id = draft.nonEmptySharedProfileID,
+                  let profile = catalog?.models.first(where: { $0.id == id }),
+                  ModelTaskSupport.sharedCompatibility(profile: profile, hardware: hardware).isCompatible else {
+                throw ScribeError.message("В общем режиме нужен выбранный профиль")
+            }
+            settings.sharedProfileID = id
+        }
+        return settings
+    }
+
+    /// One atomic write applies the mode, the assignments and the data types
+    /// together; the two library-coupled slots mirror the just-saved native
+    /// selections, keeping the last saved assignment of every task.
+    private func commitAnonymizationSettings(_ settings: AnonymizationSettings, changed: Bool) throws {
+        guard changed else { return }
+        guard let store = anonymizationStore else { throw ScribeError.message("Настройки обезличивания недоступны") }
+        guard !anonymizationSettingsDamaged else { throw ScribeError.message("Повреждённая запись настроек обезличивания") }
+        let effective = settings.syncingNativeAssignments(
+            summaryID: modelLibrary.selectedByRole[ModelRole.summary.rawValue],
+            diagramID: modelLibrary.selectedByRole[ModelRole.diagram.rawValue])
+        try store.save(effective)
+        anonymizationSettings = effective
+        // A new assignment may reference an already verified package: only the
+        // waiting text cards wake, never pending recordings (AC-30/AC-43).
+        Task { await wakeWaitingTextCards() }
     }
     private func selectModels(_ ids: [String]) throws {
         guard let repository, let catalog, canManageModels else {
@@ -516,14 +740,91 @@ struct QueueJobID: Hashable, Sendable {
         modelLibrary = updated
         updateModelsStatus()
     }
+    /// The confirmation dialog of a package removal (test seam through
+    /// `presentRemovalDialog`). The body lists every tab whose assignment
+    /// references the package; `listChanged` marks a re-confirmation shown
+    /// after the affected list changed.
+    struct ModelRemovalConfirmation {
+        let title: String
+        let body: String
+        let confirmButton: String
+        let cancelButton: String
+    }
+    /// Presented synchronously; tests override this seam.
+    var presentRemovalDialog: (ModelRemovalConfirmation) -> Bool = { AppModel.runRemovalAlert($0) }
+
+    private static func runRemovalAlert(_ confirmation: ModelRemovalConfirmation) -> Bool {
+        let alert = NSAlert()
+        alert.messageText = confirmation.title
+        alert.informativeText = confirmation.body
+        alert.addButton(withTitle: confirmation.confirmButton)
+        alert.addButton(withTitle: confirmation.cancelButton)
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// The dialog text of one package removal plan.
+    static func removalConfirmation(profile: ModelProfile, memberNames: [String], plan: ModelPackageRemovalPlan, listChanged: Bool) -> ModelRemovalConfirmation {
+        var body = L10n.text("Будут удалены файлы всех профилей комплекта (%1$@): %2$@. Аудио, расшифровки, итоги и схемы сохранятся.", String(memberNames.count), memberNames.joined(separator: ", "))
+        if plan.affectsAnything {
+            let tabs = ModelTask.allCases.filter { plan.affectedTasks.contains($0) }.map(\.title).joined(separator: ", ")
+            body += "\n\n" + L10n.text("Комплект используют вкладки: %1$@. После удаления новые задания этих задач будут ждать модель; назначенные профили сохранятся, а начатые задания завершатся с закреплёнными файлами.", tabs)
+        }
+        if listChanged {
+            body += "\n\n" + L10n.text("Состав затронутых вкладок изменился. Подтвердите актуальный список.")
+        }
+        return ModelRemovalConfirmation(title: L10n.text("Удалить комплект %1$@?", profile.displayName),
+                                        body: body,
+                                        confirmButton: L10n.text("Удалить комплект"),
+                                        cancelButton: L10n.text("Отмена"))
+    }
+
+    /// Package-aware removal: the physical installation is shared by every
+    /// member profile of the package, and the confirmation lists all tabs whose
+    /// assignment references it. A list that changed before the confirmation is
+    /// re-confirmed with the current tabs. Cancellation keeps the installation
+    /// and the assignments.
     func removeModel(_ profile: ModelProfile) {
         guard let repository, let catalog, canManageModels else { return }
-        let alert = NSAlert(); alert.messageText = L10n.text("Удалить %1$@?", profile.displayName)
-        alert.informativeText = L10n.text("Будут удалены только файлы этой модели. Аудио, расшифровки и итоги сохранятся. Если модель выбрана, будет использована последняя установленная из оставшихся совместимых моделей того же назначения.")
-        alert.addButton(withTitle: L10n.text("Удалить модель")); alert.addButton(withTitle: L10n.text("Отмена"))
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        do { try modelLibrary.remove(profile, at: repository.models, catalog: catalog, hardware: hardware); updateModelsStatus() }
-        catch { errorHandler.report(error); Task { await verifyModels() } }
+        let packageID = profile.effectivePackageID
+        let members = catalog.models.filter { $0.effectivePackageID == packageID }
+        var listChanged = false
+        while true {
+            let plan = ModelPackageRegistry.removalPlan(packageID: packageID, settings: effectiveAnonymizationSettings, catalog: catalog)
+            let confirmation = Self.removalConfirmation(profile: profile, memberNames: members.map(\.displayName), plan: plan, listChanged: listChanged)
+            guard presentRemovalDialog(confirmation) else { return }
+            // Re-check the affected tabs after the confirmation: a changed list
+            // requires a fresh confirmation of the actual state.
+            let current = ModelPackageRegistry.removalPlan(packageID: packageID, settings: effectiveAnonymizationSettings, catalog: catalog)
+            guard current == plan else { listChanged = true; continue }
+            executeConfirmedRemoval(packageID: packageID, members: members, catalog: catalog, repository: repository)
+            return
+        }
+    }
+
+    private func executeConfirmedRemoval(packageID: String, members: [ModelProfile], catalog: ModelCatalog, repository: RecordingRepository) {
+        Task {
+            // Readiness for new jobs switches off at once; started jobs keep
+            // their pinned verified files until the workers exit (no leases yet
+            // in this work — the queue integration holds them).
+            await packageRegistry.confirmRemoval(packageID: packageID)
+            readyPackageIDs = await packageRegistry.readyPackageIDs()
+            do {
+                var updated = modelLibrary
+                for member in members where updated.isInstalled(member) {
+                    try updated.remove(member, at: repository.models, catalog: catalog, hardware: hardware)
+                }
+                modelLibrary = updated
+                try await packageRegistry.finishPhysicalRemoval(packageID: packageID)
+                readyPackageIDs = await packageRegistry.readyPackageIDs()
+                updateModelsStatus()
+            } catch {
+                // Restore readiness until the physical removal actually runs.
+                await packageRegistry.cancelRemoval(packageID: packageID)
+                readyPackageIDs = await packageRegistry.readyPackageIDs()
+                errorHandler.report(error)
+                Task { await verifyModels() }
+            }
+        }
     }
     func chooseImport() {
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false
@@ -1043,7 +1344,7 @@ struct QueueJobID: Hashable, Sendable {
         try hardware.requireCompatibility(for: profile)
     }
     func processQueue() async {
-        guard deletingGroupID == nil, !deletingSidebarRecordings, !deletingDiagramJobs, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
+        guard deletingGroupID == nil, !deletingSidebarRecordings, !deletingDiagramJobs, !deletingTextJobs, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
               repository != nil, let archive, catalog != nil else { return }
         busy = true
         defer {
@@ -1053,23 +1354,24 @@ struct QueueJobID: Hashable, Sendable {
             queueStatus = nil
             busy = false
         }
-        while deletingGroupID == nil && !deletingSidebarRecordings && !deletingDiagramJobs && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
+        while deletingGroupID == nil && !deletingSidebarRecordings && !deletingDiagramJobs && !deletingTextJobs && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
                 showQueueStatus("Обработка ожидает охлаждения Mac")
                 try? await Task.sleep(for: .seconds(2)); continue
             }
             let job = queued.removeFirst(); activeJob = job; processingJob = job
             do {
-                if job.isRecording {
-                    try await processRecordingJob(job.id)
-                } else {
-                    try await processDiagramJob(job.id)
+                switch job.kind {
+                case .recording: try await processRecordingJob(job.id)
+                case .diagram: try await processDiagramJob(job.id)
+                case .text: try await processTextJob(job.id)
                 }
             } catch {
                 let failure = error as? WorkerFailureError
                 let message = (error as? ScribeError)?.localizedDescription
                     ?? failure?.userMessage
-                    ?? "Обработка прервана. Готовые результаты и контрольные точки сохранены."
+                    ?? (job.isText ? "Обезличивание прервано. Прежний результат сохранён."
+                                   : "Обработка прервана. Готовые результаты и контрольные точки сохранены.")
                 if activeJob == job, !(error is CancellationError) {
                     if let failure {
                         errorHandler.report(message: failure.userMessage, context: failure.context)
@@ -1077,7 +1379,10 @@ struct QueueJobID: Hashable, Sendable {
                         errorHandler.report(message: message)
                     }
                 }
-                if activeJob == job, !(resourcesPaused && queued.contains(job)) {
+                // A cancellation that still owns the active job (a supervisor
+                // kill without a UI cancel) never records a failure: the
+                // attempt keeps its on-disk state for the restart recovery.
+                if activeJob == job, !(error is CancellationError || (resourcesPaused && queued.contains(job))) {
                     if job.isRecording {
                         let isMicrophone = recordingID == job.id
                         _ = try? await archive.update(job.id) { m in
@@ -1091,6 +1396,14 @@ struct QueueJobID: Hashable, Sendable {
                                 m.state = .failed
                             }
                             m.lastError = message
+                        }
+                    } else if job.isText, let textArchive {
+                        // A failure records a safe PROCESSING reason on this attempt
+                        // and never touches the published result (invariant 6).
+                        _ = try? await textArchive.updateCard(job.id) { card in
+                            guard card.latestAttempt.state == .running || card.latestAttempt.state == .queued else { return }
+                            card.latestAttempt.state = .failed
+                            card.latestAttempt.failure = .processing(message)
                         }
                     } else if let diagramArchive {
                         _ = try? await diagramArchive.update(job.id) { m in
@@ -1106,7 +1419,7 @@ struct QueueJobID: Hashable, Sendable {
                 await archive.perform { try? $0.cleanupTemporaryFiles(job.id) }
             }
             activeJob = nil; processingJob = nil
-            if job.isRecording { await reload() } else { await reloadDiagrams() }
+            if job.isRecording { await reload() } else if job.isText { await reloadTexts() } else { await reloadDiagrams() }
         }
     }
     /// One audio job: live ASR of an open capture plus the offline stage loop.
@@ -1257,6 +1570,15 @@ struct QueueJobID: Hashable, Sendable {
                         if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .queued }
                         m.lastError = pauseMessage
                     }
+                } else if job.isText, let textArchive {
+                    // The attempt returns to the FIFO head and keeps its frozen
+                    // input (or still-frozen retry snapshot) for the automatic
+                    // continuation; the queue banner explains the pause.
+                    _ = try? await textArchive.updateCard(job.id) { card in
+                        if card.latestAttempt.state == .running || card.latestAttempt.state == .queued {
+                            card.latestAttempt.state = .queued
+                        }
+                    }
                 } else if !job.isRecording, let diagramArchive {
                     _ = try? await diagramArchive.update(job.id) {
                         if $0.state == .recognizing || $0.state == .queued { $0.state = .queued }
@@ -1323,6 +1645,13 @@ struct QueueJobID: Hashable, Sendable {
                     if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
                     m.lastError = reason
                 }
+            } else if job.isText, let textArchive {
+                // Sleep/shutdown interrupts the attempt; an explicit retry
+                // continues it later (like the restart recovery).
+                _ = try? await textArchive.updateCard(job.id) { card in
+                    guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
+                    card.latestAttempt.state = .interrupted
+                }
             } else if !job.isRecording, let diagramArchive {
                 _ = try? await diagramArchive.update(job.id) { m in
                     guard m.state != .cancelled else { return }
@@ -1335,6 +1664,7 @@ struct QueueJobID: Hashable, Sendable {
         await waitUntilQueueIdle()
         await reload()
         await reloadDiagrams()
+        await reloadTexts()
     }
     func cancelSelected() async {
         guard let id = selection else { return }
@@ -1525,13 +1855,38 @@ struct QueueJobID: Hashable, Sendable {
     // MARK: - Diagrams
 
     /// Selected, installed and hardware-compatible diagram model; readiness is
-    /// fully independent of the four-role audio complect.
+    /// fully independent of the four-role audio complect. In the shared mode
+    /// the ready shared profile serves new diagram runs; until its package is
+    /// verified the native diagram assignment stays effective.
     var diagramProfile: ModelProfile? {
+        if let shared = readySharedProfile() { return shared }
         guard let catalog, let profile = modelLibrary.diagramProfile(from: catalog),
               hardware.compatibility(for: profile).isCompatible else { return nil }
         return profile
     }
     var diagramModelsReady: Bool { diagramProfile != nil }
+    /// Readiness of the anonymization assignment for the section's model link
+    /// (AC-7): the mode-effective profile with a published verified package.
+    /// Worker admission re-checks readiness at dequeue time (work 9).
+    var anonymizationModelsReady: Bool {
+        guard let catalog, let id = effectiveAnonymizationSettings.profileID(for: .anonymization),
+              let profile = catalog.models.first(where: { $0.id == id }),
+              profile.supports(.anonymization),
+              hardware.compatibility(for: profile).isCompatible,
+              readyPackageIDs.contains(profile.effectivePackageID) else { return false }
+        return true
+    }
+    /// The acting byte limit for text import and run admission: the pair
+    /// «assigned profile and this Mac» (AC-37). Nil while no profile is
+    /// assigned — the import check is then deferred and the file waits with
+    /// the model. Worker admission re-measures the run text (work 9). The var
+    /// form is the qualification seam of work 13 and the test seam.
+    var inputLimits = AnonymizationInputLimit()
+    var anonymizationImportLimitBytes: UInt? {
+        guard let catalog, let id = effectiveAnonymizationSettings.profileID(for: .anonymization),
+              let profile = catalog.models.first(where: { $0.id == id }) else { return nil }
+        return inputLimits.limitBytes(profile: profile, hardware: hardware)
+    }
     func reloadDiagrams() async {
         guard let diagramArchive else { return }
         applyDiagramSnapshot(await diagramArchive.snapshot())
@@ -1726,6 +2081,506 @@ struct QueueJobID: Hashable, Sendable {
     }
     func diagram(_ id: String) -> DiagramManifest? { diagramsByID[id] }
 
+    // MARK: - Text anonymization (work 5)
+
+    /// Snapshot application for the text archive. The catalog is bridged into
+    /// a RecordingGroups projection for the shared sidebar/search layer; the
+    /// coordinator stays the only writer of the real catalog.
+    private func applyTextSnapshot(_ snapshot: AnonymizationCoordinator.Snapshot) {
+        guard snapshot.revision >= textArchiveRevision, snapshot.revision != textArchiveRevision else { return }
+        textArchiveRevision = snapshot.revision
+        if let bridged = Self.bridgedTextGroups(from: snapshot.catalog) {
+            textGroups = bridged
+        } else {
+            errorHandler.report(message: "Каталог текстового архива повреждён или создан другой версией приложения")
+        }
+        textCards = snapshot.cards
+        if snapshot.unreadableCardIDs != reportedUnreadableTextIDs {
+            reportedUnreadableTextIDs = snapshot.unreadableCardIDs
+            if !snapshot.unreadableCardIDs.isEmpty {
+                errorHandler.report(message: "Не удалось прочитать тексты архива: " + snapshot.unreadableCardIDs.joined(separator: ", ") + ". Документы сохранены для восстановления. Проверьте card.json в каталогах этих карточек.")
+            }
+        }
+        if let error = snapshot.catalogError, error != reportedTextGroupsError {
+            reportedTextGroupsError = error; errorHandler.report(message: error)
+        }
+    }
+    /// Projection of the authoritative text catalog into the shared group
+    /// model: group ids are preserved so GUI operations address the real
+    /// catalog entities, the system group stays last, and membership of
+    /// «Без темы» maps to the shared model's absent-entry form. A healthy
+    /// catalog always validates; a failure is reported and keeps the previous
+    /// projection instead of replacing it with an empty one.
+    private static func bridgedTextGroups(from catalog: AnonymizationArchiveCatalog) -> RecordingGroups? {
+        let groups = catalog.groups.map { RecordingGroup(id: $0.id, name: $0.name, expanded: $0.isExpanded) }
+        let membership = catalog.membership.filter { $0.value != AnonymizationGroup.systemID }
+        return try? RecordingGroups(groups: groups, defaultID: catalog.defaultGroupID, membership: membership)
+    }
+    func reloadTexts() async {
+        guard let textArchive else { return }
+        applyTextSnapshot(await textArchive.snapshot())
+        await anonymizationSearch.waitForLayout()
+    }
+    /// Archive renaming of a card's display name (row menu and header); the
+    /// in-card editor of work 10 saves through its own draft.
+    func renameTextCard(_ id: String, to name: String) async {
+        guard let textArchive else { return }
+        do {
+            try await textArchive.rename(id, to: name)
+            await reloadTexts()
+        } catch { errorHandler.report(error) }
+    }
+    func moveTextCards(_ ids: Set<String>, to groupID: String) async {
+        guard let textArchive else { return }
+        do {
+            try await textArchive.moveCards(ids, to: groupID)
+            await reloadTexts()
+        } catch { errorHandler.report(error) }
+    }
+    func changeTextGroups(_ operation: @Sendable (inout AnonymizationArchiveCatalog) throws -> Void) async {
+        guard let textArchive else { return }
+        do {
+            try await textArchive.editGroups(operation)
+            await reloadTexts()
+        } catch { errorHandler.report(error) }
+    }
+    func textCard(_ id: String) -> AnonymizationCardSummary? { textCardsByID[id] }
+    func textCards(in groupID: String) -> [AnonymizationCardSummary] {
+        textCards.filter { textGroups.groupID(for: $0.id) == groupID }
+    }
+    var defaultTextGroup: RecordingGroup { textGroups.defaultGroup }
+
+    // MARK: - Text anonymization queue (work 9)
+
+    func textQueuePosition(for id: String) -> Int? {
+        queued.firstIndex(of: .text(id)).map { $0 + 1 }
+    }
+
+    /// Admission of one text card into the common FIFO: only a `WAITING_MODEL`
+    /// attempt enters, and only while the acting assignment is ready; without
+    /// readiness the card stays outside the FIFO in «Ожидает модель» (AC-30).
+    /// The FIFO slot is reserved synchronously before the first suspension, so
+    /// ordered callers (the readiness wake, the serial import queue) keep their
+    /// order even when admission requests interleave; the queue loop never
+    /// takes a job with an open admission request. `queueGeneration`, the
+    /// per-request `enqueuing` guard and `deletingJobIDs` mirror the
+    /// recording/diagram enqueue invariants.
+    func enqueueText(_ id: String) async {
+        let job = QueueJobID.text(id)
+        guard let textArchive, !preparingStorage, !shuttingDown,
+              !deletingJobIDs.contains(job), enqueuing[job] == nil, activeJob != job else { return }
+        let request = UUID(), generation = queueGeneration
+        let pauseReason = queuePauses.values.first
+        enqueuing[job] = request
+        let reserved = pauseReason == nil && !queued.contains(job)
+        if reserved { queued.append(job) }
+        var confirmed = false
+        defer {
+            if enqueuing[job] == request {
+                enqueuing.removeValue(forKey: job)
+                // An admission that did not confirm the queued state gives the
+                // reservation back; a confirmed one simply keeps the slot.
+                if reserved && !confirmed { queued.removeAll { $0 == job } }
+            }
+            if !busy { Task { await processQueue() } }
+        }
+        let card: AnonymizationCardDocument
+        do { card = try await textArchive.loadCard(id) }
+        catch {
+            errorHandler.report(message: "Не удалось прочитать карточку обезличивания для запуска. Документ сохранён; проверьте архив и повторите попытку.")
+            return
+        }
+        guard card.latestAttempt.state == .waitingModel, activeJob != job,
+              generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
+        if (queuePauses.values.first ?? pauseReason) != nil {
+            // A sleep/shutdown pause invalidates this admission; the card needs
+            // an explicit retry after the pause, exactly like diagram jobs.
+            _ = try? await textArchive.updateCard(id) {
+                guard $0.latestAttempt.state == .waitingModel else { return }
+                $0.latestAttempt.state = .interrupted
+            }
+            await reloadTexts(); return
+        }
+        guard let catalog else { return }
+        let readiness = await packageRegistry.anonymizationReadiness(
+            settings: effectiveAnonymizationSettings, catalog: catalog, hardware: hardware)
+        guard generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
+        guard readiness.isReady else {
+            // No ready assignment: the card keeps waiting outside the FIFO.
+            return
+        }
+        _ = try? await textArchive.updateCard(id) {
+            guard $0.latestAttempt.state == .waitingModel else { return }
+            $0.latestAttempt.state = .queued
+        }
+        guard generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
+        confirmed = true
+        await reloadTexts()
+    }
+
+    /// Wake-up of waiting cards after a readiness change (installation,
+    /// settings save, startup verification): cards enter the FIFO in
+    /// `import_order` — `textCards` is already sorted by import position.
+    /// The pass is gated by one up-front readiness check: a wake that starts
+    /// before the registry publishes the installation never admits a partial
+    /// suffix of the waiting cards when readiness flips mid-loop. Single-flight
+    /// keeps concurrent readiness changes from interleaving admission loops;
+    /// a request arriving mid-run triggers one trailing pass.
+    private var wakingTextCards = false
+    private var textWakeNeedsRepeat = false
+    func wakeWaitingTextCards() async {
+        guard !preparingStorage, !shuttingDown, let catalog else { return }
+        guard await packageRegistry.anonymizationReadiness(
+            settings: effectiveAnonymizationSettings, catalog: catalog, hardware: hardware).isReady else {
+            // Nothing can be admitted yet; the next readiness change re-runs the wake.
+            return
+        }
+        guard !wakingTextCards else { textWakeNeedsRepeat = true; return }
+        wakingTextCards = true
+        defer {
+            wakingTextCards = false
+            if textWakeNeedsRepeat {
+                textWakeNeedsRepeat = false
+                Task { await wakeWaitingTextCards() }
+            }
+        }
+        for summary in textCards where summary.attemptState == .waitingModel {
+            await enqueueText(summary.id)
+        }
+    }
+
+    /// One text-anonymization job in the shared worker slot. Admission
+    /// re-checks readiness and the byte limit, pins the profile, package,
+    /// data types and source version into `input.json` + `RunInput`, holds the
+    /// package lease until the worker exits, and publishes the artifact only
+    /// for the current running attempt with a matching expected right version.
+    private func processTextJob(_ id: String) async throws {
+        let job = QueueJobID.text(id)
+        guard let repository, let textArchive, let catalog else { throw ScribeError.message("Хранилище текстов недоступно") }
+        let card = try await textArchive.loadCard(id)
+        let attemptID = card.latestAttempt.id
+        guard card.latestAttempt.state == .queued else { return }
+        // Top-of-queue readiness re-check: a lost assignment returns the
+        // attempt to «Ожидает модель» and frees the slot for the next job.
+        let settings = effectiveAnonymizationSettings
+        let readiness = await packageRegistry.anonymizationReadiness(
+            settings: settings, catalog: catalog, hardware: hardware)
+        guard activeJob == job else { throw CancellationError() }
+        guard readiness.isReady, let profile = readiness.profile, let packageID = readiness.packageID,
+              let lease = await packageRegistry.acquireLeaseIfReady(packageID: packageID, profileID: profile.id) else {
+            _ = try? await textArchive.updateCard(id) { card in
+                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
+                card.latestAttempt.state = .waitingModel
+                // A retry that returns to waiting loses its frozen snapshot;
+                // the first start after readiness takes the last saved source.
+                card.latestAttempt.requestedSource = nil
+            }
+            await reloadTexts()
+            return
+        }
+        // The explicit-retry snapshot wins only while it still names the
+        // current left version; everything else (first run, retry after
+        // waiting, an out-of-band edit) takes the last saved source at
+        // admission. The run text is measured in UTF-8 without BOM against
+        // the acting limit of «profile and this Mac» (AC-42).
+        let source = card.latestAttempt.requestedSource.flatMap { requested in
+            requested.id == card.source.id ? requested : nil
+        } ?? card.source
+        let limit = inputLimits.limitBytes(profile: profile, hardware: hardware)
+        let actualBytes = UInt(Data(source.text.utf8).count)
+        if actualBytes > limit {
+            await packageRegistry.release(lease)
+            _ = try? await textArchive.updateCard(id) { card in
+                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
+                card.latestAttempt.state = .failed
+                card.latestAttempt.failure = .sizeLimit(actualBytes: actualBytes, limitBytes: limit)
+            }
+            await reloadTexts()
+            return
+        }
+        // Freeze the run input off the main actor: profile, verified package,
+        // the last saved data-type list and the chosen source version.
+        let runInput = RunInput(source: source, profileID: profile.id, packageID: packageID, dataTypes: settings.dataTypes)
+        let input = AnonymizationAttemptInput(
+            fileId: id, attemptId: attemptID, source: source,
+            importedNameStem: card.importedNameStem, sourceFormat: card.sourceFormat,
+            dataTypes: settings.dataTypes, profileID: profile.id, packageID: packageID,
+            automaticSubstitutions: card.automaticSubstitutions)
+        let attemptURL: URL
+        do {
+            attemptURL = try await textArchive.perform { repository in
+                let run = repository.run(id, attemptID)
+                try Disk.write(input, to: run.appendingPathComponent(AnonymizationAttemptInput.filename))
+                return run
+            }
+        } catch {
+            await packageRegistry.release(lease)
+            _ = try? await textArchive.updateCard(id) { card in
+                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
+                card.latestAttempt.state = .failed
+                card.latestAttempt.failure = .processing("Не удалось подготовить задание обезличивания")
+            }
+            await reloadTexts()
+            return
+        }
+        guard activeJob == job else {
+            await packageRegistry.release(lease)
+            throw CancellationError()
+        }
+        do {
+            _ = try await textArchive.updateCard(id) { card in
+                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else {
+                    throw ScribeError.message("Задание обезличивания не является текущим")
+                }
+                card.latestAttempt.state = .running
+                card.latestAttempt.input = runInput
+            }
+        } catch {
+            // The attempt went stale between the input freeze and the RUNNING
+            // commit; the lease still has to close before the next job.
+            await packageRegistry.release(lease)
+            throw error
+        }
+        await reloadTexts()
+        guard activeJob == job else {
+            await packageRegistry.release(lease)
+            throw CancellationError()
+        }
+        let command = WorkerCommand(anonymizationJobId: id, runId: attemptID,
+                                    anonymizationPath: attemptURL.path,
+                                    modelsPath: repository.models.path, toolsPath: tools.path)
+        var workerError: Error?
+        do {
+            try await supervisor.run(command, executable: worker) { event in
+                // Events are already filtered by kind + jobId + runId by the
+                // supervisor; foreign or late attempts cannot reach here.
+                if event.type == "progress" { self.showQueueStatus(event.message) }
+            }
+        } catch { workerError = error }
+        // The lease closes exactly when the worker has exited, before any
+        // publication or the next job.
+        await packageRegistry.release(lease)
+        if let workerError { throw workerError }
+        guard activeJob == job else { throw CancellationError() }
+        try await publishAnonymizationResult(cardID: id, attemptID: attemptID,
+                                              attemptURL: attemptURL, runInput: runInput)
+        await reloadTexts()
+    }
+
+    /// Conditional publication of one finished attempt: only the current
+    /// `RUNNING` attempt of an existing card whose expected right version still
+    /// matches the published one. The artifact is read and validated as a
+    /// whole — an incomplete or damaged result is never shown partially — and
+    /// `SUCCEEDED` + result + the replenished substitution history commit as
+    /// one atomic card transaction. Late, cancelled or stale completions leave
+    /// the published result untouched (invariant 6).
+    private func publishAnonymizationResult(cardID: String, attemptID: String, attemptURL: URL, runInput: RunInput) async throws {
+        guard let textArchive else { return }
+        let card = try await textArchive.loadCard(cardID)
+        guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .running else { return }
+        // The consent to replace the right panel is bound to one version id:
+        // a result that appeared or changed meanwhile cannot be replaced by
+        // this attempt (AC-17/18).
+        let currentRight = card.publishedResult?.text.id
+        guard currentRight == card.latestAttempt.expectedResultRevisionID else {
+            _ = try? await textArchive.updateCard(cardID) { card in
+                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .running else { return }
+                card.latestAttempt.state = .failed
+                card.latestAttempt.failure = .processing("Правая версия результата изменилась. Повторите обезличивание заново.")
+            }
+            return
+        }
+        let artifact: AnonymizationRunArtifact
+        do {
+            artifact = try await textArchive.perform { _ in
+                try Disk.read(AnonymizationRunArtifact.self,
+                              at: attemptURL.appendingPathComponent(AnonymizationRunArtifact.filename))
+            }
+            try artifact.validate(sourceScalarCount: card.source.text.unicodeScalars.count,
+                                  importedNameScalarCount: card.importedNameStem.unicodeScalars.count)
+            guard artifact.result.input == runInput else {
+                throw ScribeError.message("Результат обезличивания не соответствует входу попытки")
+            }
+        } catch let error as ScribeError { throw error }
+        catch { throw ScribeError.message("Не удалось прочитать результат обезличивания") }
+        _ = try await textArchive.updateCard(cardID) { card in
+            guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .running else { return }
+            card.latestAttempt.state = .succeeded
+            card.publishedResult = artifact.result
+            card.automaticSubstitutions = artifact.substitutions
+        }
+    }
+
+    /// Cancellation of exactly one text attempt (`QUEUED` or `RUNNING`): the
+    /// supervisor stops the worker and its child processes, the previous
+    /// result stays published, and the jobs of the other kinds keep their
+    /// order (AC-10).
+    func cancelTextCard(_ id: String) async {
+        let job = QueueJobID.text(id)
+        guard let textArchive else { return }
+        jobAdmission[job, default: 0] &+= 1
+        enqueuing.removeValue(forKey: job)
+        queued.removeAll { $0 == job }
+        if activeJob == job || processingJob == job {
+            suspendingQueue = true; activeJob = nil
+            await supervisor.cancel()
+            await waitUntilQueueIdle()
+            suspendingQueue = false
+            Task { await processQueue() }
+        }
+        _ = try? await textArchive.updateCard(id) { card in
+            guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
+            card.latestAttempt.state = .cancelled
+        }
+        await reloadTexts()
+    }
+
+    // MARK: - Text anonymization deletion (work 11)
+
+    func canDeleteTextCards(_ ids: Set<String>) -> Bool {
+        !ids.isEmpty && !deletingTextJobs
+    }
+
+    /// Deletion of confirmed text cards: the frozen confirmation is re-checked
+    /// against the live archive, admission of exactly those UUIDs closes
+    /// before the first wait, their worker and its child processes stop, and
+    /// only then the file removal runs through the coordinator's confirmed
+    /// deletion transaction. A partial failure reports the reason and publishes
+    /// the actual remainder; the surviving cards keep a cancelled attempt.
+    func deleteTextCards(_ ids: Set<String>) async {
+        guard let textArchive else { return }
+        await withTextDeletion {
+            // Another window may have removed some of the confirmed cards
+            // since the dialog froze the set.
+            let existing = ids.filter { textCardsByID[$0] != nil }
+            guard !existing.isEmpty else { return }
+            let confirmed = try await textArchive.prepareCardDeletion(Set(existing))
+            await cancelTextJobsForDeletion(Set(confirmed))
+            try await textArchive.finishCardDeletion()
+        }
+    }
+
+    /// Group deletion of the text archive. The files variant follows the same
+    /// confirmed transaction as card deletion — the workers of the confirmed
+    /// membership stop before any folder is removed and a partial failure
+    /// keeps the group with the actual remainder. The group-only variant moves
+    /// the whole membership to «Без темы» in one catalog write and removes no
+    /// files, so it needs no worker stop.
+    func deleteTextGroup(_ id: String, deleteFiles: Bool) async {
+        guard let textArchive, !deletingTextJobs, id != AnonymizationGroup.systemID else { return }
+        guard deleteFiles else {
+            await changeTextGroups { try $0.remove(id) }
+            return
+        }
+        await withTextDeletion {
+            let members = try await textArchive.prepareGroupDeletion(id)
+            await cancelTextJobsForDeletion(members)
+            try await textArchive.finishGroupDeletion(id, deleteFiles: true)
+        }
+    }
+
+    /// Serializes text deletions against the queue and the sidebar: while set,
+    /// the queue loop takes no new job and the dialogs refuse a second run.
+    /// The refreshed snapshot decides which deleted UUIDs leave the admission
+    /// block — survivors of a partial failure become operable again.
+    private func withTextDeletion(_ operation: () async throws -> Void) async {
+        guard !deletingTextJobs else {
+            errorHandler.report(message: "Дождитесь удаления текстов")
+            return
+        }
+        deletingTextJobs = true
+        defer {
+            deletingTextJobs = false
+            deletingJobIDs.subtract(textCards.map { QueueJobID.text($0.id) })
+            Task { await processQueue() }
+        }
+        do { try await operation() }
+        catch { errorHandler.report(error) }
+        await reloadTexts()
+    }
+
+    /// Closes admission of the confirmed cards before the first wait and waits
+    /// for exactly their own worker and readers — the same lifecycle as the
+    /// recording and diagram deletions. Late admissions and publications of
+    /// these UUIDs are refused by `deletingJobIDs`/`jobAdmission`; the order
+    /// of foreign jobs is untouched.
+    private func cancelTextJobsForDeletion(_ ids: Set<String>) async {
+        guard let textArchive else { return }
+        let jobs = Set(ids.map(QueueJobID.text))
+        deletingJobIDs.formUnion(jobs)
+        for job in jobs {
+            jobAdmission[job, default: 0] &+= 1
+            enqueuing.removeValue(forKey: job)
+        }
+        queued.removeAll { jobs.contains($0) }
+        for id in ids.sorted() {
+            let job = QueueJobID.text(id)
+            if activeJob == job || processingJob == job {
+                suspendingQueue = true; activeJob = nil
+                await supervisor.cancel()
+                await waitUntilQueueIdle()
+                suspendingQueue = false
+            }
+            // A surviving document (a partial failure) must never keep a
+            // phantom queued/running attempt after its worker was stopped.
+            _ = try? await textArchive.updateCard(id) { card in
+                guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
+                card.latestAttempt.state = .cancelled
+            }
+        }
+    }
+
+    /// Consent state of a retry: replacing a manually edited right version
+    /// needs the user's agreement, bound to the current version id (AC-18);
+    /// an unedited or absent result retries without a dialog.
+    enum AnonymizationRetryConsent {
+        case notNeeded
+        case needed(currentRevisionID: String)
+    }
+    func anonymizationRetryConsent(for id: String) async -> AnonymizationRetryConsent {
+        guard let textArchive, let card = try? await textArchive.loadCard(id),
+              let result = card.publishedResult else { return .notNeeded }
+        return result.text.id == result.generatedText.id ? .notNeeded : .needed(currentRevisionID: result.text.id)
+    }
+
+    /// Explicit retry (AC-17/18): the command freezes the current left source
+    /// and the replaceable right version. With a ready model the attempt goes
+    /// straight into the FIFO keeping the snapshot; without one it waits with
+    /// the model and the snapshot is dropped — the first start after readiness
+    /// takes the last saved source. A failed retry never destroys the previous
+    /// result: the old attempt is simply replaced by the new one in the card.
+    func retryAnonymization(cardID: String, confirmingResultRevisionID: String? = nil) async {
+        let job = QueueJobID.text(cardID)
+        guard !preparingStorage, !shuttingDown, let textArchive, let catalog,
+              !deletingJobIDs.contains(job) else { return }
+        let card: AnonymizationCardDocument
+        do { card = try await textArchive.loadCard(cardID) }
+        catch { errorHandler.report(error); return }
+        guard ![AnonymizationAttemptState.queued, .running].contains(card.latestAttempt.state) else { return }
+        let expected: String?
+        if let result = card.publishedResult {
+            guard result.text.id == result.generatedText.id || confirmingResultRevisionID == result.text.id else {
+                errorHandler.report(message: "Согласие на замену не подтверждено для текущей версии результата.")
+                return
+            }
+            expected = result.text.id
+        } else { expected = nil }
+        let snapshot = card.source
+        let readiness = await packageRegistry.anonymizationReadiness(
+            settings: effectiveAnonymizationSettings, catalog: catalog, hardware: hardware)
+        do {
+            _ = try await textArchive.updateCard(cardID) { card in
+                card.latestAttempt = AnonymizationAttempt(
+                    state: .waitingModel,
+                    // The snapshot survives only in a retry that never waits.
+                    requestedSource: readiness.isReady ? snapshot : nil,
+                    expectedResultRevisionID: expected)
+            }
+            await reloadTexts()
+            await enqueueText(cardID)
+        } catch { errorHandler.report(error) }
+    }
+
     func showAudio() { guard let selected, let repository else { return }; NSWorkspace.shared.activateFileViewerSelecting([repository.folder(selected.id).appendingPathComponent(selected.originalRelativePath)]) }
     func rendered(_ part: ExportPart, markdown: Bool = false) async throws -> String {
         try await renderedResult(part, markdown: markdown).text
@@ -1783,6 +2638,7 @@ struct QueueJobID: Hashable, Sendable {
         for task in Array(exportTasks.values) { await task.value }
         recordingSearch.shutdown()
         diagramSearch.shutdown()
+        anonymizationSearch.shutdown()
         importQueue.cancel()
         memorySource?.cancel(); memorySource = nil
         if let sleepObserver { NSWorkspace.shared.notificationCenter.removeObserver(sleepObserver) }; sleepObserver = nil

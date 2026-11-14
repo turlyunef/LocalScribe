@@ -8,12 +8,48 @@ import LocalScribeCore
     @Published var applicationLanguage: ApplicationLanguage
     @Published var recordingSources: RecordingSourcePreferences
     @Published var modelIDs: [ModelRole: String] = [:]
+    // Anonymization assignment draft: the mode, the shared profile and the
+    // separate anonymization slot ("" — empty), plus the multiline data-type
+    // list. «ОК» applies all of them with one atomic settings record write;
+    // «Отмена» discards the draft, keeping the installed packages.
+    @Published var anonymizationMode: ModelAssignmentMode
+    @Published var sharedProfileID: String
+    @Published var anonymizationProfileID: String
+    @Published var dataTypesText: String
 
     init(model: AppModel) {
         backgroundRecognition = model.backgroundRecognition
         automaticSummaries = model.automaticSummaries
         applicationLanguage = model.applicationLanguage
         recordingSources = model.recordingSources
+        let settings = model.anonymizationSettings
+        anonymizationMode = settings.modelAssignmentMode
+        sharedProfileID = settings.sharedProfileID ?? ""
+        // The saved separate assignment is restored only while it stays
+        // compatible with the task and this Mac; otherwise the slot is empty.
+        var anonymizationID = settings.separateProfiles[ModelTask.anonymization.rawValue] ?? ""
+        if let profile = model.catalog?.models.first(where: { $0.id == anonymizationID }),
+           !ModelTaskSupport.compatibility(task: .anonymization, profile: profile, hardware: model.hardware).isCompatible {
+            anonymizationID = ""
+        }
+        anonymizationProfileID = anonymizationID
+        dataTypesText = settings.dataTypes.joined(separator: "\n")
+    }
+
+    var dataTypesLines: [String] { dataTypesText.components(separatedBy: .newlines) }
+    var nonEmptySharedProfileID: String? { sharedProfileID.isEmpty ? nil : sharedProfileID }
+    var nonEmptyAnonymizationProfileID: String? { anonymizationProfileID.isEmpty ? nil : anonymizationProfileID }
+
+    /// Draft vs the saved record: mode, both editable slots and the sanitized
+    /// type list. Whitespace-only edits that sanitize to the saved list do not
+    /// count as changes.
+    func hasAnonymizationChanges(from model: AppModel) -> Bool {
+        let settings = model.anonymizationSettings
+        if anonymizationMode != settings.modelAssignmentMode { return true }
+        if nonEmptySharedProfileID != settings.sharedProfileID { return true }
+        if nonEmptyAnonymizationProfileID != settings.separateProfiles[ModelTask.anonymization.rawValue] { return true }
+        if AnonymizationSettings.sanitizeDataTypes(dataTypesLines) != settings.dataTypes { return true }
+        return false
     }
 
     func changedModels(in library: ModelLibrary) -> [ModelRole: String] {
@@ -25,6 +61,7 @@ import LocalScribeCore
             || applicationLanguage != model.applicationLanguage
             || recordingSources != model.recordingSources
             || !changedModels(in: model.modelLibrary).isEmpty
+            || hasAnonymizationChanges(from: model)
     }
 }
 

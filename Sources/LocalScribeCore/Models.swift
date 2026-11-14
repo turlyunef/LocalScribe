@@ -35,6 +35,21 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
     public var experimental: Bool?
     public var supportsClosedFragments: Bool { purpose == .asr && resolvedASRBackend == "whisper" }
     public var recommendationRank: Int?
+    /// Tasks the profile is qualified for among summary, diagram recognition
+    /// and anonymization. The catalog stamps the role-verified tasks
+    /// (SUMMARY on summary profiles, DIAGRAM_RECOGNITION on diagram
+    /// profiles); ANONYMIZATION and limits are added only by qualification
+    /// (work 13, docs/TextAnonymization/Qualification.md). Without a value
+    /// the effective set is derived from the role.
+    public var supportedTasks: Set<ModelTask>?
+    /// Explicit reference to the immutable file set shared by several profiles.
+    /// When absent, the package identity is derived from the pinned files, so
+    /// profiles with equal sizes and SHA-256 share one physical installation.
+    public var packageID: String?
+    /// Catalog-provided byte limit of a full anonymization pass for this
+    /// profile. Absent until qualification; the conservative hardware estimate
+    /// applies in the meantime. See `AnonymizationInputLimit`.
+    public var anonymizationInputLimitBytes: Int64?
     public var purpose: ModelRole? { role ?? ModelRole(rawValue: id) }
     var catalogName: String { name ?? repository.components(separatedBy: "/").last ?? id }
     public var displayName: String { L10n.text(catalogName) }
@@ -53,6 +68,12 @@ public struct ModelProfile: Codable, Sendable, Identifiable {
               files.allSatisfy({ $0.size >= 0 && !$0.localPath.hasPrefix("/") && !$0.localPath.isEmpty &&
                   $0.localPath.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { Self.safeComponent(String($0)) } }),
               Set(files.map(\.localPath)).count == files.count else { throw ScribeError.message("Недопустимый путь в каталоге моделей") }
+        if let packageID, !Self.safeComponent(packageID) {
+            throw ScribeError.message("Недопустимая ссылка на комплект моделей")
+        }
+        if let limit = anonymizationInputLimitBytes, limit <= 0 {
+            throw ScribeError.message("Недопустимый предел входа обезличивания в каталоге моделей")
+        }
     }
     public static func safeComponent(_ value: String) -> Bool {
         !value.isEmpty && value != "." && value != ".." && !value.contains("/") && !value.contains("\\") && !value.contains("\0")
@@ -96,11 +117,23 @@ public struct ModelCatalog: Codable, Sendable {
         if let ids = info.modelIDs, Set(ids.keys) != Set(ModelRole.audioRoles.map(\.rawValue)) {
             throw ScribeError.message("Некорректный закреплённый комплект моделей")
         }
-        var profiles = try ModelRole.audioRoles.map { role in
+        var profiles = try ModelRole.audioRoles.map { role -> ModelProfile in
             let id = try info.modelID(for: role)
             let matches = models.filter { $0.id == id && $0.purpose == role }
-            guard matches.count == 1 else { throw ScribeError.message("Закреплённая модель \(id) недоступна в каталоге") }
-            return matches[0]
+            if matches.count == 1 { return matches[0] }
+            // Shared-mode summaries may pin a task-qualified profile of another
+            // catalog purpose (the shared model serves three tasks). Resolve it
+            // with a summary role view: the pinned identity — id, revision and
+            // pinned files — is unchanged, so the run fingerprint stays equal.
+            if role == .summary {
+                let taskMatches = models.filter { $0.id == id && $0.supports(.summary) }
+                if taskMatches.count == 1 {
+                    var view = taskMatches[0]
+                    view.role = .summary
+                    return view
+                }
+            }
+            throw ScribeError.message("Закреплённая модель \(id) недоступна в каталоге")
         }
         if let asr = profiles.first(where: { $0.purpose == .asr }), asr.resolvedASRBackend != "whisper",
            let tokenizerID = asr.tokenizerID,

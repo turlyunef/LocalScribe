@@ -8,8 +8,8 @@
 <key>CFBundleExecutable</key><string>LocalScribe</string>
 <key>CFBundleIconFile</key><string>AppIcon.icns</string>
 <key>CFBundlePackageType</key><string>APPL</string>
-<key>CFBundleShortVersionString</key><string>2.11.2</string>
-<key>CFBundleVersion</key><string>23</string>
+<key>CFBundleShortVersionString</key><string>2.12.0</string>
+<key>CFBundleVersion</key><string>24</string>
 <key>NSHumanReadableCopyright</key><string>Разработано Евгением Турлюном, 2026.</string>
 <key>LSMinimumSystemVersion</key><string>26.0</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -36,6 +36,16 @@
     <dict>
         <key>UTTypeIdentifier</key><string>app.localscribe.diagram.group</string>
         <key>UTTypeDescription</key><string>Группа схем LocalScribe</string>
+        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+    </dict>
+    <dict>
+        <key>UTTypeIdentifier</key><string>app.localscribe.text</string>
+        <key>UTTypeDescription</key><string>Текст LocalScribe</string>
+        <key>UTTypeConformsTo</key><array><string>public.data</string></array>
+    </dict>
+    <dict>
+        <key>UTTypeIdentifier</key><string>app.localscribe.text.group</string>
+        <key>UTTypeDescription</key><string>Группа текстов LocalScribe</string>
         <key>UTTypeConformsTo</key><array><string>public.data</string></array>
     </dict>
 </array>
