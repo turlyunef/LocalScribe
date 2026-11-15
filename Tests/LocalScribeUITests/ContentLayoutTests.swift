@@ -436,6 +436,7 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertNotNil(findElement("settings.hardware", in: hosting))
         XCTAssertNotNil(findElement("settings.models.verify", in: hosting))
         XCTAssertNotNil(findElement("settings.applicationLanguage", in: hosting))
+        XCTAssertNotNil(findElement("settings.applicationTheme", in: hosting))
         XCTAssertNil(findElement("settings.diagramModels.status", in: hosting))
         XCTAssertNil(findElement("settings.backgroundRecognition", in: hosting))
         await model.shutdown()
@@ -466,6 +467,42 @@ final class ContentLayoutTests: XCTestCase {
         reopenedDraft.applicationLanguage = .system
         try reopened.applySettings(reopenedDraft)
         XCTAssertEqual(ApplicationLanguage.selection(in: defaults), .system)
+        await model.shutdown()
+        await reopened.shutdown()
+    }
+
+    func testApplicationThemePersistsOnlyWhenSettingsAreApplied() async throws {
+        _ = NSApplication.shared
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer {
+            defaults.removePersistentDomain(forName: suite)
+            NSApp.appearance = nil
+        }
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+
+        let draft = SettingsDraft(model: model)
+        XCTAssertEqual(draft.applicationTheme, .system)
+        draft.applicationTheme = .dark
+        XCTAssertTrue(draft.hasChanges(from: model))
+        XCTAssertNil(defaults.object(forKey: ApplicationTheme.defaultsKey))
+        XCTAssertEqual(NSApp.appearance, nil)
+        XCTAssertEqual(SettingsDraft(model: model).applicationTheme, .system)
+
+        try model.applySettings(draft)
+        XCTAssertFalse(draft.hasChanges(from: model))
+        XCTAssertEqual(NSApp.appearance, NSAppearance(named: .darkAqua))
+        let reopenedDefaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        let reopened = AppModel(repository: repo, startServices: false, userDefaults: reopenedDefaults)
+        let reopenedDraft = SettingsDraft(model: reopened)
+        XCTAssertEqual(reopenedDraft.applicationTheme, .dark)
+        reopenedDraft.applicationTheme = .system
+        try reopened.applySettings(reopenedDraft)
+        XCTAssertEqual(ApplicationTheme.selection(in: defaults), .system)
+        XCTAssertEqual(NSApp.appearance, nil)
         await model.shutdown()
         await reopened.shutdown()
     }

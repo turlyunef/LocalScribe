@@ -6,6 +6,7 @@ import LocalScribeCore
     @Published var backgroundRecognition: Bool
     @Published var automaticSummaries: Bool
     @Published var applicationLanguage: ApplicationLanguage
+    @Published var applicationTheme: ApplicationTheme
     @Published var recordingSources: RecordingSourcePreferences
     @Published var modelIDs: [ModelRole: String] = [:]
     @Published var summaryModelID: String
@@ -18,6 +19,7 @@ import LocalScribeCore
         backgroundRecognition = model.backgroundRecognition
         automaticSummaries = model.automaticSummaries
         applicationLanguage = model.applicationLanguage
+        applicationTheme = model.applicationTheme
         recordingSources = model.recordingSources
         let settings = model.anonymizationSettings
         let summary = model.selectedTaskModel(.summary)?.id ?? ""
@@ -47,6 +49,7 @@ import LocalScribeCore
     func hasChanges(from model: AppModel) -> Bool {
         backgroundRecognition != model.backgroundRecognition || automaticSummaries != model.automaticSummaries
             || applicationLanguage != model.applicationLanguage
+            || applicationTheme != model.applicationTheme
             || recordingSources != model.recordingSources
             || !changedModels(in: model.modelLibrary).isEmpty
             || !taskModelChanges(from: model).isEmpty

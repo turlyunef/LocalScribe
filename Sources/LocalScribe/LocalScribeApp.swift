@@ -20,6 +20,12 @@ import LocalScribeCore
         return model.requestRecording(groupID: model.defaultGroup.id)
     }
 
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        // NSApp does not exist before App.main(), so the saved theme is applied
+        // here, before any window is shown.
+        ApplicationTheme.selection(in: .standard).apply()
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         requestTermination { sender.reply(toApplicationShouldTerminate: $0) }
     }

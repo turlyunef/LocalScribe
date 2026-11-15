@@ -185,6 +185,7 @@ struct QueueJobID: Hashable, Sendable {
     @Published private(set) var recordingSources: RecordingSourcePreferences
     let microphoneDevices: MicrophoneDevices
     var applicationLanguage: ApplicationLanguage { ApplicationLanguage.selection(in: userDefaults) }
+    var applicationTheme: ApplicationTheme { ApplicationTheme.selection(in: userDefaults) }
     private let userDefaults: UserDefaults
     @Published var recordingID: String?
     @Published var startingRecording = false
@@ -695,6 +696,10 @@ struct QueueJobID: Hashable, Sendable {
         }
         if applicationLanguage != draft.applicationLanguage {
             userDefaults.set(draft.applicationLanguage.rawValue, forKey: ApplicationLanguage.defaultsKey)
+        }
+        if applicationTheme != draft.applicationTheme {
+            userDefaults.set(draft.applicationTheme.rawValue, forKey: ApplicationTheme.defaultsKey)
+            draft.applicationTheme.apply()
         }
     }
 

@@ -420,6 +420,14 @@ struct ModelSettings: View {
                 Text(L10n.text("Изменение языка вступит в силу после перезапуска приложения."))
                     .font(.caption).foregroundStyle(.secondary)
             }
+            Section(L10n.text("Тема")) {
+                Picker(L10n.text("Тема приложения"), selection: $draft.applicationTheme) {
+                    ForEach(ApplicationTheme.allCases, id: \.self) { theme in
+                        Text(theme.title).tag(theme)
+                    }
+                }
+                .accessibilityIdentifier("settings.applicationTheme")
+            }
             modelActivity
             Section(L10n.text("Обслуживание моделей")) {
                 Button(L10n.text("Проверить установленные модели")) { Task { await model.verifyModels() } }
