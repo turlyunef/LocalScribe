@@ -318,6 +318,54 @@ final class DiagramEngineTests: XCTestCase {
         } catch { expectFailure(error, containing: "Версия алгоритма") }
     }
 
+    func testSDKTraceGateRequiresProbeEntryPointAndTraceFlag() {
+        // Truth table of the double lock: both conditions or nothing. The
+        // production worker never dispatches with "--probe-diagram" first.
+        XCTAssertFalse(MLXDiagramRecognizer.sdkTraceAllowed(launchArguments: ["/worker"]))
+        XCTAssertFalse(MLXDiagramRecognizer.sdkTraceAllowed(
+            launchArguments: ["/worker", "--trace-model-output"]))
+        XCTAssertFalse(MLXDiagramRecognizer.sdkTraceAllowed(
+            launchArguments: ["/worker", "--trace-model-output", "/recording"]))
+        XCTAssertFalse(MLXDiagramRecognizer.sdkTraceAllowed(
+            launchArguments: ["/worker", "--probe-diagram", "/models", "/image.png"]))
+        XCTAssertTrue(MLXDiagramRecognizer.sdkTraceAllowed(
+            launchArguments: ["/worker", "--probe-diagram", "/models", "/image.png", "--trace-model-output"]))
+    }
+
+    func testProductionRecognizerKeepsSDKErrorsNeutralWithTraceFlagAlone() async throws {
+        // The trace flag without the probe entry point must stay neutral. The
+        // SDK load of a weights-less folder fails inside the guarded try, so
+        // the production catch branch is exercised for real.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try Disk.directory(root)
+        let recognizer = MLXDiagramRecognizer(folder: root, launchArguments: ["/worker", "--trace-model-output"])
+        do {
+            _ = try await recognizer.generate(prompt: "prompt", image: .original(root), maxTokens: 16)
+            XCTFail("Папка без весов должна вызвать ошибку SDK")
+        } catch {
+            XCTAssertFalse(error.localizedDescription.contains("diagram sdk error"), "Трассировка SDK раскрыта без техпробы")
+            XCTAssertEqual(error.localizedDescription, "Локальное распознавание схемы завершилось ошибкой. Попробуйте повторить.")
+        }
+    }
+
+    func testProbeRecognizerWithBothLocksDisclosesSDKErrorText() async throws {
+        // Only the probe entry point together with the trace flag may reveal
+        // the SDK error; in the probe layout the flag rides in the optional
+        // answer-file slot.
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
+        try Disk.directory(root)
+        let recognizer = MLXDiagramRecognizer(folder: root,
+            launchArguments: ["/worker", "--probe-diagram", root.path, root.path, "--trace-model-output"])
+        do {
+            _ = try await recognizer.generate(prompt: "prompt", image: .original(root), maxTokens: 16)
+            XCTFail("Папка без весов должна вызвать ошибку SDK")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("diagram sdk error"), "Проба с обоими замками должна раскрыть текст ошибки SDK")
+        }
+    }
+
     func testProfileHashMismatchFailsWithoutRecognizerCall() async throws {
         let recognizer = RecordingRecognizer(answer: goodAnswer)
         do {

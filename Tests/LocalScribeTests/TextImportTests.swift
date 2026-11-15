@@ -115,4 +115,28 @@ final class TextImportTests: XCTestCase {
         XCTAssertNil(AnonymizationSourceFormat.importFormat(pathExtension: "docx"))
         XCTAssertNil(AnonymizationSourceFormat.importFormat(pathExtension: ""))
     }
+
+    // MARK: - Pre-commit card-size ceiling (review C7)
+
+    /// `card.json` embeds the import bytes base64-encoded next to the decoded
+    /// text and must stay within the JSON read limit: the ceiling is the
+    /// limit divided by the base64 factor, and the projection adds the
+    /// base64 term (4 characters per 3 bytes), the source text and a fixed
+    /// allowance. An import above the ceiling can never be committed and is
+    /// rejected before any disk write.
+    func testCardSizeCeilingAndProjection() {
+        XCTAssertEqual(AnonymizationInputLimit.maximumCardBytes, UInt(Disk.maximumJSONBytes / 4 * 3))
+        // Base64 inflates 3 bytes to one 4-character block, padding included.
+        XCTAssertEqual(AnonymizationInputLimit.projectedCardBytes(importBytes: 3, sourceUTF8Bytes: 0), 4 + 64 * 1024)
+        XCTAssertEqual(AnonymizationInputLimit.projectedCardBytes(importBytes: 4, sourceUTF8Bytes: 10), 8 + 10 + 64 * 1024)
+        // A UTF-8 file pays the base64 term and its own text size: 20 MiB
+        // still fits, and one byte above the ceiling can never fit even
+        // with no text at all.
+        let fileBytes = 20 * 1024 * 1024
+        let projected = AnonymizationInputLimit.projectedCardBytes(importBytes: fileBytes, sourceUTF8Bytes: fileBytes)
+        XCTAssertLessThanOrEqual(projected, Int64(Disk.maximumJSONBytes))
+        let over = Int(AnonymizationInputLimit.maximumCardBytes) + 1
+        XCTAssertGreaterThan(AnonymizationInputLimit.projectedCardBytes(importBytes: over, sourceUTF8Bytes: 0),
+                             Int64(Disk.maximumJSONBytes))
+    }
 }

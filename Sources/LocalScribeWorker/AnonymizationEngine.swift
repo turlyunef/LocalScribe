@@ -50,12 +50,15 @@ actor AnonymizationEngine {
     }
 
     /// Qualification runs before the catalog stamps ANONYMIZATION. Only the
-    /// production task gate is skipped, while all integrity checks still apply.
+    /// production task gate is skipped, while all integrity checks still
+    /// apply. The recognizer is constructed for the technical-probe route —
+    /// the sole unlock of SDK-error tracing, the anonymization analogue of
+    /// the audio pipeline's technical-probe manifest check.
     init(probing command: WorkerCommand, input: AnonymizationAttemptInput, emit: @escaping Emit) throws {
         let models = URL(fileURLWithPath: command.modelsPath)
         let folder = try Self.resolvePinnedModelFolder(models: models, toolsPath: command.toolsPath, input: input, task: nil)
         try self.init(command: command, input: input, modelFolder: folder,
-            makeRecognizer: { MLXAnonymizationRecognizer(folder: $0) },
+            makeRecognizer: { MLXAnonymizationRecognizer(folder: $0, technicalProbe: true) },
             makeValueSource: { SeededAnonymizationValueSource(seed: Self.substitutionSeed(input: $0)) },
             emit: emit)
     }
@@ -181,7 +184,7 @@ actor AnonymizationEngine {
             emit("progress", "Обезличиваем текст — часть \(index + 1) из \(bodyWindows.count)", nil)
             let verified = try await detect(in: window, scalars: sourceScalars, types: types)
             bodyCandidates.append(contentsOf: verified.candidates)
-            if verified.unverified { unverifiedBody.append(window) }
+            unverifiedBody.append(contentsOf: verified.unverifiedSpans)
             modelCallCount += verified.modelCallCount
             reportedUninterpreted.formUnion(verified.uninterpreted)
         }
@@ -191,7 +194,7 @@ actor AnonymizationEngine {
             try Task.checkCancellation()
             let verified = try await detect(in: window, scalars: nameScalars, types: types)
             nameCandidates.append(contentsOf: verified.candidates)
-            if verified.unverified { unverifiedName.append(window) }
+            unverifiedName.append(contentsOf: verified.unverifiedSpans)
             modelCallCount += verified.modelCallCount
             reportedUninterpreted.formUnion(verified.uninterpreted)
         }
@@ -283,14 +286,18 @@ actor AnonymizationEngine {
         }
 
         // 5. Warnings: disputed body spans, disputed name spans, then the
-        //    uninterpreted wordings in their saved order.
+        //    uninterpreted wordings in their saved order. Doubt spans of
+        //    several type passes and overlapping context windows are merged
+        //    so one location carries one warning.
+        let unverifiedBodySpans = Self.mergedSpans(unverifiedBody)
+        let unverifiedNameSpans = Self.mergedSpans(unverifiedName)
         var warnings: [AnonymizationWarning] = []
-        for range in bodyPlan.doubtfulRanges + unverifiedBody {
+        for range in bodyPlan.doubtfulRanges + unverifiedBodySpans {
             let generated = Self.generatedRange(of: range, output: bodyOutput)
             warnings.append(AnonymizationWarning(kind: .doubtfulFragment, target: .body,
                 inputRange: Self.textRange(range), generatedRange: generated))
         }
-        for range in namePlan.doubtfulRanges + unverifiedName {
+        for range in namePlan.doubtfulRanges + unverifiedNameSpans {
             let generated = Self.generatedRange(of: range, output: nameOutput)
             warnings.append(AnonymizationWarning(kind: .doubtfulFragment, target: .importedName,
                 inputRange: Self.textRange(range), generatedRange: generated))
@@ -331,7 +338,7 @@ actor AnonymizationEngine {
         return Outcome(artifact: artifact, metrics: [
             "windowCount": Double(bodyWindows.count),
             "modelCallCount": Double(modelCallCount),
-            "unverifiedWindowCount": Double(unverifiedBody.count + unverifiedName.count),
+            "unverifiedSpanCount": Double(unverifiedBodySpans.count + unverifiedNameSpans.count),
             "bodyCandidateCount": Double(bodyCandidates.count),
             "nameCandidateCount": Double(nameCandidates.count),
             "bodyReplacementCount": Double(bodyReplacements.count),
@@ -340,6 +347,20 @@ actor AnonymizationEngine {
             "uninterpretedTypeCount": Double(uninterpreted.count),
             "newSubstitutionCount": Double(newSubstitutions.count),
         ])
+    }
+
+    /// Doubt spans of several type passes and overlapping context windows are
+    /// merged (overlapping or touching) so one location carries one warning.
+    private static func mergedSpans(_ spans: [Range<Int>]) -> [Range<Int>] {
+        var merged: [Range<Int>] = []
+        for span in spans.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            if let last = merged.last, span.lowerBound <= last.upperBound {
+                merged[merged.count - 1] = last.lowerBound..<Swift.max(last.upperBound, span.upperBound)
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
     }
 
     private static func nameAnalysis(_ item: AnonymizationReplacementPlan.Item) -> AnonymizationNames.Analysis? {
@@ -390,21 +411,36 @@ actor AnonymizationEngine {
     /// here. Local verification still checks exact type wordings, scalar
     /// bounds and the verbatim fragment check. Candidates failing
     /// verification are dropped as recognition noise; a thrown error
-    /// propagates and fails the attempt.
+    /// propagates and fails the attempt. Unanchored values are never
+    /// substituted: the recognizer reports their lines as numeric ranges and
+    /// only those source spans stay doubtful; without usable lines the whole
+    /// core window does (the previous fail-safe).
     private func detect(in window: Range<Int>, scalars: [Unicode.Scalar], types: [String]) async throws
-        -> (candidates: [AnonymizationSpanCandidate], uninterpreted: Set<String>, unverified: Bool, modelCallCount: Int) {
+        -> (candidates: [AnonymizationSpanCandidate], uninterpreted: Set<String>, unverifiedSpans: [Range<Int>], modelCallCount: Int) {
         let core = window
         let window = AnonymizationWindows.withContext(core, scalarCount: scalars.count)
         let windowText = String(String.UnicodeScalarView(scalars[window]))
         var verified: [AnonymizationSpanCandidate] = []
         var uninterpreted: Set<String> = []
         var seenTypes = Set<String>()
-        var unverified = false
+        var unverifiedSpans: [Range<Int>] = []
         var modelCallCount = 0
         for type in types where seenTypes.insert(type).inserted {
             let answer = try await recognizer.detect(text: windowText, dataType: type)
             try Task.checkCancellation()
-            unverified = unverified || answer.hasUnanchoredMatches
+            if answer.hasUnanchoredMatches {
+                if answer.unanchoredLineRanges.isEmpty {
+                    unverifiedSpans.append(core)
+                } else {
+                    for range in answer.unanchoredLineRanges {
+                        let span = (window.lowerBound + range.lowerBound)..<(window.lowerBound + range.upperBound)
+                        // Context padding belongs to the neighbouring core;
+                        // a line wholly inside it is reported by that window.
+                        let clamped = Swift.max(core.lowerBound, span.lowerBound)..<Swift.min(core.upperBound, span.upperBound)
+                        if !clamped.isEmpty { unverifiedSpans.append(clamped) }
+                    }
+                }
+            }
             modelCallCount += answer.modelCallCount
             for candidate in answer.candidates {
                 guard candidate.dataType == type else { continue }
@@ -418,6 +454,6 @@ actor AnonymizationEngine {
             }
             if answer.uninterpretedTypes.contains(type) { uninterpreted.insert(type) }
         }
-        return (verified, uninterpreted, unverified, modelCallCount)
+        return (verified, uninterpreted, unverifiedSpans, modelCallCount)
     }
 }

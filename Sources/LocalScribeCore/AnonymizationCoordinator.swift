@@ -210,6 +210,19 @@ public actor AnonymizationCoordinator {
         let displayName = draft.displayName.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             ?? draft.importedNameStem.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !displayName.isEmpty else { throw ScribeError.message("Название карточки не может быть пустым") }
+        // Pre-commit size gate: the card document embeds the import bytes
+        // base64-encoded next to the decoded text, so an input whose
+        // projected document cannot fit under the JSON ceiling is rejected
+        // here — before the intention journal or `card.json` is written and
+        // recovery never has to clean up after it. The message quotes only
+        // the two byte counts, like the admission SIZE_LIMIT failure; the
+        // per-profile admission limit is re-measured later (AC-42).
+        let projectedCardBytes = AnonymizationInputLimit.projectedCardBytes(
+            importBytes: draft.bytes.count, sourceUTF8Bytes: draft.source.text.utf8.count)
+        guard projectedCardBytes <= Int64(Disk.maximumJSONBytes),
+              UInt(draft.bytes.count) <= AnonymizationInputLimit.maximumCardBytes else {
+            throw ScribeError.message("Файл слишком большой для хранения карточки: размер после упаковки \(projectedCardBytes) байт при пределе \(Disk.maximumJSONBytes) байт")
+        }
         let cardID = UUID().uuidString
         let card = AnonymizationCardDocument(
             id: cardID,

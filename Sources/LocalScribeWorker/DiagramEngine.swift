@@ -24,9 +24,17 @@ protocol DiagramRecognizing: Sendable {
 /// diagram command.
 actor MLXDiagramRecognizer: DiagramRecognizing {
     static let userInstruction = "Recognize the diagram structure."
+    /// Developer diagnostics flag shared with the audio engines; on its own
+    /// it never unlocks SDK error text (see `sdkTraceAllowed`).
+    static let traceFlag = "--trace-model-output"
     private let folder: URL
+    /// Launch arguments of this worker process; injectable for tests.
+    private let launchArguments: [String]
     private var container: ModelContainer?
-    init(folder: URL) { self.folder = folder }
+    init(folder: URL, launchArguments: [String] = CommandLine.arguments) {
+        self.folder = folder
+        self.launchArguments = launchArguments
+    }
     func generate(prompt: String, image: DiagramRecognitionImage, maxTokens: Int) async throws -> (output: String, finished: Bool) {
         Memory.cacheLimit = 256 * 1024 * 1024
         let budget = ModelHardware.current.modelBudgetBytes
@@ -62,13 +70,30 @@ actor MLXDiagramRecognizer: DiagramRecognizing {
             throw CancellationError()
         } catch {
             // SDK failures stay neutral: their text may otherwise leak model
-            // internals or user content. The developer trace flag may only run
-            // on technical probes, never on user archives.
-            if CommandLine.arguments.contains("--trace-model-output") {
+            // internals or user content. Diagram manifests carry no
+            // technical-probe source type (unlike audio recordings), so the
+            // probe is identified by its entry point and both locks of
+            // `sdkTraceAllowed` must agree. The production
+            // Worker -> DiagramEngine dispatch never carries the probe
+            // argument, so user archives always get the neutral message.
+            if Self.sdkTraceAllowed(launchArguments: launchArguments) {
                 throw ScribeError.message("diagram sdk error [\(type(of: error))]: \(String(error.localizedDescription.prefix(300)))")
             }
             throw ScribeError.message("Локальное распознавание схемы завершилось ошибкой. Попробуйте повторить.")
         }
+    }
+
+    /// Double lock for SDK error text, mirroring SummaryEngine.traceOutput:
+    /// `--trace-model-output` alone is not enough. The worker routes on
+    /// `arguments[1] == "--probe-diagram"`, so the flag may disclose the SDK
+    /// text only inside a process dispatched to the developer probe handler
+    /// (which never receives user archive content); the probe's fixed
+    /// argument layout leaves the optional answer-file slot for the trace
+    /// flag. The production Worker -> DiagramEngine path can never satisfy
+    /// both checks.
+    static func sdkTraceAllowed(launchArguments: [String]) -> Bool {
+        launchArguments.count > 1 && launchArguments[1] == "--probe-diagram"
+            && launchArguments.contains(traceFlag)
     }
 }
 
@@ -194,7 +219,12 @@ actor DiagramEngine {
         do {
             return try Self.parse(answer.output, fingerprint: info.fingerprint)
         } catch {
-            if CommandLine.arguments.contains("--trace-model-output") { print("diagram parse attempt 1 failed: \(error.localizedDescription)") }
+            // The printed parse message is a fixed validation string, never
+            // SDK text or node labels; the same double lock keeps tracing on
+            // technical probes only.
+            if MLXDiagramRecognizer.sdkTraceAllowed(launchArguments: CommandLine.arguments) {
+                print("diagram parse attempt 1 failed: \(error.localizedDescription)")
+            }
             let defect: String
             if let missing = error as? MissingNodeReferences {
                 let ids = missing.ids.sorted().map { String(reflecting: $0) }.joined(separator: ", ")

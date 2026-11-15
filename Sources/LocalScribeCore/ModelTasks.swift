@@ -140,6 +140,24 @@ public struct AnonymizationInputLimit: Sendable, Equatable {
         self.overrides = overrides
     }
 
+    /// Effective ceiling of the imported file bytes, derived from the JSON
+    /// read limit and the base64 factor: `card.json` embeds the original
+    /// bytes base64-encoded (4 characters per 3 bytes) and must stay within
+    /// that limit, so no file above this bound can ever be committed. Import
+    /// rejects such files before the first disk write; the per-profile
+    /// admission limit of `limitBytes` is unaffected.
+    public static var maximumCardBytes: UInt { UInt(Disk.maximumJSONBytes / 4 * 3) }
+
+    /// Projected encoded size of one import's `card.json`: the import bytes
+    /// base64-encoded, the decoded source text in UTF-8 and a fixed allowance
+    /// for the remaining fields. JSON escaping of quotes and control
+    /// characters can add more, so the repository's `requireReadableSize`
+    /// commit check stays authoritative for those pathological inputs; the
+    /// projection catches everything escaping cannot save.
+    public static func projectedCardBytes(importBytes: Int, sourceUTF8Bytes: Int) -> Int64 {
+        Int64((importBytes + 2) / 3) * 4 + Int64(sourceUTF8Bytes) + 64 * 1024
+    }
+
     /// Conservative estimate by the RAM/Metal working budget with the system
     /// reserve (see `ModelHardware.modelBudgetBytes`). Real limits are
     /// confirmed by qualification on target Macs; until then the estimate

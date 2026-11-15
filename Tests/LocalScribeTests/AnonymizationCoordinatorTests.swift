@@ -1,7 +1,7 @@
 import Foundation
 import Synchronization
 import XCTest
-import LocalScribeCore
+@testable import LocalScribeCore
 
 /// Transactions of the text-anonymization archive actor: monotone snapshot
 /// revisions, visibility only after commit, byte-exact duplicates, batch
@@ -88,6 +88,34 @@ final class AnonymizationCoordinatorTests: XCTestCase {
         // The summary is a projection without document payloads.
         snapshot = await archive.snapshot()
         XCTAssertEqual(snapshot.cards.first?.displayName, "первый")
+    }
+
+    /// Pre-commit size gate (review C7): the card document embeds the import
+    /// bytes base64-encoded next to the decoded text, so an input whose
+    /// projected document exceeds the JSON ceiling is rejected before the
+    /// intention journal or `card.json` is ever written.
+    func testOversizedImportRejectedBeforeAnyDiskWrite() async throws {
+        let repo = try makeRepository()
+        let archive = AnonymizationCoordinator(repository: repo)
+        // ~49 MiB of ASCII sits above the base64-derived card ceiling of the
+        // JSON limit: no such file can ever be committed.
+        let huge = Data(repeating: 0x41, count: 49 * 1024 * 1024)
+        let text = String(decoding: huge, as: UTF8.self)
+        do {
+            _ = try await archive.importCard(draft(name: "огромный", text: text, bytes: huge))
+            XCTFail("Слишком большой импорт обязан быть отклонён")
+        } catch let error as ScribeError {
+            XCTAssertTrue(error.localizedDescription.contains("слишком большой"))
+            XCTAssertTrue(error.localizedDescription.contains("\(Disk.maximumJSONBytes) байт"),
+                          "сообщение несёт оба числа: \(error.localizedDescription)")
+        }
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: repo.itemsURL.path).isEmpty,
+                      "card.json не создаётся")
+        XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: repo.pendingURL.path).isEmpty,
+                      "журнал намерений не пишется")
+        let snapshot = await archive.snapshot()
+        XCTAssertTrue(snapshot.cards.isEmpty)
+        XCTAssertEqual(snapshot.catalog.nextImportPosition, 1, "позиция импорта не расходуется")
     }
 
     func testImportPositionNeverReusedAfterDeletion() async throws {

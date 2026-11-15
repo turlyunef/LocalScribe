@@ -224,8 +224,16 @@ enum AnonymizationAssembly {
 
     /// Assembles the generated text. Replacements must be pairwise disjoint
     /// and sorted; each representation is chosen by its Markdown context.
+    /// The documented order contract is enforced here: an unsorted or
+    /// overlapping list is a programmer error upstream (the mapping and the
+    /// cursor walk below silently corrupt the output otherwise), reported by
+    /// this precondition instead.
     static func assemble(scalars: [Unicode.Scalar], replacements: [AnonymizationAssemblyReplacement],
                          format: AnonymizationSourceFormat) throws -> AnonymizationAssemblyOutput {
+        for (previous, current) in zip(replacements, replacements.dropFirst()) {
+            precondition(previous.range.upperBound <= current.range.lowerBound,
+                         "AnonymizationAssembly replacements must be disjoint and sorted")
+        }
         let spans = markdownSpans(in: scalars, format: format)
         var prepared: [AnonymizationAssemblyReplacement] = []
         prepared.reserveCapacity(replacements.count)

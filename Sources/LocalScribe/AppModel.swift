@@ -320,11 +320,13 @@ struct QueueJobID: Hashable, Sendable {
         if !startServices { preparingStorage = false; Task { await reload(); await reloadDiagrams(); await reloadTexts() }; return }
         memorySource = DispatchSource.makeMemoryPressureSource(eventMask: [.warning, .critical, .normal], queue: .main)
         memorySource?.setEventHandler { [weak self] in
-            guard let self else { return }
-            if self.memorySource?.data.intersection([.warning, .critical]).isEmpty == true {
-                self.resumeAfterMemoryPressure()
-            } else {
-                self.pauseForCaptureResources(memoryPressure: true)
+            Task { @MainActor in
+                guard let self else { return }
+                if self.memorySource?.data.intersection([.warning, .critical]).isEmpty == true {
+                    self.resumeAfterMemoryPressure()
+                } else {
+                    self.pauseForCaptureResources(memoryPressure: true)
+                }
             }
         }
         memorySource?.resume()
@@ -1107,10 +1109,15 @@ struct QueueJobID: Hashable, Sendable {
                 await enqueueCapture(id)
             } catch {
                 guard recordingID == id, !stopping else { return }
-                _ = try? await archive.update(id) { m in
-                    guard m.captureProcessing != .cancelled else { return }
-                    m.captureProcessing = .failed
-                    m.lastError = "Фоновое распознавание не запущено. Звук продолжает сохраняться."
+                do {
+                    try await archive.update(id) { m in
+                        guard m.captureProcessing != .cancelled else { return }
+                        m.captureProcessing = .failed
+                        m.lastError = "Фоновое распознавание не запущено. Звук продолжает сохраняться."
+                    }
+                } catch is CancellationError { }
+                catch {
+                    errorHandler.report(message: L10n.text("Не удалось сохранить статус записи после сбоя фонового распознавания: %1$@", L10n.message(error.localizedDescription)))
                 }
             }
         }
@@ -1161,10 +1168,15 @@ struct QueueJobID: Hashable, Sendable {
                 let parts = (try? FileManager.default.contentsOfDirectory(at: repository.folder(id).appendingPathComponent("capture"), includingPropertiesForKeys: nil)) ?? []
                 return parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }
             }
-            _ = try? await archive.update(id) { m in
-                for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
-                m.state = recoverable ? .interrupted : .failed
-                m.lastError = recoverable ? "Фрагменты сохранены. Нажмите «Продолжить» для сборки." : "Нет сохранённого звука. Начните новую запись."
+            do {
+                try await archive.update(id) { m in
+                    for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
+                    m.state = recoverable ? .interrupted : .failed
+                    m.lastError = recoverable ? "Фрагменты сохранены. Нажмите «Продолжить» для сборки." : "Нет сохранённого звука. Начните новую запись."
+                }
+            } catch is CancellationError { }
+            catch {
+                errorHandler.report(message: L10n.text("Не удалось сохранить статус остановленной записи: %1$@", L10n.message(error.localizedDescription)))
             }
         }
         await reload()
@@ -1281,9 +1293,14 @@ struct QueueJobID: Hashable, Sendable {
         Task { await processQueue() }
     }
     private func interruptEnqueue(_ id: String, reason: String) async {
-        _ = try? await archive?.update(id) { m in
-            if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
-            m.lastError = reason
+        do {
+            _ = try await archive?.update(id) { m in
+                if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
+                m.lastError = reason
+            }
+        } catch is CancellationError { }
+        catch {
+            errorHandler.report(message: L10n.text("Не удалось сохранить статус прерванной записи: %1$@", L10n.message(error.localizedDescription)))
         }
         await reload()
     }
@@ -1306,8 +1323,13 @@ struct QueueJobID: Hashable, Sendable {
               allowCancelled || m.state != .cancelled,
               generation == queueGeneration, !deletingJobIDs.contains(.recording(id)), enqueuing[.recording(id)] == request else { return }
         if shuttingDown {
-            _ = try? await archive.update(id) { m in
-                m.state = .interrupted; m.lastError = "Приложение закрыто. Можно продолжить обработку."
+            do {
+                try await archive.update(id) { m in
+                    m.state = .interrupted; m.lastError = "Приложение закрыто. Можно продолжить обработку."
+                }
+            } catch is CancellationError { }
+            catch {
+                errorHandler.report(message: L10n.text("Не удалось сохранить статус записи перед закрытием приложения: %1$@", L10n.message(error.localizedDescription)))
             }
             await reload(); return
         }
@@ -1317,8 +1339,13 @@ struct QueueJobID: Hashable, Sendable {
         let canQueue = m.pendingRunId != nil || modelsReady
         // Reserve FIFO position before suspending for persistence.
         if canQueue, !queued.contains(.recording(id)) { queued.append(.recording(id)) }
-        _ = try? await archive.update(id) { m in
-            m.state = canQueue ? .queued : .waitingForModels; m.lastError = nil
+        do {
+            try await archive.update(id) { m in
+                m.state = canQueue ? .queued : .waitingForModels; m.lastError = nil
+            }
+        } catch is CancellationError { }
+        catch {
+            errorHandler.report(message: L10n.text("Не удалось сохранить статус постановки записи в очередь: %1$@", L10n.message(error.localizedDescription)))
         }
         await reload()
     }
@@ -1992,7 +2019,7 @@ struct QueueJobID: Hashable, Sendable {
             try await diagramArchive.delete(ids)
         }
     }
-    private func withDiagramDeletion(_ operation: () async throws -> Void) async {
+    private func withDiagramDeletion(cancelGroupID: String? = nil, _ operation: () async throws -> Void) async {
         guard !deletingDiagramJobs else {
             errorHandler.report(message: "Дождитесь удаления схем")
             return
@@ -2004,7 +2031,11 @@ struct QueueJobID: Hashable, Sendable {
             Task { await processQueue() }
         }
         do { try await operation() }
-        catch { errorHandler.report(error) }
+        catch {
+            // Mirror the recording archive: a failed group deletion unfreezes membership.
+            if let cancelGroupID { await diagramArchive?.cancelGroupDeletion(cancelGroupID) }
+            errorHandler.report(error)
+        }
         await reloadDiagrams()
     }
     private func cancelDiagramJobsForDeletion(_ ids: Set<String>) async {
@@ -2041,7 +2072,7 @@ struct QueueJobID: Hashable, Sendable {
     func deleteDiagramGroup(_ id: String, deleteDiagrams: Bool) async {
         guard let diagramArchive, !deletingDiagramJobs, id != RecordingGroup.ungroupedID else { return }
         if deleteDiagrams {
-            await withDiagramDeletion {
+            await withDiagramDeletion(cancelGroupID: id) {
                 let members = try await diagramArchive.prepareGroupDeletion(id)
                 await cancelDiagramJobsForDeletion(members)
                 try await diagramArchive.finishGroupDeletion(id)
@@ -2473,7 +2504,12 @@ struct QueueJobID: Hashable, Sendable {
             Task { await processQueue() }
         }
         do { try await operation() }
-        catch { errorHandler.report(error) }
+        catch {
+            // Mirror the recording archive: a failed deletion unfreezes the catalog
+            // and drops a persisted deletion intention.
+            await textArchive?.cancelDeletion()
+            errorHandler.report(error)
+        }
         await reloadTexts()
     }
 
@@ -2709,8 +2745,14 @@ struct QueueJobID: Hashable, Sendable {
                 let audio = try Media.probe(source,tools:tools)
                 manifest.durationMs = Int((audio.duration*1000).rounded()); manifest.sampleRate = audio.sampleRate; manifest.channels = audio.channels
             } else {
-                let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1)!
-                do { let file = try AVAudioFile(forWriting: source, settings: format.settings); let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8000)!; buffer.frameLength = 8000; memset(buffer.floatChannelData![0],0,8000*4); try file.write(from: buffer) }
+                // Optional construction failures fall into the outer catch and
+                // leave a neutral failed-probe record instead of crashing.
+                guard let format = AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1),
+                      let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 8000),
+                      let channels = buffer.floatChannelData else {
+                    throw ScribeError.message("Не удалось создать аудиобуфер для технической пробы")
+                }
+                do { let file = try AVAudioFile(forWriting: source, settings: format.settings); buffer.frameLength = 8000; memset(channels[0],0,8000*4); try file.write(from: buffer) }
                 manifest.durationMs = 500; manifest.sampleRate = 16000; manifest.channels = 1
             }
             manifest.sourceComplete = true; manifest.sha256 = try Disk.hash(source)

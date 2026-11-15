@@ -213,6 +213,13 @@ public actor DiagramCoordinator {
         return members
     }
 
+    /// Abort a prepared deletion without touching the archive: the frozen
+    /// membership is released only when the id matches.
+    public func cancelGroupDeletion(_ id: String) {
+        guard groupDeletion?.id == id else { return }
+        groupDeletion = nil
+    }
+
     public func finishGroupDeletion(_ id: String) throws {
         guard let deletion = groupDeletion, deletion.id == id else {
             throw ScribeError.message("Удаление группы схем не подготовлено")

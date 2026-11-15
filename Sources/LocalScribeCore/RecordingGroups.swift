@@ -33,7 +33,13 @@ public struct RecordingGroups: Codable, Equatable, Sendable {
         try validate()
     }
     public func groupID(for recordingID: String) -> String { membership[recordingID] ?? RecordingGroup.ungroupedID }
-    public var defaultGroup: RecordingGroup { groups.first { $0.id == defaultID }! }
+    /// The default group is guaranteed by `validate()` and every mutator; the
+    /// system-group fallbacks only keep an unvalidated instance from trapping.
+    public var defaultGroup: RecordingGroup {
+        groups.first { $0.id == defaultID }
+            ?? groups.first { $0.id == RecordingGroup.ungroupedID }
+            ?? RecordingGroup(id: RecordingGroup.ungroupedID, name: "Без темы")
+    }
 
     public func validatedName(_ name: String, excluding id: String? = nil) throws -> String {
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)

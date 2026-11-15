@@ -153,6 +153,26 @@ final class DiagramCoordinatorTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: repo.originalURL(healthy).path))
     }
 
+    func testCancelGroupDeletionReleasesFrozenMembershipForANewPreparation() async throws {
+        let repo = try makeRepository()
+        let archive = DiagramCoordinator(repository: repo)
+        let group = try await create(archive, "Проекты")
+        let item = try await archive.importImage(try pngSource(), groupID: group.id)
+        _ = try await archive.prepareGroupDeletion(group.id)
+        // A mismatched cancellation must not release the freeze.
+        await archive.cancelGroupDeletion(UUID().uuidString)
+        do { _ = try await archive.prepareGroupDeletion(group.id); XCTFail("Deletion must stay frozen") } catch {}
+        // Cancelling the prepared id releases the freeze ...
+        await archive.cancelGroupDeletion(group.id)
+        // ... so the same deletion can be prepared again and finished.
+        let prepared = try await archive.prepareGroupDeletion(group.id)
+        XCTAssertEqual(prepared, Set([item.id]))
+        try await archive.finishGroupDeletion(group.id)
+        let snapshot = await archive.snapshot()
+        XCTAssertEqual(snapshot.groups.groups.map(\.id), [RecordingGroup.ungroupedID])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(item.id).path))
+    }
+
     func testSnapshotOrderAndMonotonicRevision() async throws {
         let repo = try makeRepository()
         let old = try seed(repo, date: 1)

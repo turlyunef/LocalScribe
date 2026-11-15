@@ -20,6 +20,7 @@ class ReleaseVersionTests(unittest.TestCase):
         self.assertIsNotNone(version)
         self.assertEqual(app["CFBundleShortVersionString"], version.group(1))
         self.assertEqual(app["CFBundleVersion"], service["CFBundleVersion"])
+        self.assertEqual(service["CFBundleShortVersionString"], app["CFBundleShortVersionString"])
         for key in ("CFBundleShortVersionString", "CFBundleVersion"):
             fallback = re.search(rf'"{key}"\) as\? String \?\? "([^"]+)"', app_info)
             self.assertIsNotNone(fallback)

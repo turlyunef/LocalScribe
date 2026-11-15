@@ -18,11 +18,17 @@ struct AnonymizationCandidate: Sendable, Equatable {
 }
 
 /// The recognizer answer for one window: verified-by-contract candidates plus
-/// the exact type wordings it could not interpret.
+/// the exact type wordings it could not interpret. `unanchoredLineRanges`
+/// carries the window-local scalar ranges of the lines the model reported for
+/// matches that failed anchoring — numeric coordinates only, never text.
+/// While `hasUnanchoredMatches` is true an empty list means at least one
+/// unanchored report had no usable line, and the caller must fall back to
+/// doubting the whole window.
 struct AnonymizationWindowAnswer: Sendable, Equatable {
     var candidates: [AnonymizationCandidate] = []
     var uninterpretedTypes: [String] = []
     var hasUnanchoredMatches = false
+    var unanchoredLineRanges: [Range<Int>] = []
     var modelCallCount = 0
 }
 
@@ -42,8 +48,18 @@ protocol AnonymizationRecognizing: Sendable {
 actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
     static let maxOutputTokens = 4000
     private let folder: URL
+    /// Second lock of SDK-error tracing — the analogue of SummaryEngine's
+    /// `manifest.sourceType == "technical-probe"` requirement: the
+    /// anonymization run input has no source type, so only the
+    /// `--probe-anonymization` qualification route constructs the recognizer
+    /// with this flag. The production protocol path keeps the default and can
+    /// never unlock SDK error text, whatever process flags it carries.
+    private let technicalProbe: Bool
     private var container: ModelContainer?
-    init(folder: URL) { self.folder = folder }
+    init(folder: URL, technicalProbe: Bool = false) {
+        self.folder = folder
+        self.technicalProbe = technicalProbe
+    }
 
     func detect(text: String, dataType: String) async throws -> AnonymizationWindowAnswer {
         let local = AnonymizationStructuredDetection.scan(text: text, dataType: dataType)
@@ -66,7 +82,7 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
             }
             self.container = container
         }
-        var answer = try await Self.recognize(container: container, text: text, dataType: dataType)
+        var answer = try await Self.recognize(container: container, text: text, dataType: dataType, technicalProbe: technicalProbe)
         if let local {
             answer.candidates.removeAll { match in
                 local.candidates.contains { match.start < $0.end && $0.start < match.end }
@@ -77,22 +93,30 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
     }
 
     private static func recognize(container: ModelContainer, text: String, dataType: String,
-                                  canSplit: Bool = true) async throws -> AnonymizationWindowAnswer {
+                                  technicalProbe: Bool, canSplit: Bool = true) async throws -> AnonymizationWindowAnswer {
         let numberedText = text.unicodeScalars.split(omittingEmptySubsequences: false) { $0 == "\n" }
             .enumerated().map { index, line in "\(index + 1) | \(String(line))" }.joined(separator: "\n")
         var calls = 1
         do {
-            let output = try await generate(container: container, text: numberedText, dataType: dataType, correcting: false)
+            let output = try await generate(container: container, text: numberedText, dataType: dataType,
+                                            correcting: false, technicalProbe: technicalProbe)
             let first = try? parse(output, text: text, dataType: dataType)
             if var answer = first, !answer.hasUnanchoredMatches {
                 answer.modelCallCount = calls
                 return answer
             }
             calls += 1
-            let retry = try await generate(container: container, text: numberedText, dataType: dataType, correcting: true)
+            let retry = try await generate(container: container, text: numberedText, dataType: dataType,
+                                           correcting: true, technicalProbe: technicalProbe)
             var answer = try parse(retry, text: text, dataType: dataType)
+            let retryHadUnanchored = answer.hasUnanchoredMatches
             if let first, first.hasUnanchoredMatches, answer.candidates.count <= first.candidates.count {
                 answer.hasUnanchoredMatches = true
+                // The retry silenced the disputed matches the first pass saw:
+                // its own line reports cover only them, so the narrowing
+                // information is incomplete and the engine doubts the whole
+                // window.
+                if !retryHadUnanchored { answer.unanchoredLineRanges = [] }
             }
             answer.modelCallCount = calls
             return answer
@@ -102,11 +126,13 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
                 throw ScribeError.message("Ответ модели обезличивания оборван")
             }
             var combined = AnonymizationWindowAnswer(modelCallCount: calls)
+            var unanchoredLinesUsable = true
             for core in AnonymizationWindows.ranges(in: scalars, budget: scalars.count / 2) {
                 try Task.checkCancellation()
                 let window = AnonymizationWindows.withContext(core, scalarCount: scalars.count, padding: 32)
                 let slice = String(String.UnicodeScalarView(scalars[window]))
-                let part = try await recognize(container: container, text: slice, dataType: dataType, canSplit: false)
+                let part = try await recognize(container: container, text: slice, dataType: dataType,
+                                               technicalProbe: technicalProbe, canSplit: false)
                 for var candidate in part.candidates {
                     candidate.start += UInt(window.lowerBound)
                     candidate.end += UInt(window.lowerBound)
@@ -114,15 +140,37 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
                 }
                 combined.modelCallCount += part.modelCallCount
                 combined.uninterpretedTypes.append(contentsOf: part.uninterpretedTypes)
-                combined.hasUnanchoredMatches = combined.hasUnanchoredMatches || part.hasUnanchoredMatches
+                if part.hasUnanchoredMatches {
+                    combined.hasUnanchoredMatches = true
+                    // One part without usable lines makes the merged report
+                    // incomplete: no narrowing, the engine doubts the window.
+                    if part.unanchoredLineRanges.isEmpty {
+                        unanchoredLinesUsable = false
+                    } else {
+                        for range in part.unanchoredLineRanges {
+                            combined.unanchoredLineRanges.append(
+                                (range.lowerBound + window.lowerBound)..<(range.upperBound + window.lowerBound))
+                        }
+                    }
+                }
             }
+            if !unanchoredLinesUsable { combined.unanchoredLineRanges = [] }
             return combined
         }
     }
 
     private enum GenerationError: Error { case truncated }
 
-    private static func generate(container: ModelContainer, text: String, dataType: String, correcting: Bool) async throws -> String {
+    /// Both locks of SDK-error tracing: the developer flag alone is never
+    /// enough — the recognizer must also come from the technical-probe route,
+    /// exactly like `SummaryEngine.traceOutput` additionally demands the
+    /// technical-probe source type of the recording manifest.
+    static func sdkErrorTracingEnabled(technicalProbe: Bool, traceFlag: Bool) -> Bool {
+        technicalProbe && traceFlag
+    }
+
+    private static func generate(container: ModelContainer, text: String, dataType: String,
+                                 correcting: Bool, technicalProbe: Bool) async throws -> String {
         do {
             let example = AnonymizationStructuredDetection.promptExample(for: dataType)
             let system = """
@@ -165,9 +213,15 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
             throw error
         } catch {
             // SDK failures stay neutral: their text may leak model internals
-            // or user content. The developer trace flag matches the diagram
-            // recognizer and never runs on user archives.
-            if CommandLine.arguments.contains("--trace-model-output") {
+            // or user content. Both locks must agree — the developer trace
+            // flag and the technical-probe recognizer — mirroring
+            // SummaryEngine.traceOutput, which also requires the
+            // technical-probe source type of the manifest. The
+            // anonymization input has no source type analogue, so the
+            // qualification probe is the only constructor that can ever
+            // unlock tracing; user archives always get the neutral message.
+            if Self.sdkErrorTracingEnabled(technicalProbe: technicalProbe,
+                                           traceFlag: CommandLine.arguments.contains("--trace-model-output")) {
                 throw ScribeError.message("anonymization sdk error [\(type(of: error))]: \(String(error.localizedDescription.prefix(300)))")
             }
             throw ScribeError.message("Локальное обезличивание текста завершилось ошибкой. Попробуйте повторить.")
@@ -189,16 +243,34 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
         let scalars = Array(text.unicodeScalars)
         let lineStarts = [0] + scalars.indices.compactMap { scalars[$0] == "\n" ? $0 + 1 : nil }
         var result = AnonymizationWindowAnswer()
+        var unanchoredLinesUsable = true
         for match in wire.matches {
             guard let range = anchor(match, scalars: scalars, lineStarts: lineStarts) else {
                 result.hasUnanchoredMatches = true
+                // Numeric-only narrowing of the engine's doubt warnings: the
+                // reported line of a match that failed anchoring. A line
+                // outside the window cannot be narrowed — the engine then
+                // doubts the whole window.
+                if match.line > 0, match.line <= lineStarts.count {
+                    result.unanchoredLineRanges.append(lineRange(match.line, lineStarts: lineStarts, scalarCount: scalars.count))
+                } else {
+                    unanchoredLinesUsable = false
+                }
                 continue
             }
             result.candidates.append(AnonymizationCandidate(dataType: dataType, start: UInt(range.lowerBound),
                 end: UInt(range.upperBound), fragment: String(String.UnicodeScalarView(scalars[range])),
                 doubtful: match.doubtful))
         }
+        if !unanchoredLinesUsable { result.unanchoredLineRanges = [] }
         return result
+    }
+
+    /// Half-open scalar range of one 1-based line of the window text.
+    private static func lineRange(_ line: Int, lineStarts: [Int], scalarCount: Int) -> Range<Int> {
+        let start = lineStarts[line - 1]
+        let end = line < lineStarts.count ? lineStarts[line] - 1 : scalarCount
+        return start..<end
     }
 
     private static func anchor(_ match: WireMatch, scalars: [Unicode.Scalar], lineStarts: [Int]) -> Range<Int>? {
@@ -208,14 +280,23 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
         let start = lineStarts[match.line - 1]
         let end = match.line < lineStarts.count ? lineStarts[match.line] - 1 : scalars.count
         let line = start..<end
-        let exact = line.compactMap { lower -> Range<Int>? in
+        // The prompt keeps line breaks inside values, so a fragment may span
+        // lines while the model often reports the line of a later portion of
+        // the value: such fragments search exact copies across the whole
+        // window, and the occurrence number still counts only copies starting
+        // on the reported line. Single-line fragments keep the exact scan of
+        // the reported line alone.
+        let spansLines = fragment.contains { $0 == "\n" || $0 == "\r" }
+        let scanRegion = spansLines ? 0..<scalars.count : line
+        let exact = scanRegion.compactMap { lower -> Range<Int>? in
             let upper = lower + fragment.count
             guard upper <= scalars.count, scalars[lower..<upper].elementsEqual(fragment) else { return nil }
             return lower..<upper
         }
+        let onReportedLine = exact.filter { line.contains($0.lowerBound) }
         if let occurrence = match.occurrence {
-            guard occurrence > 0, occurrence <= exact.count else { return nil }
-            let range = exact[occurrence - 1]
+            guard occurrence > 0, occurrence <= onReportedLine.count else { return nil }
+            let range = onReportedLine[occurrence - 1]
             return atWordBoundaries(range, in: scalars) ? range : nil
         }
         if exact.count == 1, let range = exact.first {

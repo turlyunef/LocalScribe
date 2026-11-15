@@ -26,7 +26,15 @@ actor Pipeline {
               recording.lastPathComponent == command.jobId, command.jobId == manifest.id, command.runId == info.id else {
             throw ScribeError.message("Некорректное задание обработки")
         }
-        if stage == .transcribing, info.pipelineVersion != RunInfo.currentPipelineVersion {
+        // The version gate is stage-independent: summary and diarization
+        // checkpoints are keyed by the run fingerprint, which does not change
+        // when only a prompt literal is bumped between builds, so a run saved
+        // by an older pipeline must be rejected on every resumed stage, not
+        // only .transcribing. RecordingRepository.resumeRun verifies the
+        // version before a job is enqueued; this is the worker-side second
+        // line of defense. New runs always carry the current version, and the
+        // --probe-* entry points never construct a Pipeline.
+        if info.pipelineVersion != RunInfo.currentPipelineVersion {
             throw ScribeError.message("Версия обработки изменилась; контрольные точки этого задания несовместимы")
         }
         if command.liveCapture == true {

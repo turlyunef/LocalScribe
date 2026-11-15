@@ -1,8 +1,10 @@
 import Foundation
+import os
 
 /// The GUI's single archive owner. Synchronous transactions on this actor never
 /// suspend between reading and publishing a manifest, and never run on MainActor.
 public actor RecordingCoordinator {
+    private static let logger = Logger(subsystem: "local.localscribe.mac", category: "recording-coordinator")
     public struct Snapshot: Sendable {
         public let revision: UInt64
         public let manifests: [Manifest]
@@ -113,7 +115,11 @@ public actor RecordingCoordinator {
     public func flushIndex() {
         cancelIndexTask()
         guard indexDirty else { return }
-        do { try repository.writeIndex(manifests); indexDirty = false } catch { }
+        do { try repository.writeIndex(manifests); indexDirty = false }
+        catch {
+            // The index stays dirty and is rewritten on the next flush.
+            Self.logger.error("Could not persist recording index: \(error.localizedDescription, privacy: .private)")
+        }
     }
     public func load(_ id: String) throws -> Manifest { try repository.load(id) }
     /// Explicit refresh for a known external change; ordinary UI reloads use the snapshot.
@@ -266,24 +272,28 @@ public actor RecordingCoordinator {
         return manifests.filter { groups.groupID(for: $0.id) == id }.map(\.id)
     }
     public func cancelGroupDeletion(_ id: String) { deletingGroups.remove(id) }
-    /// No suspension between deletions and publication. If a member fails, retain
-    /// the group and publish only the deletions that actually succeeded.
+    /// Validate the whole membership first: one damaged entry keeps the group
+    /// and every healthy recording. No suspension between deletions and
+    /// publication. If an I/O removal fails mid-batch, retain the group and
+    /// publish only the deletions that actually succeeded.
     public func finishGroupDeletion(_ id: String, deleteRecordings: Bool) throws {
         try requireGroups()
         guard deletingGroups.contains(id) else { throw ScribeError.message("Удаление группы не подготовлено") }
         defer { deletingGroups.remove(id) }
         if deleteRecordings {
-            // Also flush partial progress if any removal or validation fails.
-            defer { flushIndex() }
             let members = manifests.filter { groups.groupID(for: $0.id) == id }
-            for manifest in members { try delete(manifest, immediatelyFlushIndex: false) }
             // Do not silently discard membership of damaged archive entries.
+            // Validate before removing anything: a damaged member aborts the
+            // whole batch with the group and its recordings fully intact.
             let known = Set(members.map(\.id))
             for (recordingID, groupID) in groups.membership where groupID == id && !known.contains(recordingID) {
                 if FileManager.default.fileExists(atPath: repository.folder(recordingID).path) {
                     throw ScribeError.message("В группе есть повреждённая запись. Группа сохранена; проверьте архив.")
                 }
             }
+            // Also flush partial progress if any removal fails mid-batch.
+            defer { flushIndex() }
+            for manifest in members { try delete(manifest, immediatelyFlushIndex: false) }
         }
         var next = groups
         try next.remove(id)

@@ -536,5 +536,10 @@
   "схема": "Diagram",
   "схемы": "diagram",
   "текста": "text",
-  "этап": "Stage"
+  "этап": "Stage",
+  "Не удалось сохранить статус записи после сбоя фонового распознавания: %1$@": "Could not save the recording status after a background recognition failure: %1$@",
+  "Не удалось сохранить статус остановленной записи: %1$@": "Could not save the status of the stopped recording: %1$@",
+  "Не удалось сохранить статус прерванной записи: %1$@": "Could not save the status of the interrupted recording: %1$@",
+  "Не удалось сохранить статус записи перед закрытием приложения: %1$@": "Could not save the recording status before the app closes: %1$@",
+  "Не удалось сохранить статус постановки записи в очередь: %1$@": "Could not save the queued recording status: %1$@"
 }

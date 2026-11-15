@@ -381,4 +381,26 @@ final class RecordingGroupsTests: XCTestCase {
         XCTAssertTrue(FileManager.default.fileExists(atPath: repo.folder(m.id).appendingPathComponent(m.originalRelativePath).path))
     }
 
+    func testDamagedMemberAbortsGroupDeletionBeforeRemovingHealthyRecordings() async throws {
+        let repo = try fixture(), healthy = try recording(repo), damaged = try recording(repo)
+        let archive = RecordingCoordinator(repository: repo)
+        let a = try await create(archive, "A")
+        try await archive.moveRecordings([healthy.id, damaged.id], to: a.id)
+        try Data("broken manifest".utf8).write(to: repo.folder(damaged.id).appendingPathComponent("manifest.json"))
+        let reopened = RecordingCoordinator(repository: repo)
+        _ = try await reopened.prepareGroupDeletion(a.id)
+        do { try await reopened.finishGroupDeletion(a.id, deleteRecordings: true); XCTFail("Damaged member must abort the deletion") } catch {}
+        let snapshot = await reopened.snapshot()
+        XCTAssertEqual(snapshot.unreadableRecordingIDs, [damaged.id])
+        XCTAssertEqual(Set(snapshot.manifests.map(\.id)), Set([healthy.id]))
+        XCTAssertTrue(snapshot.groups.groups.contains { $0.id == a.id })
+        XCTAssertEqual(snapshot.groups.groupID(for: damaged.id), a.id)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.folder(healthy.id).path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.folder(damaged.id).appendingPathComponent(damaged.originalRelativePath).path))
+        XCTAssertTrue(try repo.loadGroups().groups.contains { $0.id == a.id })
+        // The aborted attempt releases the deletion lease for a retry.
+        _ = try await reopened.prepareGroupDeletion(a.id)
+        await reopened.cancelGroupDeletion(a.id)
+    }
+
 }

@@ -245,6 +245,31 @@ final class AnonymizationImportTests: XCTestCase {
         XCTAssertEqual(model.textCards.first?.statusTitle, L10n.text("Ожидает модель"))
     }
 
+    /// Pre-commit card-size gate (review C7): without a model assignment the
+    /// per-profile limit stays deferred, but a file whose card document
+    /// (base64 of the bytes + the decoded text) can never fit under the JSON
+    /// ceiling is rejected by the coordinator before the intention journal or
+    /// `card.json` is written.
+    func testOversizedFileWithoutAssignmentRejectedBeforePendingOrCard() async throws {
+        let (_, model) = try makeModel()
+        let workspace = makeWorkspace(model)
+        let huge = try writeFile("huge.txt", Data(repeating: 0x41, count: 49 * 1024 * 1024))
+        let reported = model.errorHandler.messages.count
+        workspace.importURLs([huge])
+        await model.importQueue.waitUntilIdle()
+        XCTAssertTrue(model.textCards.isEmpty, "карточка не создаётся")
+        let messages = Array(model.errorHandler.messages.dropFirst(reported))
+        XCTAssertEqual(messages.count, 1)
+        XCTAssertTrue(messages[0].contains("слишком большой"), messages[0])
+        let archive = try XCTUnwrap(model.textArchive)
+        let directories: (items: [String], pending: [String]) = try await archive.perform { repo -> (items: [String], pending: [String]) in
+            (try FileManager.default.contentsOfDirectory(atPath: repo.itemsURL.path),
+             try FileManager.default.contentsOfDirectory(atPath: repo.pendingURL.path))
+        }
+        XCTAssertTrue(directories.items.isEmpty, "card.json не создаётся")
+        XCTAssertTrue(directories.pending.isEmpty, "журнал намерений в pending/ не пишется")
+    }
+
     // MARK: - Duplicates (criterion 35)
 
     func testDuplicateResolutionOpenCopyCancelAndPreviousSurvivor() async throws {

@@ -36,6 +36,11 @@ private final class ScriptedRecognizer: AnonymizationRecognizing, @unchecked Sen
     var uninterpretedTypes: [String] = []
     /// 1-based call number that starts throwing; nil disables failures.
     var failFromCall: Int?
+    /// Reports a match of the requested type the anchor would reject: the
+    /// fake answers with `hasUnanchoredMatches` plus the numeric line range
+    /// of `line` (mirroring the recognizer's parse), or without ranges when
+    /// the line is outside the window — the non-narrowable case.
+    var unanchoredReport: (dataType: String, line: Int)?
     /// Reports a fragment that does not match the located range.
     var corruptFragments = false
     private let calls = Mutex(0)
@@ -63,7 +68,17 @@ private final class ScriptedRecognizer: AnonymizationRecognizing, @unchecked Sen
             }
         }
         let uninterpreted = uninterpretedTypes.contains(dataType) ? [dataType] : []
-        return AnonymizationWindowAnswer(candidates: candidates, uninterpretedTypes: uninterpreted)
+        var answer = AnonymizationWindowAnswer(candidates: candidates, uninterpretedTypes: uninterpreted)
+        if let report = unanchoredReport, report.dataType == dataType {
+            answer.hasUnanchoredMatches = true
+            let lineStarts = [0] + scalars.indices.compactMap { scalars[$0] == "\n" ? $0 + 1 : nil }
+            if report.line > 0, report.line <= lineStarts.count {
+                let start = lineStarts[report.line - 1]
+                let end = report.line < lineStarts.count ? lineStarts[report.line] - 1 : scalars.count
+                answer.unanchoredLineRanges = [start..<end]
+            }
+        }
+        return answer
     }
 
     /// Scalar-subsequence search of `needle` in `haystack` from an offset.
@@ -149,6 +164,72 @@ final class AnonymizationEngineTests: XCTestCase {
         let answer = try MLXAnonymizationRecognizer.parse(response, text: source, dataType: "company")
         XCTAssertEqual(answer.candidates.map(\.fragment), ["ООО Ромашка", "ООО «Ромашка»"])
         XCTAssertTrue(answer.hasUnanchoredMatches)
+    }
+
+    /// The prompt keeps line breaks inside values, so a fragment may span
+    /// lines while the model reports the line of a later portion of the
+    /// value: the exact copy is still anchored across the window, an
+    /// occurrence number disambiguates repeats on the reported line, and a
+    /// repeat without an occurrence stays unanchored.
+    func testMultilineFragmentAnchorsFromLateReportedLineAndRepeatsNeedOccurrence() throws {
+        let value = "ул. Кедровая,\nд. 7"
+        let source = "Первый адрес:\n\(value)\nВторой адрес:\n\(value)\nКонец"
+        let single = "Адрес:\n\(value)\nКонец"
+
+        // `single` puts the value on lines 2–3; the model reported line 3 —
+        // the last line of the value, not its start. The exact copy is still
+        // found across the window and anchored.
+        let late = #"{"schemaVersion":1,"status":"ok","matches":[{"line":3,"fragment":"ул. Кедровая,\nд. 7","doubtful":false}]}"#
+        let answer = try MLXAnonymizationRecognizer.parse(late, text: single, dataType: "Почтовые адреса")
+        XCTAssertEqual(answer.candidates.count, 1, "многострочная копия находится по всему окну")
+        XCTAssertEqual(answer.candidates.first?.fragment, value)
+        XCTAssertFalse(answer.hasUnanchoredMatches)
+
+        // Two copies in the window without an occurrence number stay unanchored.
+        let twice = #"{"schemaVersion":1,"status":"ok","matches":[{"line":2,"fragment":"ул. Кедровая,\nд. 7","doubtful":false}]}"#
+        let ambiguous = try MLXAnonymizationRecognizer.parse(twice, text: source, dataType: "Почтовые адреса")
+        XCTAssertTrue(ambiguous.hasUnanchoredMatches)
+        XCTAssertTrue(ambiguous.candidates.isEmpty)
+
+        // The occurrence counts copies starting on the reported line only.
+        let withOccurrence = #"{"schemaVersion":1,"status":"ok","matches":[{"line":2,"fragment":"ул. Кедровая,\nд. 7","occurrence":1,"doubtful":false}]}"#
+        let resolved = try MLXAnonymizationRecognizer.parse(withOccurrence, text: source, dataType: "Почтовые адреса")
+        XCTAssertEqual(resolved.candidates.count, 1)
+        let scalars = Array(source.unicodeScalars)
+        let secondLineStart = scalars.firstIndex(of: "\n")! + 1
+        XCTAssertEqual(Int(resolved.candidates.first!.start), secondLineStart, "выбрана копия на заявленной строке")
+    }
+
+    /// A match that failed anchoring narrows the engine's doubt warning to
+    /// the reported line — numeric ranges only, never text; an unusable line
+    /// leaves no ranges and the engine doubts the whole window.
+    func testUnanchoredMatchReportsItsLineRangeOnly() throws {
+        let text = "Первая строка\nВторая строка со значением\nТретья строка"
+        let response = #"{"schemaVersion":1,"status":"ok","matches":[{"line":2,"fragment":"нет такого фрагмента","doubtful":false}]}"#
+        let answer = try MLXAnonymizationRecognizer.parse(response, text: text, dataType: "Почтовые адреса")
+        XCTAssertTrue(answer.hasUnanchoredMatches)
+        XCTAssertTrue(answer.candidates.isEmpty)
+        let scalars = Array(text.unicodeScalars)
+        let secondLineStart = scalars.firstIndex(of: "\n")! + 1
+        let secondLineEnd = scalars.lastIndex(of: "\n")!
+        XCTAssertEqual(answer.unanchoredLineRanges, [secondLineStart..<secondLineEnd])
+
+        let brokenLine = #"{"schemaVersion":1,"status":"ok","matches":[{"line":9,"fragment":"нет такого фрагмента","doubtful":false}]}"#
+        let outside = try MLXAnonymizationRecognizer.parse(brokenLine, text: text, dataType: "Почтовые адреса")
+        XCTAssertTrue(outside.hasUnanchoredMatches)
+        XCTAssertTrue(outside.unanchoredLineRanges.isEmpty, "строка вне окна не сужает предупреждение")
+    }
+
+    /// SDK error tracing keeps the SummaryEngine double lock: the developer
+    /// flag alone never unlocks the raw error, and the production recognizer
+    /// is never constructed for the technical-probe route.
+    func testSDKErrorTracingRequiresBothLocks() {
+        XCTAssertFalse(MLXAnonymizationRecognizer.sdkErrorTracingEnabled(technicalProbe: false, traceFlag: false))
+        XCTAssertFalse(MLXAnonymizationRecognizer.sdkErrorTracingEnabled(technicalProbe: false, traceFlag: true),
+                       "продовый распознаватель не раскрывает текст ошибки SDK ни при каких флагах процесса")
+        XCTAssertFalse(MLXAnonymizationRecognizer.sdkErrorTracingEnabled(technicalProbe: true, traceFlag: false),
+                       "техпробе нужен и явный флаг разработчика")
+        XCTAssertTrue(MLXAnonymizationRecognizer.sdkErrorTracingEnabled(technicalProbe: true, traceFlag: true))
     }
 
     func testStructuredDetectionDistinguishesVerifiedAndAmbiguousMatches() throws {
@@ -412,6 +493,62 @@ final class AnonymizationEngineTests: XCTestCase {
         XCTAssertEqual(outcome.artifact.result.bodyReplacementCount, 0, "неподтверждённый кандидат отброшен")
         XCTAssertEqual(outcome.artifact.result.text.text, text)
         XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.resultURL.path))
+    }
+
+    // MARK: - Multiline values and the doubt blast radius (review C4)
+
+    /// A multiline postal value is anchored, substituted as a whole and
+    /// leaves no warning: line breaks inside a value must not send it to
+    /// the unanchored path.
+    func testMultilineValueIsAnchoredAndSubstituted() async throws {
+        let address = "г. Москва, ул. Кедровая,\nд. 7, кв. 34"
+        let text = "Адрес регистрации:\n\(address)\nКонец письма."
+        let recognizer = ScriptedRecognizer(markers: [.init(AnonymizationStructuredDetection.addresses, address)])
+        let (engine, _) = try makeEngine(text: text, dataTypes: [AnonymizationStructuredDetection.addresses],
+                                         format: .txt, recognizer: recognizer)
+        let outcome = try await engine.run()
+        let result = outcome.artifact.result
+        XCTAssertEqual(result.bodyReplacementCount, 1, "многострочное значение привязывается и подставляется")
+        XCTAssertFalse(result.text.text.contains("Кедровая"))
+        XCTAssertFalse(result.text.text.contains("кв. 34"), "исходное значение исчезает целиком")
+        XCTAssertTrue(result.text.text.contains("Адрес регистрации:"), "текст вокруг сохранён")
+        XCTAssertTrue(result.warnings.isEmpty)
+    }
+
+    /// One unanchored report doubts exactly its own line, not the whole
+    /// window core: the anchored value on the first line is still replaced.
+    func testUnanchoredMatchDoubtsOnlyItsLineNotTheWholeWindow() async throws {
+        let text = "Совещание вела Анна Петрова.\nВторой участник скрыт.\nТретья строка протокола.\nЧетвёртая строка протокола."
+        let recognizer = ScriptedRecognizer(markers: [.init(Names.personType, "Анна Петрова")])
+        recognizer.unanchoredReport = (Names.personType, 3)
+        let (engine, _) = try makeEngine(text: text, recognizer: recognizer)
+        let outcome = try await engine.run()
+        let result = outcome.artifact.result
+        XCTAssertEqual(result.bodyReplacementCount, 1, "привязанное значение заменяется как обычно")
+        let doubtful = result.warnings.filter { $0.kind == .doubtfulFragment && $0.target == .body }
+        XCTAssertEqual(doubtful.count, 1)
+        let scalars = Array(text.unicodeScalars)
+        let lineStarts = [0] + scalars.indices.compactMap { scalars[$0] == "\n" ? $0 + 1 : nil }
+        XCTAssertEqual(doubtful.first?.inputRange,
+                       TextRange(start: UInt(lineStarts[2]), end: UInt(lineStarts[3] - 1)),
+                       "сомнительна только заявленная строка, а не всё окно")
+        XCTAssertTrue(result.text.text.contains("Четвёртая строка протокола."))
+    }
+
+    /// Without a usable reported line the fail-safe keeps the whole core
+    /// window doubtful — unanchored values are never substituted either way.
+    func testUnanchoredWithoutUsableLineDoubtsWholeWindow() async throws {
+        let text = "Первая строка протокола.\nВторая строка протокола."
+        let recognizer = ScriptedRecognizer(markers: [.init(Names.personType, "нет такого значения")])
+        recognizer.unanchoredReport = (Names.personType, 99)
+        let (engine, _) = try makeEngine(text: text, recognizer: recognizer)
+        let outcome = try await engine.run()
+        let result = outcome.artifact.result
+        XCTAssertEqual(result.bodyReplacementCount, 0, "непривязанное значение не подставляется")
+        let doubtful = result.warnings.filter { $0.kind == .doubtfulFragment && $0.target == .body }
+        XCTAssertEqual(doubtful.count, 1)
+        XCTAssertEqual(doubtful.first?.inputRange, TextRange(start: 0, end: UInt(text.unicodeScalars.count)),
+                       "без пригодной строки сомнительно всё окно целиком")
     }
 
     func testOuterDoubtPartialOverlapAndTypeConflictPreservedWithWarnings() async throws {

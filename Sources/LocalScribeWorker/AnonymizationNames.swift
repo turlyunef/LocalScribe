@@ -235,12 +235,6 @@ enum AnonymizationNames {
         return !"аеёиоуыэюяьъ".unicodeScalars.contains(scalar)
     }
 
-    /// The canonical key form of a fragment: nil when it is not a recognized
-    /// Russian full name (the raw string is then used as its own key).
-    static func canonicalKey(of fragment: String) -> String? {
-        analyze(fragment)?.canonical
-    }
-
     private static func isCapitalized(_ word: String) -> Bool {
         guard let first = word.unicodeScalars.first else { return false }
         return String(first).first?.isUppercase == true
