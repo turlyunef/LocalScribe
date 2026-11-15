@@ -1689,6 +1689,15 @@ struct QueueJobID: Hashable, Sendable {
         if !next.ids.contains(selection ?? "") { selection = id }
         sidebarSelection = next
     }
+    /// Up/Down arrows move the single selection through the currently visible
+    /// sidebar order (collapsed groups are skipped); the chosen row is revealed.
+    @discardableResult
+    func moveSidebarSelection(down: Bool) -> Bool {
+        guard let next = SidebarNeighbor.next(current: selection, in: sidebarRecordingOrder, down: down) else { return false }
+        selectSidebarRecording(next)
+        sidebarRevealID = next
+        return true
+    }
     func sidebarActionIDs(for id: String) -> Set<String> {
         let ids = sidebarSelection.ids.contains(id) ? sidebarSelection.ids : [id]
         return recordingSearch.active && recordingSearch.completed ? ids.intersection(recordingSearch.matchingIDs) : ids

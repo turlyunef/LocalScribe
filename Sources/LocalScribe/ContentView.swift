@@ -114,6 +114,13 @@ struct ContentView: View {
         guard !blocked, !recordingSheet, deletingRecordings == nil, deletingDiagrams == nil,
               deletingTexts == nil, model.resultEdit == nil else { return false }
         switch shortcut {
+        case .selectAdjacent(let down):
+            // Arrows drive the visible list of the open section only.
+            switch mode {
+            case .recordings: return model.moveSidebarSelection(down: down)
+            case .diagrams: return diagramWorkspace.moveSidebarSelection(down: down)
+            case .anonymization: return textWorkspace.moveSidebarSelection(down: down)
+            }
         case .closeSelection:
             switch mode {
             case .diagrams:

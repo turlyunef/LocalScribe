@@ -69,6 +69,15 @@ import LocalScribeCore
         if !next.ids.contains(selection ?? "") { selection = id }
         sidebarSelection = next
     }
+    /// Up/Down arrows move the single selection through the currently visible
+    /// sidebar order (collapsed groups are skipped); the chosen row is revealed.
+    @discardableResult
+    func moveSidebarSelection(down: Bool) -> Bool {
+        guard let next = SidebarNeighbor.next(current: selection, in: sidebarTextOrder, down: down) else { return false }
+        selectSidebarTextCard(next)
+        sidebarRevealID = next
+        return true
+    }
     /// Mass actions operate on the current selection, narrowed to the current
     /// search results while a filter is active.
     func sidebarActionIDs(for id: String) -> Set<String> {

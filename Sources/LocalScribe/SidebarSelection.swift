@@ -31,3 +31,20 @@ struct SidebarSelection: Equatable {
         if let anchor, !existing.contains(anchor) { self.anchor = nil }
     }
 }
+
+/// Neighbor lookup for Up/Down arrow navigation. `order` is the displayed
+/// sidebar order, so collapsed groups, the current group order and an active
+/// search filter are already reflected in it. With no visible current row
+/// Down selects the first row and Up the last; the ends clamp (no wrap), and
+/// a selection outside `order` (collapsed group, filtered out) counts as none.
+enum SidebarNeighbor {
+    static func next(current: String?, in order: [String], down: Bool) -> String? {
+        guard !order.isEmpty else { return nil }
+        guard let current, let index = order.firstIndex(of: current) else {
+            return down ? order.first : order.last
+        }
+        let target = down ? index + 1 : index - 1
+        guard order.indices.contains(target) else { return nil }
+        return order[target]
+    }
+}
