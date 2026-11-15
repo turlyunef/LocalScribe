@@ -61,22 +61,22 @@ struct AnonymizationDetailColumn: View {
 
     private func cardBody(_ card: AnonymizationCardSummary) -> some View {
         VStack(spacing: 0) {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 6) {
-                    RecordingTitleView(title: card.displayName, itemName: L10n.text("текста")) { title in
-                        Task { await model.renameTextCard(card.id, to: title) }
-                    }
-                    .id(card.id)
-                    .accessibilityIdentifier("texts.detail.title")
+            let showsResultActions = tab == .restoration || (editor.cardID == card.id && editor.hasPublishedResult)
+            ArchiveDetailHeader {
+                RecordingTitleView(title: card.displayName, itemName: L10n.text("текста"), reservesTwoLines: true) { title in
+                    Task { await model.renameTextCard(card.id, to: title) }
+                }
+                .id(card.id)
+                .accessibilityIdentifier("texts.detail.title")
+            } actions: {
+                cardActions(card, showsRestorationSwitch: showsResultActions)
+            } result: {
+                HStack(spacing: 8) {
                     statusLine(card)
+                    Spacer(minLength: 0)
+                    if showsResultActions { resultActions(card) }
                 }
-                ViewThatFits(in: .horizontal) {
-                    cardActions(card)
-                    cardActions(card).labelStyle(.iconOnly)
-                }
-                .frame(maxWidth: .infinity, alignment: .trailing)
             }
-            .padding(20)
             Divider()
             Group {
                 switch tab {
@@ -150,16 +150,17 @@ struct AnonymizationDetailColumn: View {
         }
     }
 
-    private func cardActions(_ card: AnonymizationCardSummary) -> some View {
+    private func cardActions(_ card: AnonymizationCardSummary, showsRestorationSwitch: Bool) -> some View {
         HStack(spacing: 8) {
-            if tab == .restoration || (editor.cardID == card.id && editor.hasPublishedResult) {
-                resultActions(card)
+            if showsRestorationSwitch {
+                let title = L10n.text(tab == .restoration ? "К обезличиванию" : "Обратное преобразование")
+                Button(title) { openTab(tab == .restoration ? .text : .restoration) }
+                    .help(title)
+                    .accessibilityIdentifier("texts.detail.restorationTab")
             }
             if tab == .restoration {
-                Button {
+                Button(L10n.text("Преобразовать снова")) {
                     Task { await workspace.repeatRestoration(card.id) }
-                } label: {
-                    Label(L10n.text("Преобразовать снова"), systemImage: "arrow.clockwise")
                 }
                 .disabled(!hasRestoration(card) || !workspace.canStartRestoration(card.id))
                 .help(L10n.text("Преобразовать снова"))
@@ -206,28 +207,22 @@ struct AnonymizationDetailColumn: View {
     private func resultActions(_ card: AnonymizationCardSummary) -> some View {
         let restoring = tab == .restoration
         let resultAvailable = !restoring || hasRestoration(card)
-        return Group {
+        return HStack(spacing: 4) {
             Button {
                 if restoring { workspace.copyRestoration(card.id) }
                 else { workspace.copyText(card.id) }
             } label: {
-                Label(L10n.text("Скопировать"), systemImage: "doc.on.doc")
+                ArchiveActionIcon(icon: "doc.on.doc")
             }
+            .buttonStyle(.borderless)
             .disabled(!resultAvailable)
+            .accessibilityLabel(L10n.text("Копировать"))
             .accessibilityIdentifier("texts.detail.copy")
-            .help(L10n.text(restoring ? "Скопировать восстановленный текст" : "Скопировать обезличенный текст"))
-
-            Button {
-                openTab(restoring ? .text : .restoration)
-            } label: {
-                Label(L10n.text(restoring ? "К обезличиванию" : "Обратное преобразование"),
-                      systemImage: restoring ? "arrow.left" : "arrow.uturn.backward")
-            }
-            .accessibilityIdentifier("texts.detail.restorationTab")
-            .help(L10n.text(restoring ? "К обезличиванию" : "Обратное преобразование"))
+            .help(L10n.text("Копировать результат"))
 
             downloadMenu(card, restoration: restoring).disabled(!resultAvailable)
         }
+        .fixedSize()
     }
 
     /// Retry (AC-17/18): «Обезличить заново» in the card's top-right. Before
@@ -253,16 +248,13 @@ struct AnonymizationDetailColumn: View {
     private func downloadMenu(_ card: AnonymizationCardSummary, restoration: Bool) -> some View {
         let handler: ((String, AnonymizationTextDownloadFormat) -> Void)? = restoration
             ? workspace.downloadRestoration(_:format:) : workspace.requestTextDownload
-        return Menu {
+        return ArchiveResultMenu(icon: "square.and.arrow.up", title: L10n.text("Экспорт"),
+                                 help: L10n.text("Экспорт"), identifier: "texts.detail.download") {
             Button(L10n.text("Markdown (.md)")) { handler?(card.id, .markdown) }
                 .disabled(handler == nil)
             Button(L10n.text("Текст (.txt)")) { handler?(card.id, .plainText) }
                 .disabled(handler == nil)
-        } label: {
-            Label(L10n.text("Скачать"), systemImage: "square.and.arrow.down")
         }
-        .accessibilityIdentifier("texts.detail.download")
-        .help(L10n.text(restoration ? "Скачать восстановленный текст" : "Скачать обезличенный текст"))
     }
 
     // MARK: - Panels

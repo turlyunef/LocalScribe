@@ -33,24 +33,22 @@ struct DiagramDetailColumn: View {
 
     @ViewBuilder private func diagramDetail(_ diagram: DiagramManifest) -> some View {
         VStack(spacing: 0) {
-            HStack {
-                RecordingTitleView(title: diagram.displayTitle, itemName: L10n.text("схемы")) { title in
+            ArchiveDetailHeader {
+                RecordingTitleView(title: diagram.displayTitle, itemName: L10n.text("схемы"), reservesTwoLines: true) { title in
                     Task { await model.renameDiagram(diagram.id, title: title) }
                 }
                 .id(diagram.id)
-                Spacer()
+            } actions: {
                 diagramActions(diagram)
+            } result: {
+                HStack(spacing: 8) {
+                    Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(diagram.byteSize.formatted(.byteCount(style: .file).locale(L10n.locale))) · \(diagram.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale)))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer(minLength: 0)
+                    if workspace.result != nil { resultActions }
+                }
             }
-            .padding(20)
-            HStack {
-                Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(diagram.byteSize.formatted(.byteCount(style: .file).locale(L10n.locale))) · \(diagram.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale)))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                if workspace.result != nil { resultActions }
-            }
-            .padding(.horizontal, 20)
-            .padding(.bottom, 12)
             Divider()
             diagramContent(diagram)
                 .padding(20)
@@ -63,6 +61,7 @@ struct DiagramDetailColumn: View {
             Button(L10n.text("Показать изображение в Finder")) {
                 workspace.showImageInFinder(diagram)
             }
+            .help(L10n.text("Показать исходное изображение в Finder"))
             .accessibilityIdentifier("diagrams.showImageInFinder")
             statusActions(diagram)
             Button(role: .destructive) {
@@ -132,19 +131,15 @@ struct DiagramDetailColumn: View {
 
     private var resultActions: some View {
         let parts = workspace.resultTabs + [.all]
-        return HStack {
-            Menu {
+        return HStack(spacing: 4) {
+            ArchiveResultMenu(icon: "doc.on.doc", title: L10n.text("Копировать"),
+                              help: L10n.text("Копировать результат"), identifier: "diagrams.copy") {
                 ForEach(parts, id: \.self) { part in
                     Button(part.title) { workspace.copy(part) }
                 }
-            } label: {
-                Label(L10n.text("Копировать"), systemImage: "doc.on.doc")
-            } primaryAction: {
-                workspace.copy(workspace.resultTab)
             }
-            .accessibilityIdentifier("diagrams.copy")
-            .help(L10n.text("Скопировать открытую вкладку"))
-            Menu {
+            ArchiveResultMenu(icon: "square.and.arrow.up", title: L10n.text("Экспорт"),
+                              help: L10n.text("Экспорт"), identifier: "diagrams.save") {
                 ForEach(parts, id: \.self) { part in
                     Menu(part.title) {
                         Button("Markdown (.md)") { workspace.presentExportPanel(part: part, format: .markdown) }
@@ -152,10 +147,7 @@ struct DiagramDetailColumn: View {
                     }
                 }
                 Button("PlantUML (.puml)") { workspace.presentExportPanel(part: .all, format: .plantuml) }
-            } label: {
-                Label(L10n.text("Сохранить"), systemImage: "square.and.arrow.up")
             }
-            .accessibilityIdentifier("diagrams.save")
         }
         .fixedSize()
     }

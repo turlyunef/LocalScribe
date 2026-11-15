@@ -619,8 +619,13 @@ final class AnonymizationCardEditorTests: XCTestCase {
         _ = try element("texts.detail.warning.settings.0", in: view)
         // The download menu exists exactly when a result is published (the
         // hook makes its items actionable); the retry action stays offered.
-        _ = try element("texts.detail.download", in: view)
-        _ = try element("texts.detail.retry", in: view)
+        let export = try XCTUnwrap(element("texts.detail.download", in: view).accessibilityFrame?())
+        let copy = try XCTUnwrap(element("texts.detail.copy", in: view).accessibilityFrame?())
+        let retry = try XCTUnwrap(element("texts.detail.retry", in: view).accessibilityFrame?())
+        let restoration = try XCTUnwrap(element("texts.detail.restorationTab", in: view).accessibilityFrame?())
+        XCTAssertEqual(retry.midY, restoration.midY, accuracy: 1)
+        XCTAssertEqual(copy.midY, export.midY, accuracy: 1)
+        XCTAssertGreaterThan(retry.minY, export.maxY)
         XCTAssertTrue(model.anonymizationModelsReady)
         try press("texts.detail.warningsTab", in: view)
         try await settle(view)

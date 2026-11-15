@@ -22,63 +22,7 @@ struct RecordingDetailColumn: View {
                 Divider()
             }
             if let selected = model.selected {
-                HStack {
-                    RecordingTitleView(title: selected.displayTitle, reservesTwoLines: true) { title in
-                        Task { await model.renameRecording(selected.id, title: title) }
-                    }
-                    .id(selected.id)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    Group {
-                        if selected.state.processing {
-                            ProgressView()
-                            Button(L10n.text("Отменить")) { Task { await model.cancel(selected.id) } }
-                                .help(L10n.text("Отменить обработку выбранной записи"))
-                                .accessibilityIdentifier("recording.cancel")
-                        } else if model.queuePosition(for: selected.id) != nil {
-                            Button(L10n.text("Поднять на верх очереди")) { model.moveToFrontOfQueue(selected.id) }
-                                .help(L10n.text("Обработать выбранную запись следующей после текущего задания"))
-                                .accessibilityIdentifier("recording.moveToFront")
-                            Button(L10n.text("Отменить")) { Task { await model.cancel(selected.id) } }
-                                .help(L10n.text("Убрать запись из очереди, сохранив аудио и результаты"))
-                                .accessibilityIdentifier("recording.cancel")
-                        } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
-                            Button(L10n.text("Продолжить")) { model.resume(selected.id) }
-                                .disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady)
-                                .help(L10n.text("Продолжить обработку выбранной записи с контрольной точки"))
-                                .accessibilityIdentifier("recording.resume")
-                        }
-                    }.controlSize(.small)
-                    RecordingActionsView(
-                        canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
-                        canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
-                        canDelete: model.deletingGroupID == nil && !model.finalizingRecording && model.recordingID != selected.id,
-                        showAudio: model.showAudio,
-                        repeatAnalysis: { Task { await model.repeatAnalysis(summaryOnly: false) } },
-                        recreateSummary: { language in Task { await model.repeatAnalysis(summaryOnly: true, language: language) } },
-                        deleteRecording: { Task { await model.deleteSelected() } }
-                    )
-                }.padding(20)
-                HStack(spacing: 0) {
-                    Text(L10n.text("Результат"))
-                        .fixedSize()
-                        .accessibilityIdentifier("result.label")
-                        .padding(.trailing, 8)
-                    RecordingResultPicker(parts: model.resultTabs, selection: $model.tab)
-                        .accessibilityElement(children: .contain)
-                        .accessibilityLabel(L10n.text("Результат"))
-                        .accessibilityIdentifier("result.section")
-                        // Reserve the same space even when warnings are absent so
-                        // the action buttons fit the same layout for every recording.
-                        .frame(width: RecordingResultPicker.reservedWidth, alignment: .leading)
-                    Spacer(minLength: 8)
-                    ViewThatFits(in: .horizontal) {
-                        resultActions.fixedSize()
-                        resultActions
-                            .labelStyle(.iconOnly)
-                            .controlSize(.small)
-                            .fixedSize()
-                    }
-                }.padding(.horizontal,20).padding(.bottom,12)
+                resultHeader(selected)
                 if let message = model.resourcePauseMessage {
                     Label(L10n.message(message), systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
@@ -151,26 +95,85 @@ struct RecordingDetailColumn: View {
             }
     }
 
+    private func resultHeader(_ selected: Manifest) -> some View {
+        ArchiveDetailHeader {
+            HStack(spacing: 8) {
+                RecordingTitleView(title: selected.displayTitle, reservesTwoLines: true) { title in
+                    Task { await model.renameRecording(selected.id, title: title) }
+                }
+                .id(selected.id)
+                Spacer(minLength: 0)
+                statusActions(selected)
+            }
+        } actions: {
+            recordingActions(selected)
+        } result: {
+            HStack(spacing: 8) {
+                Text(L10n.text("Результат"))
+                    .fixedSize()
+                    .accessibilityIdentifier("result.label")
+                RecordingResultPicker(parts: model.resultTabs, selection: $model.tab)
+                    .accessibilityElement(children: .contain)
+                    .accessibilityLabel(L10n.text("Результат"))
+                    .accessibilityIdentifier("result.section")
+                    // Keep the remaining controls in place when warnings appear.
+                    .frame(width: RecordingResultPicker.reservedWidth, alignment: .leading)
+                Spacer(minLength: 0)
+                resultActions
+            }
+        }
+    }
+
+    private func statusActions(_ selected: Manifest) -> some View {
+        HStack(spacing: 8) {
+            if selected.state.processing {
+                ProgressView()
+                Button(L10n.text("Отменить")) { Task { await model.cancel(selected.id) } }
+                    .help(L10n.text("Отменить обработку выбранной записи"))
+                    .accessibilityIdentifier("recording.cancel")
+            } else if model.queuePosition(for: selected.id) != nil {
+                Button(L10n.text("Поднять на верх очереди")) { model.moveToFrontOfQueue(selected.id) }
+                    .help(L10n.text("Обработать выбранную запись следующей после текущего задания"))
+                    .accessibilityIdentifier("recording.moveToFront")
+                Button(L10n.text("Отменить")) { Task { await model.cancel(selected.id) } }
+                    .help(L10n.text("Убрать запись из очереди, сохранив аудио и результаты"))
+                    .accessibilityIdentifier("recording.cancel")
+            } else if [.interrupted,.failed,.cancelled,.recorded,.waitingForModels].contains(selected.state), selected.state != .failed || selected.sourceComplete {
+                Button(L10n.text("Продолжить")) { model.resume(selected.id) }
+                    .disabled(model.finalizingRecording || model.recordingID == selected.id || selected.pendingRunId == nil && selected.state == .waitingForModels && !model.modelsReady)
+                    .help(L10n.text("Продолжить обработку выбранной записи с контрольной точки"))
+                    .accessibilityIdentifier("recording.resume")
+            }
+        }
+        .controlSize(.small)
+        .fixedSize()
+    }
+
+    private func recordingActions(_ selected: Manifest) -> some View {
+        RecordingActionsView(
+            canEdit: model.canEditResult,
+            canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
+            canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
+            canDelete: model.deletingGroupID == nil && !model.finalizingRecording && model.recordingID != selected.id,
+            showAudio: model.showAudio,
+            editResult: model.beginResultEditing,
+            repeatAnalysis: { Task { await model.repeatAnalysis(summaryOnly: false) } },
+            recreateSummary: { language in Task { await model.repeatAnalysis(summaryOnly: true, language: language) } },
+            deleteRecording: { Task { await model.deleteSelected() } }
+        )
+    }
+
     private var resultActions: some View {
-        HStack {
-            Button(L10n.text("Редактировать"), systemImage: "pencil", action: model.beginResultEditing)
-                .disabled(!model.canEditResult)
-                .help(L10n.text("Изменить текст расшифровки и итогов"))
-                .accessibilityIdentifier("result.edit")
-            Menu {
+        HStack(spacing: 4) {
+            ArchiveResultMenu(icon: "doc.on.doc", title: L10n.text("Копировать"),
+                              help: L10n.text("Копировать результат"), identifier: "result.copy") {
                 ForEach(model.exportParts, id: \.self) { part in
                     Button(part.title) { model.copy(part) }
                         .help(L10n.text("Копировать: %1$@", part.title))
                 }
-            } label: {
-                Label(L10n.text("Копировать"), systemImage: "doc.on.doc")
-            } primaryAction: {
-                model.copy(model.tab)
             }
-            .accessibilityLabel(L10n.text("Копировать"))
-            .help(L10n.text("Копировать открытый результат; меню позволяет выбрать раздел"))
-            .accessibilityIdentifier("result.copy")
-            Menu {
+            ArchiveResultMenu(icon: "square.and.arrow.up", title: L10n.text("Экспорт"),
+                              help: L10n.text("Экспорт"), identifier: "result.export") {
                 ForEach(model.exportParts, id: \.self) { part in
                     Menu(part.title) {
                         Button("Markdown (.md)") { model.export(markdown: true, part: part) }
@@ -179,12 +182,9 @@ struct RecordingDetailColumn: View {
                             .help(L10n.text("Сохранить раздел «%1$@» в текстовый файл", part.title))
                     }
                 }
-            } label: {
-                Label(L10n.text("Экспорт"), systemImage: "square.and.arrow.up")
             }
-            .help(L10n.text("Сохранить выбранный раздел результата или всё вместе в файл"))
-            .accessibilityIdentifier("result.export")
         }
+        .fixedSize()
     }
 }
 

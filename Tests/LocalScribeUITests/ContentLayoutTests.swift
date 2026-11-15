@@ -62,18 +62,23 @@ final class ContentLayoutTests: XCTestCase {
     }
 
     private func assertActionAlignment(_ primaryID: String, in view: NSView) throws {
-        let queueActions = primaryID == "recording.moveToFront" ? [primaryID, "recording.cancel"] : [primaryID]
-        let identifiers = queueActions + ["recording.showAudio", "recording.repeatAnalysis",
-                           "recording.recreateSummary", "recording.delete"]
-        let frames = try identifiers.map { try XCTUnwrap(element($0, in: view).accessibilityFrame?()) }
-        for frame in frames {
-            XCTAssertGreaterThan(frame.width, 0)
-            XCTAssertEqual(frame.midY, frames[0].midY, accuracy: 2)
+        let statusIDs = primaryID == "recording.moveToFront" ? [primaryID, "recording.cancel"] : [primaryID]
+        let actionIDs = ["recording.showAudio", "result.edit", "recording.repeatAnalysis",
+                         "recording.recreateSummary", "recording.delete"]
+        let rows = try [statusIDs, actionIDs].map { identifiers in
+            try identifiers.map { try XCTUnwrap(element($0, in: view).accessibilityFrame?()) }
         }
-        for (left, right) in zip(frames, frames.dropFirst()) {
-            XCTAssertLessThanOrEqual(left.maxX, right.minX)
+        for frames in rows {
+            for frame in frames {
+                XCTAssertGreaterThan(frame.width, 0)
+                XCTAssertEqual(frame.midY, frames[0].midY, accuracy: 2)
+            }
+            for (left, right) in zip(frames, frames.dropFirst()) {
+                XCTAssertLessThanOrEqual(left.maxX, right.minX)
+            }
         }
-        XCTAssertEqual(frames[0].height, frames[1].height, accuracy: 2)
+        XCTAssertGreaterThan(rows[0][0].minY, rows[1][0].maxY)
+        XCTAssertEqual(rows[0][0].height, rows[1][0].height, accuracy: 2)
     }
 
     func testQueueNumbersAndPromotionButtonUpdateWithoutReloadingRecordings() async throws {
@@ -723,14 +728,26 @@ final class ContentLayoutTests: XCTestCase {
                     (entry.name, try XCTUnwrap(entry.element.accessibilityFrame?(), entry.name))
                 })
                 let label = try XCTUnwrap(frames["result.label"])
+                let finder = try XCTUnwrap(frames["recording.showAudio"])
                 let edit = try XCTUnwrap(frames["result.edit"])
+                let copy = try XCTUnwrap(frames["result.copy"])
+                let export = try XCTUnwrap(frames["result.export"])
                 let pickerFrame = try XCTUnwrap(picker.accessibilityFrame?())
                 let firstTab = try XCTUnwrap(frames[tabTitles[0]])
                 let lastTab = try XCTUnwrap(frames[titles[titles.count - 1]])
                 for leadingEdge in [pickerFrame.minX, firstTab.minX] {
                     XCTAssertGreaterThanOrEqual(leadingEdge - label.maxX, 6, "\(language.rawValue), \(hosting.bounds.width)")
                 }
-                XCTAssertLessThanOrEqual(lastTab.maxX, edit.minX)
+                XCTAssertLessThanOrEqual(lastTab.maxX, copy.minX)
+                XCTAssertLessThanOrEqual(copy.maxX, export.minX)
+                XCTAssertEqual(copy.midY, export.midY, accuracy: 1)
+                XCTAssertEqual(edit.midY, finder.midY, accuracy: 2)
+                XCTAssertLessThanOrEqual(finder.maxX, edit.minX)
+                XCTAssertGreaterThan(edit.minY, copy.maxY)
+                XCTAssertEqual(copy.width, export.width, accuracy: 1)
+                XCTAssertLessThan(copy.width, 30)
+                XCTAssertEqual(try element("result.copy", in: hosting).accessibilityHelp?(), L10n.text("Копировать результат"))
+                XCTAssertEqual(try element("result.export", in: hosting).accessibilityHelp?(), L10n.text("Экспорт"))
                 return frames
             }
 
@@ -799,8 +816,8 @@ final class ContentLayoutTests: XCTestCase {
                 XCTAssertLessThanOrEqual(left.maxX, right.minX)
                 XCTAssertEqual(left.midY, right.midY, accuracy: 2)
             }
-            let editFrame = try XCTUnwrap(element("result.edit", in: hosting).accessibilityFrame?())
-            XCTAssertLessThanOrEqual(frames[2].maxX, editFrame.minX)
+            let copyFrame = try XCTUnwrap(element("result.copy", in: hosting).accessibilityFrame?())
+            XCTAssertLessThanOrEqual(frames[2].maxX, copyFrame.minX)
             // The segmented control may perform the action even when AX returns false.
             _ = buttons[2].accessibilityPerformPress?()
             await model.resultPresentation.task?.value

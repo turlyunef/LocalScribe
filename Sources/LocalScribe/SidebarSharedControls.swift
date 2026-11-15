@@ -59,6 +59,21 @@ struct SidebarActions<GroupActions: View, ItemActions: View>: View {
     }
 }
 
+struct ArchiveActionIcon: View {
+    static let width: CGFloat = 20
+    static let height: CGFloat = 24
+
+    let icon: String
+    var verticalOffset: CGFloat = 0
+
+    var body: some View {
+        Image(systemName: icon)
+            .offset(y: verticalOffset)
+            .frame(width: Self.width, height: Self.height)
+            .contentShape(Rectangle())
+    }
+}
+
 struct SidebarActionButton: View {
     let icon: String
     let title: String
@@ -68,10 +83,7 @@ struct SidebarActionButton: View {
 
     var body: some View {
         Button(action: action) {
-            Image(systemName: icon)
-                .offset(y: iconVerticalOffset)
-                .frame(width: 20, height: 24)
-                .contentShape(Rectangle())
+            ArchiveActionIcon(icon: icon, verticalOffset: iconVerticalOffset)
         }
         .buttonStyle(.borderless)
         .help(title)

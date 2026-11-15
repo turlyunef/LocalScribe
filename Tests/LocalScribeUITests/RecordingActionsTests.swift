@@ -6,15 +6,17 @@ import XCTest
 @MainActor
 final class RecordingActionsTests: XCTestCase {
     private let identifiers = [
-        "recording.showAudio", "recording.repeatAnalysis",
+        "recording.showAudio", "result.edit", "recording.repeatAnalysis",
         "recording.recreateSummary", "recording.delete"
     ]
 
     private func withActions(
+        canEdit: Bool = true,
         canRepeatAnalysis: Bool = true,
         canRecreateSummary: Bool = true,
         canDelete: Bool = true,
         showAudio: @escaping () -> Void = {},
+        editResult: @escaping () -> Void = {},
         repeatAnalysis: @escaping () -> Void = {},
         deleteRecording: @escaping () -> Void = {},
         check: (NSHostingView<RecordingActionsView>) throws -> Void
@@ -23,10 +25,12 @@ final class RecordingActionsTests: XCTestCase {
         // SwiftUI creates its complete accessibility tree on demand in a test host.
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
         let view = RecordingActionsView(
+            canEdit: canEdit,
             canRepeatAnalysis: canRepeatAnalysis,
             canRecreateSummary: canRecreateSummary,
             canDelete: canDelete,
             showAudio: showAudio,
+            editResult: editResult,
             repeatAnalysis: repeatAnalysis,
             recreateSummary: { _ in },
             deleteRecording: deleteRecording
@@ -75,9 +79,10 @@ final class RecordingActionsTests: XCTestCase {
         try withActions { hosting in
             let actions = try identifiers.map { try action($0, in: hosting) }
             XCTAssertEqual(actions[0].accessibilityLabel?(), "Показать аудио в Finder")
-            XCTAssertEqual(actions[1].accessibilityLabel?(), "Обработать заново")
-            XCTAssertEqual(accessibleName(of: actions[2]), "Пересоздать итоги")
-            XCTAssertEqual(actions[3].accessibilityLabel?(), "Удалить запись")
+            XCTAssertEqual(actions[1].accessibilityLabel?(), "Редактировать")
+            XCTAssertEqual(actions[2].accessibilityLabel?(), "Обработать заново")
+            XCTAssertEqual(accessibleName(of: actions[3]), "Пересоздать итоги")
+            XCTAssertEqual(actions[4].accessibilityLabel?(), "Удалить запись")
             let frames = try actions.map { try XCTUnwrap($0.accessibilityFrame?()) }
             for frame in frames {
                 XCTAssertGreaterThan(frame.width, 0)
@@ -88,25 +93,26 @@ final class RecordingActionsTests: XCTestCase {
                 XCTAssertLessThanOrEqual(left.maxX, right.minX)
             }
             // The trash control stays compact instead of displaying a text button.
-            XCTAssertLessThan(frames[3].width, 40)
-            XCTAssertEqual(actions[3].accessibilityRole?(), .button)
+            XCTAssertLessThan(frames[4].width, 40)
+            XCTAssertEqual(actions[4].accessibilityRole?(), .button)
         }
     }
 
     func testDirectButtonsInvokeTheirOwnActions() async throws {
         var calls: [String] = []
         try withActions(showAudio: { calls.append("audio") },
+                        editResult: { calls.append("edit") },
                         repeatAnalysis: { calls.append("analysis") },
                         deleteRecording: { calls.append("delete") }) { hosting in
-            for identifier in [identifiers[0], identifiers[1], identifiers[3]] {
+            for identifier in identifiers where identifier != "recording.recreateSummary" {
                 XCTAssertTrue(try action(identifier, in: hosting).accessibilityPerformPress?() ?? false)
             }
-            XCTAssertEqual(calls, ["audio", "analysis", "delete"])
+            XCTAssertEqual(calls, ["audio", "edit", "analysis", "delete"])
         }
     }
 
     func testUnavailableActionsRemainVisibleAndDisabled() async throws {
-        try withActions(canRepeatAnalysis: false, canRecreateSummary: false, canDelete: false) { hosting in
+        try withActions(canEdit: false, canRepeatAnalysis: false, canRecreateSummary: false, canDelete: false) { hosting in
             XCTAssertTrue(try action(identifiers[0], in: hosting).isAccessibilityEnabled?() ?? false)
             for identifier in identifiers.dropFirst() {
                 XCTAssertFalse(try action(identifier, in: hosting).isAccessibilityEnabled?() ?? false)
@@ -116,8 +122,8 @@ final class RecordingActionsTests: XCTestCase {
 
     func testDisabledSummaryDoesNotDisableOtherActions() async throws {
         try withActions(canRecreateSummary: false) { hosting in
-            XCTAssertFalse(try action(identifiers[2], in: hosting).isAccessibilityEnabled?() ?? false)
-            for identifier in [identifiers[0], identifiers[1], identifiers[3]] {
+            XCTAssertFalse(try action("recording.recreateSummary", in: hosting).isAccessibilityEnabled?() ?? false)
+            for identifier in identifiers where identifier != "recording.recreateSummary" {
                 XCTAssertTrue(try action(identifier, in: hosting).isAccessibilityEnabled?() ?? false)
             }
         }
@@ -126,12 +132,13 @@ final class RecordingActionsTests: XCTestCase {
     func testActionTooltipsAreAvailableWhenEnabledAndDisabled() async throws {
         let expected = [
             "Показать исходный аудиофайл записи в Finder",
+            "Изменить текст расшифровки и итогов",
             "Заново распознать речь, определить участников и создать итоги",
             "Создать новые итоги по готовой расшифровке на выбранном языке",
             "Удалить запись"
         ]
         for enabled in [true, false] {
-            try withActions(canRepeatAnalysis: enabled, canRecreateSummary: enabled, canDelete: enabled) { hosting in
+            try withActions(canEdit: enabled, canRepeatAnalysis: enabled, canRecreateSummary: enabled, canDelete: enabled) { hosting in
                 for (identifier, help) in zip(identifiers, expected) {
                     XCTAssertEqual(try action(identifier, in: hosting).accessibilityHelp?(), help)
                 }
