@@ -23,11 +23,11 @@ struct RecordingDetailColumn: View {
             }
             if let selected = model.selected {
                 HStack {
-                    RecordingTitleView(title: selected.displayTitle) { title in
+                    RecordingTitleView(title: selected.displayTitle, reservesTwoLines: true) { title in
                         Task { await model.renameRecording(selected.id, title: title) }
                     }
                     .id(selected.id)
-                    Spacer()
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     Group {
                         if selected.state.processing {
                             ProgressView()
@@ -58,6 +58,27 @@ struct RecordingDetailColumn: View {
                         deleteRecording: { Task { await model.deleteSelected() } }
                     )
                 }.padding(20)
+                HStack(spacing: 0) {
+                    Text(L10n.text("Результат"))
+                        .fixedSize()
+                        .accessibilityIdentifier("result.label")
+                        .padding(.trailing, 8)
+                    RecordingResultPicker(parts: model.resultTabs, selection: $model.tab)
+                        .accessibilityElement(children: .contain)
+                        .accessibilityLabel(L10n.text("Результат"))
+                        .accessibilityIdentifier("result.section")
+                        // Reserve the same space even when warnings are absent so
+                        // the action buttons fit the same layout for every recording.
+                        .frame(width: RecordingResultPicker.reservedWidth, alignment: .leading)
+                    Spacer(minLength: 8)
+                    ViewThatFits(in: .horizontal) {
+                        resultActions.fixedSize()
+                        resultActions
+                            .labelStyle(.iconOnly)
+                            .controlSize(.small)
+                            .fixedSize()
+                    }
+                }.padding(.horizontal,20).padding(.bottom,12)
                 if let message = model.resourcePauseMessage {
                     Label(L10n.message(message), systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
@@ -73,39 +94,6 @@ struct RecordingDetailColumn: View {
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.bottom, 10)
                 }
                 if selected.activeRunId != nil && selected.pendingRunId != nil { Text(L10n.text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.")).font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
-                HStack {
-                    Picker(selection: Binding(get: { model.tab }, set: { part in
-                        // Updating the prepared text also publishes changes; wait
-                        // until SwiftUI finishes the picker's own view update.
-                        Task { @MainActor in model.tab = part }
-                    })) {
-                        ForEach(model.resultTabs, id: \.self) { part in
-                            Text(part.title).tag(part)
-                        }
-                    } label: {
-                        Text(L10n.text("Результат"))
-                            .lineLimit(1)
-                            .fixedSize(horizontal: true, vertical: false)
-                    }
-                    .pickerStyle(.segmented)
-                    .frame(width: model.resultTabs.contains(.warnings) ? 410 : 270)
-                    .accessibilityIdentifier("result.section")
-                    Spacer()
-                    Button(L10n.text("Редактировать"), systemImage: "pencil", action: model.beginResultEditing)
-                        .disabled(!model.canEditResult)
-                        .help(L10n.text("Изменить текст расшифровки и итогов"))
-                        .accessibilityIdentifier("result.edit")
-                    Menu {
-                        ForEach(model.exportParts, id: \.self) { part in Button(part.title) { model.copy(part) }.help(L10n.text("Копировать: %1$@", part.title)) }
-                    } label: { Label(L10n.text("Копировать"), systemImage: "doc.on.doc") } primaryAction: { model.copy(model.tab) }
-                    .help(L10n.text("Копировать открытый результат; меню позволяет выбрать раздел"))
-                    Menu {
-                        ForEach(model.exportParts, id: \.self) { part in
-                            Menu(part.title) { Button("Markdown (.md)") { model.export(markdown: true, part: part) }.help(L10n.text("Сохранить раздел «%1$@» в Markdown", part.title)); Button(L10n.text("Текст (.txt)")) { model.export(markdown: false, part: part) }.help(L10n.text("Сохранить раздел «%1$@» в текстовый файл", part.title)) }
-                        }
-                    } label: { Label(L10n.text("Экспорт"), systemImage: "square.and.arrow.up") }
-                    .help(L10n.text("Сохранить выбранный раздел результата или всё вместе в файл"))
-                }.padding(.horizontal,20).padding(.bottom,12)
                 Divider()
                 if model.tab == .summary, model.summary == nil, !model.automaticSummaries {
                     Text(L10n.text("Автоматическое создание итогов отключено"))
@@ -161,6 +149,121 @@ struct RecordingDetailColumn: View {
                 ResultEditorView(initial: draft, initialPart: model.tab, save: model.saveResultEdits,
                                  cancel: { model.resultEdit = nil }, reportError: model.errorHandler.report)
             }
+    }
+
+    private var resultActions: some View {
+        HStack {
+            Button(L10n.text("Редактировать"), systemImage: "pencil", action: model.beginResultEditing)
+                .disabled(!model.canEditResult)
+                .help(L10n.text("Изменить текст расшифровки и итогов"))
+                .accessibilityIdentifier("result.edit")
+            Menu {
+                ForEach(model.exportParts, id: \.self) { part in
+                    Button(part.title) { model.copy(part) }
+                        .help(L10n.text("Копировать: %1$@", part.title))
+                }
+            } label: {
+                Label(L10n.text("Копировать"), systemImage: "doc.on.doc")
+            } primaryAction: {
+                model.copy(model.tab)
+            }
+            .accessibilityLabel(L10n.text("Копировать"))
+            .help(L10n.text("Копировать открытый результат; меню позволяет выбрать раздел"))
+            .accessibilityIdentifier("result.copy")
+            Menu {
+                ForEach(model.exportParts, id: \.self) { part in
+                    Menu(part.title) {
+                        Button("Markdown (.md)") { model.export(markdown: true, part: part) }
+                            .help(L10n.text("Сохранить раздел «%1$@» в Markdown", part.title))
+                        Button(L10n.text("Текст (.txt)")) { model.export(markdown: false, part: part) }
+                            .help(L10n.text("Сохранить раздел «%1$@» в текстовый файл", part.title))
+                    }
+                }
+            } label: {
+                Label(L10n.text("Экспорт"), systemImage: "square.and.arrow.up")
+            }
+            .help(L10n.text("Сохранить выбранный раздел результата или всё вместе в файл"))
+            .accessibilityIdentifier("result.export")
+        }
+    }
+}
+
+/// The SwiftUI segmented Picker redistributes space when the number of options changes.
+/// AppKit lets each segment keep a width determined by its own label.
+private struct RecordingResultPicker: NSViewRepresentable {
+    var parts: [ExportPart]
+    @Binding var selection: ExportPart
+
+    static var reservedWidth: CGFloat {
+        width(for: ExportPart.allCases.filter { $0 != .all })
+    }
+
+    private static func width(for parts: [ExportPart]) -> CGFloat {
+        parts.reduce(0) { $0 + segmentWidth($1.title) }
+    }
+
+    private static func segmentWidth(_ label: String) -> CGFloat {
+        let font = NSFont.systemFont(ofSize: NSFont.systemFontSize)
+        let textWidth = (label as NSString).size(withAttributes: [.font: font]).width
+        return ceil(textWidth) + 16
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator(picker: self) }
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+        let control = context.coordinator.control
+        control.segmentStyle = .rounded
+        control.segmentDistribution = .fit
+        control.trackingMode = .selectOne
+        control.target = context.coordinator
+        control.action = #selector(Coordinator.select(_:))
+        control.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(control)
+        NSLayoutConstraint.activate([
+            control.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            control.centerYAnchor.constraint(equalTo: container.centerYAnchor),
+            context.coordinator.controlWidth
+        ])
+        return container
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
+        CGSize(width: Self.reservedWidth, height: context.coordinator.control.intrinsicContentSize.height)
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.picker = self
+        let control = context.coordinator.control
+        if control.segmentCount != parts.count {
+            control.segmentCount = parts.count
+        }
+        for (index, part) in parts.enumerated() {
+            let label = part.title
+            if control.label(forSegment: index) != label {
+                control.setLabel(label, forSegment: index)
+                control.setWidth(Self.segmentWidth(label), forSegment: index)
+            }
+        }
+        // Fit the visible segments inside their native view and keep its leading edge fixed.
+        context.coordinator.controlWidth.constant = Self.width(for: parts)
+        control.selectedSegment = parts.firstIndex(of: selection) ?? -1
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        let control = NSSegmentedControl()
+        lazy var controlWidth = control.widthAnchor.constraint(equalToConstant: 0)
+        var picker: RecordingResultPicker
+
+        init(picker: RecordingResultPicker) {
+            self.picker = picker
+        }
+
+        @objc func select(_ control: NSSegmentedControl) {
+            guard picker.parts.indices.contains(control.selectedSegment) else { return }
+            picker.selection = picker.parts[control.selectedSegment]
+        }
     }
 }
 
@@ -277,13 +380,17 @@ private struct PresentedResultView: View {
 struct RecordingTitleView: View {
     var title: String
     var itemName = L10n.text("записи")
+    var reservesTwoLines = false
     var save: (String) -> Void
     @State private var draft = ""
     @State private var editing = false
     @FocusState private var focused: Bool
 
     var body: some View {
-        Group {
+        ZStack(alignment: .topLeading) {
+            if reservesTwoLines {
+                Text(verbatim: " ").lineLimit(2, reservesSpace: true).hidden()
+            }
             if editing {
                 TextField(L10n.text("Название %1$@", itemName), text: $draft)
                     .textFieldStyle(.roundedBorder)
@@ -303,7 +410,7 @@ struct RecordingTitleView: View {
                     draft = title
                     editing = true
                 } label: {
-                    Text(title).multilineTextAlignment(.leading).lineLimit(2)
+                    Text(title).multilineTextAlignment(.leading).lineLimit(2).truncationMode(.tail)
                 }
                 .buttonStyle(.plain)
                 .help(L10n.text("Нажмите, чтобы изменить название"))

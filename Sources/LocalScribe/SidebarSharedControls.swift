@@ -34,7 +34,6 @@ struct WorkspaceModePicker: View {
         }
         .font(.system(size: 13, weight: .medium))
         .padding(4)
-        .background(.background.opacity(0.55), in: Capsule())
         .animation(reduceMotion ? nil : .smooth(duration: 0.22), value: mode)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(L10n.text("Раздел архива"))

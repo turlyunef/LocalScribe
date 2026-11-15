@@ -639,6 +639,90 @@ final class ContentLayoutTests: XCTestCase {
         }
     }
 
+    func testRecordingHeaderKeepsControlPositionsWhenSwitchingRecordings() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let suite = "LocalScribeTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let repo = try RecordingRepository(root: root)
+        var short = Manifest(sourceType: "import", title: "Встреча", filename: "short.wav")
+        short.state = .completed
+        try repo.save(short)
+        var long = Manifest(sourceType: "import",
+                            title: String(repeating: "Длинное название записи встречи ", count: 12),
+                            filename: "long.wav")
+        long.state = .failed
+        long.sourceComplete = true
+        long.warnings = ["Есть предупреждение об обработке"]
+        long.lastError = "Обработка прервана"
+        try repo.save(long)
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults)
+        await model.reload()
+
+        let originalLanguage = ApplicationLanguage(rawValue: L10n.locale.identifier) ?? .russian
+        defer { L10n.configure(originalLanguage) }
+        let controls = ["recording.showAudio", "recording.repeatAnalysis", "recording.recreateSummary",
+                        "recording.delete", "result.label", "result.edit", "result.copy", "result.export"]
+
+        for language in [ApplicationLanguage.russian, .english] {
+            L10n.configure(language)
+            model.selection = long.id
+            let (hosting, window) = host(ContentView(model: model), width: 1100)
+            defer { window.close() }
+            let tabTitles = [ExportPart.transcript.title, ExportPart.summary.title]
+            let warningsTitle = ExportPart.warnings.title
+
+            func frames(hasWarnings: Bool) throws -> [String: NSRect] {
+                let picker = try element("result.section", in: hosting)
+                let tabs = descendants(picker)
+                let titles = tabTitles + (hasWarnings ? [warningsTitle] : [])
+                XCTAssertEqual(tabs.compactMap(text).filter { (tabTitles + [warningsTitle]).contains($0) }, titles)
+                let controlsByID = try controls.map { (name: $0, element: try element($0, in: hosting)) }
+                let tabsByTitle = try titles.map { title in
+                    (name: title, element: try XCTUnwrap(tabs.first { text($0) == title }, title))
+                }
+                let frames = try Dictionary(uniqueKeysWithValues: (controlsByID + tabsByTitle).map { entry in
+                    (entry.name, try XCTUnwrap(entry.element.accessibilityFrame?(), entry.name))
+                })
+                let label = try XCTUnwrap(frames["result.label"])
+                let edit = try XCTUnwrap(frames["result.edit"])
+                let pickerFrame = try XCTUnwrap(picker.accessibilityFrame?())
+                let firstTab = try XCTUnwrap(frames[tabTitles[0]])
+                let lastTab = try XCTUnwrap(frames[titles[titles.count - 1]])
+                for leadingEdge in [pickerFrame.minX, firstTab.minX] {
+                    XCTAssertGreaterThanOrEqual(leadingEdge - label.maxX, 6, "\(language.rawValue), \(hosting.bounds.width)")
+                }
+                XCTAssertLessThanOrEqual(lastTab.maxX, edit.minX)
+                return frames
+            }
+
+            for width: CGFloat in [1100, 850, 1400] {
+                window.setContentSize(NSSize(width: width, height: 700))
+                try await settle(hosting)
+                let before = try frames(hasWarnings: true)
+                model.selection = short.id
+                try await settle(hosting)
+                let withoutWarnings = try frames(hasWarnings: false)
+                model.selection = long.id
+                try await settle(hosting)
+                let after = try frames(hasWarnings: true)
+                XCTAssertEqual(hosting.bounds.width, width, accuracy: 1)
+                for (name, first) in before {
+                    let context = "\(name), \(language.rawValue), width \(width)"
+                    let restored = try XCTUnwrap(after[name], context)
+                    let snapshots = name == warningsTitle ? [restored] : [try XCTUnwrap(withoutWarnings[name], context), restored]
+                    for frame in snapshots {
+                        XCTAssertEqual(first.minX, frame.minX, accuracy: 1, context)
+                        XCTAssertEqual(first.midY, frame.midY, accuracy: 1, context)
+                        XCTAssertEqual(first.width, frame.width, accuracy: 1, context)
+                    }
+                }
+            }
+        }
+        await model.shutdown()
+    }
+
     func testWarningsSectionAppearsOnlyWithWarningsAndCanBeSelected() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -680,7 +764,7 @@ final class ContentLayoutTests: XCTestCase {
             }
             let editFrame = try XCTUnwrap(element("result.edit", in: hosting).accessibilityFrame?())
             XCTAssertLessThanOrEqual(frames[2].maxX, editFrame.minX)
-            // SwiftUI's segmented item performs the action even when AX returns false.
+            // The segmented control may perform the action even when AX returns false.
             _ = buttons[2].accessibilityPerformPress?()
             await model.resultPresentation.task?.value
             try await settle(hosting)
