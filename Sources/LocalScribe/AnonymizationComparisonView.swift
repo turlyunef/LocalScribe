@@ -2,23 +2,18 @@ import AppKit
 import SwiftUI
 import LocalScribeCore
 
-struct AnonymizationComparisonView<Left: View, Right: View, Actions: View>: View {
+struct AnonymizationComparisonView<Left: View, Right: View>: View {
     @ObservedObject var scrollSync: AnonymizationScrollSync
     @ViewBuilder let left: (AnonymizationScrollSync) -> Left
     @ViewBuilder let right: (AnonymizationScrollSync) -> Right
-    @ViewBuilder let actions: () -> Actions
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                Toggle(L10n.text("Синхронизировать"), isOn: $scrollSync.isEnabled)
-                    .toggleStyle(.checkbox)
-                    .accessibilityIdentifier("texts.detail.syncScrolling")
-                Spacer()
-                actions()
-            }
-            .controlSize(.small)
-            .frame(minHeight: 24)
+            Toggle(L10n.text("Синхронизировать"), isOn: $scrollSync.isEnabled)
+                .toggleStyle(.checkbox)
+                .accessibilityIdentifier("texts.detail.syncScrolling")
+                .controlSize(.small)
+                .frame(minHeight: 24)
             HStack(alignment: .top, spacing: 16) {
                 left(scrollSync)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
@@ -27,14 +22,6 @@ struct AnonymizationComparisonView<Left: View, Right: View, Actions: View>: View
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-    }
-}
-
-extension AnonymizationComparisonView where Actions == EmptyView {
-    init(scrollSync: AnonymizationScrollSync,
-         @ViewBuilder left: @escaping (AnonymizationScrollSync) -> Left,
-         @ViewBuilder right: @escaping (AnonymizationScrollSync) -> Right) {
-        self.init(scrollSync: scrollSync, left: left, right: right, actions: EmptyView.init)
     }
 }
 

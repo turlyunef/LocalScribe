@@ -2,17 +2,9 @@ import SwiftUI
 import LocalScribeCore
 
 struct AnonymizationRestorationView: View {
-    @ObservedObject var workspace: AnonymizationWorkspaceModel
-    @ObservedObject private var editor: AnonymizationCardEditor
+    @ObservedObject var editor: AnonymizationCardEditor
     let cardID: String
     let scrollSync: AnonymizationScrollSync
-
-    init(workspace: AnonymizationWorkspaceModel, cardID: String, scrollSync: AnonymizationScrollSync) {
-        self.workspace = workspace
-        self.editor = workspace.cardEditor
-        self.cardID = cardID
-        self.scrollSync = scrollSync
-    }
 
     private var panels: AnonymizationRestorationPanels? {
         editor.cardID == cardID ? editor.restorationPanels : nil
@@ -39,25 +31,6 @@ struct AnonymizationRestorationView: View {
                         .accessibilityIdentifier("texts.restoration.resultEditor")
                 }
             }
-        } actions: {
-            HStack(spacing: 8) {
-                Button {
-                    Task { await workspace.importRestoration(cardID) }
-                } label: {
-                    Label(L10n.text("Импортировать"), systemImage: "folder")
-                }
-                .accessibilityIdentifier("texts.restoration.import")
-                Button {
-                    Task { await workspace.pasteRestoration(cardID) }
-                } label: {
-                    Label(L10n.text("Вставить"), systemImage: "document.on.clipboard")
-                }
-                .accessibilityIdentifier("texts.restoration.paste")
-                if workspace.restorationBusyCardID == cardID {
-                    ProgressView().controlSize(.small)
-                }
-            }
-            .disabled(!workspace.canStartRestoration(cardID))
         }
     }
 

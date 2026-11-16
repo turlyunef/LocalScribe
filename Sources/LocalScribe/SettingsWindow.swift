@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 import SwiftUI
 import LocalScribeCore
 
@@ -18,6 +19,8 @@ import LocalScribeCore
     @Published var diagramModelID: String
     @Published var anonymizationProfileID: String
     @Published var dataTypesText: String
+    private var savedRecordingSources: RecordingSourcePreferences
+    private var recordingSourcesObserver: AnyCancellable?
     private let initialTaskSelections: [ModelTask: String]
 
     init(model: AppModel) {
@@ -27,6 +30,7 @@ import LocalScribeCore
         applicationLanguage = model.applicationLanguage
         applicationTheme = model.applicationTheme
         recordingSources = model.recordingSources
+        savedRecordingSources = model.recordingSources
         let settings = model.anonymizationSettings
         let summary = model.selectedTaskModel(.summary)?.id ?? ""
         let diagram = model.selectedTaskModel(.diagramRecognition)?.id ?? ""
@@ -36,6 +40,24 @@ import LocalScribeCore
         anonymizationProfileID = anonymization
         initialTaskSelections = [.summary: summary, .diagramRecognition: diagram, .anonymization: anonymization]
         dataTypesText = settings.dataTypes.joined(separator: "\n")
+        recordingSourcesObserver = model.$recordingSources.dropFirst().sink { [weak self] sources in
+            self?.refreshRecordingSources(sources)
+        }
+    }
+
+    private func refreshRecordingSources(_ sources: RecordingSourcePreferences) {
+        var updated = sources
+        // Keep only fields the user has already edited in the settings window.
+        func preserveEdit<Value: Equatable>(_ field: WritableKeyPath<RecordingSourcePreferences, Value>) {
+            if recordingSources[keyPath: field] != savedRecordingSources[keyPath: field] {
+                updated[keyPath: field] = recordingSources[keyPath: field]
+            }
+        }
+        preserveEdit(\.microphoneEnabled)
+        preserveEdit(\.systemAudioEnabled)
+        preserveEdit(\.microphone)
+        savedRecordingSources = sources
+        if recordingSources != updated { recordingSources = updated }
     }
 
     var dataTypesLines: [String] { dataTypesText.components(separatedBy: .newlines) }

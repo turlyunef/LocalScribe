@@ -1,19 +1,27 @@
 import SwiftUI
 
-struct ArchiveDetailHeader<Title: View, Actions: View, Result: View>: View {
+struct ArchiveDetailHeader<Title: View, Actions: View, Result: View, ResultActions: View>: View {
     @ViewBuilder let title: () -> Title
     @ViewBuilder let actions: () -> Actions
     @ViewBuilder let result: () -> Result
+    @ViewBuilder let resultActions: () -> ResultActions
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 6) {
             title()
-            actions().frame(maxWidth: .infinity, minHeight: 32, alignment: .trailing)
-            result().frame(maxWidth: .infinity, minHeight: 32, alignment: .leading)
+            // Small buttons need 20 points. The native result picker and icon buttons need 24.
+            actions().frame(maxWidth: .infinity, minHeight: 20, alignment: .trailing)
+            HStack(spacing: 8) {
+                result().lineLimit(1)
+                Spacer(minLength: 0)
+                HStack(spacing: 4, content: resultActions)
+                    .fixedSize()
+            }
+            .frame(minHeight: ArchiveActionIcon.height)
         }
         .padding(.horizontal, 20)
-        .padding(.top, 16)
-        .padding(.bottom, 12)
+        .padding(.vertical, 8)
+        .fixedSize(horizontal: false, vertical: true)
     }
 }
 

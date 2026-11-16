@@ -26,9 +26,7 @@ struct DiagramGroupsSidebar: View {
             SidebarActions {
                 expansionButton(expanded: false)
                 expansionButton(expanded: true)
-                SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу схем"), identifier: "diagrams.groups.add") {
-                    if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
-                }
+                SidebarAddGroupButton(title: L10n.text("Добавить группу схем"), identifier: "diagrams.groups.add", editor: $editor)
                 .disabled(model.deletingDiagramJobs)
             } itemActions: {
                 SidebarActionButton(icon: "photo.badge.plus", title: L10n.text("Загрузить изображение"), identifier: "diagrams.import",

@@ -10,6 +10,8 @@ enum WorkspaceMode: String, CaseIterable, Identifiable {
 }
 
 struct ContentView: View {
+    private static let sidebarWidth: CGFloat = 300
+
     @ObservedObject var model: AppModel
     @StateObject private var diagramWorkspace: DiagramWorkspaceModel
     @StateObject private var textWorkspace: AnonymizationWorkspaceModel
@@ -38,7 +40,9 @@ struct ContentView: View {
                 case .anonymization:
                     AnonymizationGroupsSidebar(model: model, workspace: textWorkspace, deletion: $deletingTexts)
                 }
-            }.navigationSplitViewColumnWidth(min: 300, ideal: 300)
+            }
+            .frame(minWidth: Self.sidebarWidth)
+            .navigationSplitViewColumnWidth(min: Self.sidebarWidth, ideal: Self.sidebarWidth)
             VStack(spacing: 6) {
                 Label(L10n.text("Всё обрабатывается на Mac"), systemImage: "lock.shield").font(.caption)
                     .accessibilityIdentifier("sidebar.localProcessing")
@@ -49,28 +53,26 @@ struct ContentView: View {
                 .accessibilityIdentifier("sidebar.models")
             }.foregroundStyle(.secondary).padding()
         } detail: {
-            if mode == .recordings {
-                RecordingDetailColumn(model: model, recordingSheet: $recordingSheet)
-            } else if mode == .diagrams {
-                DiagramDetailColumn(model: model, workspace: diagramWorkspace) { id in
-                    SidebarDiagramDeletion.request([id], model: model, presentation: $deletingDiagrams)
-                }
-            } else {
-                AnonymizationDetailColumn(workspace: textWorkspace) { id in
-                    // The card's trash button concerns only the open card.
-                    SidebarTextDeletion.request([id], model: model, presentation: $deletingTexts)
+            ZStack(alignment: .topLeading) {
+                switch mode {
+                case .recordings:
+                    RecordingDetailColumn(model: model, recordingSheet: $recordingSheet)
+                case .diagrams:
+                    DiagramDetailColumn(model: model, workspace: diagramWorkspace) { id in
+                        SidebarDiagramDeletion.request([id], model: model, presentation: $deletingDiagrams)
+                    }
+                case .anonymization:
+                    AnonymizationDetailColumn(workspace: textWorkspace) { id in
+                        // The card's trash button concerns only the open card.
+                        SidebarTextDeletion.request([id], model: model, presentation: $deletingTexts)
+                    }
                 }
             }
-        }
-        .toolbar(removing: .title)
-        .toolbar {
-            ToolbarItem { Spacer() }
-            ToolbarItem {
-                Button { model.settingsWindow.show() } label: {
-                    Label(L10n.text("Настройки"), systemImage: "gearshape")
-                }
-                .help(L10n.text("Открыть настройки"))
-                .accessibilityIdentifier("workspace.settings")
+            .ignoresSafeArea(.container, edges: sidebarVisible ? .top : [])
+            .background {
+                WorkspaceToolbar(sidebarVisible: sidebarVisible,
+                                 showSidebar: { columnVisibility = .all },
+                                 openSettings: blocked ? nil : { model.settingsWindow.show() })
             }
         }
         .sheet(item: $deletingDiagrams) { deletion in
@@ -94,6 +96,7 @@ struct ContentView: View {
     }
 
     private var blocked: Bool { model.preparingStorage || model.shuttingDown }
+    private var sidebarVisible: Bool { columnVisibility != .detailOnly }
 
     private var settingsTab: SettingsTab {
         switch mode {
@@ -117,6 +120,8 @@ struct ContentView: View {
         guard !blocked, !recordingSheet, deletingRecordings == nil, deletingDiagrams == nil,
               deletingTexts == nil, model.resultEdit == nil else { return false }
         switch shortcut {
+        case .command(let command):
+            return handleCommand(command)
         case .selectAdjacent(let down):
             // Arrows drive the visible list of the open section only.
             switch mode {
@@ -169,6 +174,47 @@ struct ContentView: View {
                 return SidebarDeletion.request(ids, model: model, presentation: $deletingRecordings)
             }
         }
+    }
+
+    private func handleCommand(_ command: WorkspaceCommand) -> Bool {
+        switch command {
+        case .newRecording:
+            guard model.canStartRecording else { return false }
+            mode = .recordings
+            recordingSheet = true
+        case .recordings: mode = .recordings
+        case .diagrams: mode = .diagrams
+        case .anonymization: mode = .anonymization
+        case .importFile:
+            switch mode {
+            case .recordings: model.chooseImport()
+            case .diagrams: diagramWorkspace.presentImportPanel()
+            case .anonymization: return false // The text card knows which import action is visible.
+            }
+        case .revealSource:
+            switch mode {
+            case .recordings:
+                guard model.selected != nil else { return false }
+                model.showAudio()
+            case .diagrams:
+                guard let diagram = diagramWorkspace.selected else { return false }
+                diagramWorkspace.showImageInFinder(diagram)
+            case .anonymization: return false
+            }
+        case .copyResult:
+            switch mode {
+            case .recordings:
+                guard model.selected != nil, model.resultTabs.contains(model.tab),
+                      let part = model.tab.exportPart else { return false }
+                model.copy(part)
+            case .diagrams:
+                guard diagramWorkspace.result != nil else { return false }
+                diagramWorkspace.copy(diagramWorkspace.resultTab)
+            case .anonymization: return false // The text card itself chooses the result.
+            }
+        case .addGroup: return false // The active sidebar owns the group editor.
+        }
+        return true
     }
 }
 
@@ -272,7 +318,11 @@ struct ModelSettings: View {
     private var recordingSettings: some View {
         Form {
             Section(L10n.text("Источники записи")) {
-                CaptureSourceSettings(draft: draft, devices: model.microphoneDevices)
+                RecordingSourceControls(preferences: $draft.recordingSources, devices: model.microphoneDevices,
+                                        identifierPrefix: "settings")
+                Text(L10n.text("Изменения применяются к следующей записи."))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
             modelActivity
             Section(L10n.text("Модели записей")) {
@@ -686,15 +736,16 @@ struct ModelSettings: View {
     }
 }
 
-private struct CaptureSourceSettings: View {
+struct RecordingSourceControls: View {
     private enum Choice: Hashable {
         case builtIn, systemDefault, device(String)
     }
 
-    @ObservedObject var draft: SettingsDraft
+    @Binding var preferences: RecordingSourcePreferences
     @ObservedObject var devices: MicrophoneDevices
+    let identifierPrefix: String
 
-    private var selection: MicrophoneSelection { draft.recordingSources.microphone }
+    private var selection: MicrophoneSelection { preferences.microphone }
     private var connectedMicrophones: [MicrophoneInputDevice] { devices.snapshot.devices.filter { !$0.isBuiltIn } }
 
     private var microphoneChoice: Binding<Choice> {
@@ -706,20 +757,20 @@ private struct CaptureSourceSettings: View {
             }
         } set: { choice in
             switch choice {
-            case .builtIn: draft.recordingSources.microphone = .builtIn
-            case .systemDefault: draft.recordingSources.microphone = .systemDefault
+            case .builtIn: preferences.microphone = .builtIn
+            case .systemDefault: preferences.microphone = .systemDefault
             case .device(let uid):
                 if let device = devices.snapshot.devices.first(where: { $0.uid == uid }) {
-                    draft.recordingSources.microphone = device.selection
+                    preferences.microphone = device.selection
                 }
             }
         }
     }
 
     var body: some View {
-        Toggle(L10n.text("Микрофон"), isOn: $draft.recordingSources.microphoneEnabled)
+        Toggle(L10n.text("Микрофон"), isOn: $preferences.microphoneEnabled)
             .toggleStyle(.checkbox)
-            .accessibilityIdentifier("settings.recordingMicrophoneEnabled")
+            .accessibilityIdentifier("\(identifierPrefix).recordingMicrophoneEnabled")
         Picker(L10n.text("Устройство ввода"), selection: microphoneChoice) {
             Text(L10n.text("Встроенный микрофон")).tag(Choice.builtIn)
             Text(L10n.text("Как в настройках macOS")).tag(Choice.systemDefault)
@@ -734,29 +785,26 @@ private struct CaptureSourceSettings: View {
                 Text(devices.snapshot.device(for: selection)?.name ?? name).tag(Choice.device(uid))
             }
         }
-        .disabled(!draft.recordingSources.microphoneEnabled)
-        .accessibilityIdentifier("settings.recordingMicrophone")
+        .disabled(!preferences.microphoneEnabled)
+        .accessibilityIdentifier("\(identifierPrefix).recordingMicrophone")
         if devices.snapshot.device(for: selection) == nil {
             Text(unavailableTitle)
                 .foregroundStyle(.secondary)
-                .accessibilityIdentifier("settings.recordingMicrophone.unavailable")
-            if draft.recordingSources.microphoneEnabled,
+                .accessibilityIdentifier("\(identifierPrefix).recordingMicrophone.unavailable")
+            if preferences.microphoneEnabled,
                let fallback = devices.snapshot.candidates(for: selection).first {
                 Text(L10n.text("Резервный микрофон: %1$@", fallback.isBuiltIn ? L10n.text("Встроенный микрофон") : fallback.name))
                     .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("settings.recordingMicrophone.fallback")
+                    .accessibilityIdentifier("\(identifierPrefix).recordingMicrophone.fallback")
             }
         }
-        Toggle(L10n.text("Системный звук"), isOn: $draft.recordingSources.systemAudioEnabled)
+        Toggle(L10n.text("Системный звук"), isOn: $preferences.systemAudioEnabled)
             .toggleStyle(.checkbox)
-            .accessibilityIdentifier("settings.recordingSystemAudioEnabled")
-        if !draft.recordingSources.hasEnabledSource {
+            .accessibilityIdentifier("\(identifierPrefix).recordingSystemAudioEnabled")
+        if !preferences.hasEnabledSource {
             Text(L10n.message("Включите хотя бы один источник записи."))
                 .foregroundStyle(.secondary)
         }
-        Text(L10n.text("Изменения применяются к следующей записи."))
-            .font(.caption)
-            .foregroundStyle(.secondary)
     }
 
     private var unavailableTitle: String {

@@ -5,6 +5,7 @@ import LocalScribeCore
 @MainActor final class AppDelegate: NSObject, NSApplicationDelegate {
     weak var model: AppModel?
     let aboutPanel = AboutPanelPresenter()
+    let keyboardShortcuts = KeyboardShortcutsPanel()
     var shutdownTimeout: Duration = .seconds(15)
     private var cleanup: Task<Void, Never>?
     private var timeout: Task<Void, Never>?
@@ -84,13 +85,19 @@ import LocalScribeCore
 struct LocalScribeApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @StateObject private var model = AppModel()
+    @Environment(\.openWindow) private var openWindow
+
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: "workspace") {
             ContentView(model: model).frame(minWidth: 850, minHeight: 560)
                 .environment(\.locale, L10n.locale)
                 .onAppear { delegate.model = model; model.errorHandler.startPresenting() }
         }.defaultSize(width: 1100, height: 740)
         .commands {
+            CommandGroup(replacing: .newItem) {
+                // The workspace handles Command-N as New Recording.
+                Button(L10n.text("Новое окно")) { openWindow(id: "workspace") }
+            }
             CommandGroup(replacing: .appSettings) {
                 Button(L10n.text("Настройки…")) { model.settingsWindow.show() }
                     .keyboardShortcut(",", modifiers: .command)
@@ -102,6 +109,9 @@ struct LocalScribeApp: App {
                         .credits: NSAttributedString(string: L10n.text("Локальная запись, расшифровка и подведение итогов встреч на вашем Mac."))
                     ])
                 }
+            }
+            CommandGroup(after: .help) {
+                Button(L10n.text("Горячие клавиши")) { delegate.keyboardShortcuts.show() }
             }
         }
         MenuBarExtra("LocalScribe", systemImage: model.recordingID == nil ? "waveform" : "record.circle.fill") {

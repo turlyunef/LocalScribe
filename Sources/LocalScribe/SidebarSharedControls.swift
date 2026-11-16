@@ -65,10 +65,11 @@ struct ArchiveActionIcon: View {
 
     let icon: String
     var verticalOffset: CGFloat = 0
+    var horizontalOffset: CGFloat = 0
 
     var body: some View {
         Image(systemName: icon)
-            .offset(y: verticalOffset)
+            .offset(x: horizontalOffset, y: verticalOffset)
             .frame(width: Self.width, height: Self.height)
             .contentShape(Rectangle())
     }
@@ -89,6 +90,25 @@ struct SidebarActionButton: View {
         .help(title)
         .accessibilityLabel(title)
         .accessibilityIdentifier(identifier)
+    }
+}
+
+struct SidebarAddGroupButton: View {
+    let title: String
+    let identifier: String
+    @Binding var editor: GroupNameDraft?
+
+    var body: some View {
+        SidebarActionButton(icon: "folder.badge.plus", title: title, identifier: identifier, action: addGroup)
+            .background(WorkspaceKeyboardShortcut { action in
+                guard case .command(.addGroup) = action else { return false }
+                addGroup()
+                return true
+            })
+    }
+
+    private func addGroup() {
+        if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
     }
 }
 

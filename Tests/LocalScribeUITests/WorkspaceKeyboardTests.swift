@@ -46,11 +46,15 @@ final class WorkspaceKeyboardTests: XCTestCase {
     }
 
     private func host(_ model: AppModel) -> NSWindow {
+        host(ContentView(model: model))
+    }
+
+    private func host<V: View>(_ view: V) -> NSWindow {
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
         let window = KeyboardTestWindow(contentRect: NSRect(x: 0, y: 0, width: 850, height: 560),
                                         styleMask: [.titled], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
-        window.contentView = NSHostingView(rootView: ContentView(model: model))
+        window.contentView = NSHostingView(rootView: view)
         window.makeKeyAndOrderFront(nil)
         return window
     }
@@ -123,6 +127,90 @@ final class WorkspaceKeyboardTests: XCTestCase {
     private func clickDiagram(_ diagram: DiagramManifest, modifiers: NSEvent.ModifierFlags = [],
                               in window: NSWindow) throws {
         try click("diagrams.sidebar.diagram.\(diagram.id)", modifiers: modifiers, in: window)
+    }
+
+    func testArchiveShortcutsSwitchSectionsAndEditOnlyTheActiveGroup() async throws {
+        let (model, _) = try await fixture()
+        let window = host(model)
+        defer { window.close() }
+        try await settle(window)
+
+        for (code, digit, prefix, editor) in [
+            (kVK_ANSI_2, "2", "diagrams", "diagrams.groups.name"),
+            (kVK_ANSI_3, "3", "texts", "texts.groups.name"),
+            (kVK_ANSI_1, "1", "recordings", "groups.name")
+        ] {
+            try key(code, digit, modifiers: .command, in: window)
+            try await settle(window)
+            XCTAssertNotNil(element("\(prefix).search", in: window.contentView))
+            try key(kVK_ANSI_N, "Т", modifiers: [.command, .shift], in: window)
+            try await settle(window)
+            XCTAssertNotNil(element(editor, in: window.contentView))
+            try escape(window)
+            try await settle(window)
+            XCTAssertNil(element(editor, in: window.contentView))
+        }
+
+        try key(kVK_ANSI_2, "2", modifiers: .command, in: window)
+        try await settle(window)
+        try key(kVK_ANSI_N, "т", modifiers: .command, in: window)
+        try await settle(window)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        XCTAssertNotNil(element("recording.destination", in: sheet.contentView))
+        try key(kVK_ANSI_3, "3", modifiers: .command, in: window)
+        XCTAssertTrue(window.attachedSheet === sheet)
+        try escape(sheet)
+        try await settle(window)
+        XCTAssertNotNil(element("recordings.search", in: window.contentView))
+
+        model.installing = true
+        try await settle(window)
+        try key(kVK_ANSI_N, "n", modifiers: .command, in: window)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        model.installing = false
+        await model.shutdown()
+    }
+
+    func testImportUsesCommandIInTextArchive() async throws {
+        let (model, _) = try await fixture()
+        let workspace = AnonymizationWorkspaceModel(model: model)
+        var requests: [AnonymizationWorkspaceModel.TextOpenPanelRequest] = []
+        workspace.chooseImportFiles = { request in requests.append(request); return nil }
+        let window = host(AnonymizationDetailColumn(workspace: workspace))
+        defer { window.close() }
+        try await settle(window)
+
+        try key(kVK_ANSI_I, "ш", modifiers: .command, repeatKey: true, in: window)
+        try key(kVK_ANSI_O, "o", modifiers: .command, in: window)
+        try await settle(window)
+        XCTAssertTrue(requests.isEmpty)
+        try key(kVK_ANSI_I, "ш", modifiers: .command, in: window)
+        try await settle(window)
+        XCTAssertEqual(requests.map(\.allowsMultipleSelection), [true])
+        await model.shutdown()
+    }
+
+    func testCopyShortcutUsesCurrentRecordingTab() async throws {
+        let (model, rows) = try await fixture()
+        let window = host(model)
+        defer { window.close() }
+        model.selection = rows[0].id
+        for _ in 0..<20 where model.transcript == nil { try await settle(window) }
+        XCTAssertNotNil(model.transcript)
+        model.summary = Summary(language: "en", overview: [Finding(id: "f1", text: "Fixture summary", evidenceSegmentIds: ["s1"])])
+        model.tab = .summary
+        try await settle(window)
+
+        try key(kVK_ANSI_C, "c", modifiers: .command, in: window)
+        XCTAssertNil(model.copyTask)
+        try key(kVK_ANSI_C, "С", modifiers: [.command, .shift], in: window)
+        let task = try XCTUnwrap(model.copyTask)
+        await task.value
+        let expected = try await model.rendered(.summary)
+        XCTAssertTrue(expected.contains("Fixture summary"))
+        XCTAssertEqual(NSPasteboard.general.string(forType: .string), expected)
+        await model.shutdown()
     }
 
     func testEscapeKeepsSearchLocalAndClosesEitherWorkspaceSelection() async throws {
@@ -485,6 +573,42 @@ final class WorkspaceKeyboardTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         }
         XCTAssertEqual(model.diagrams.map(\.id), [diagrams[0].id])
+        await model.shutdown()
+    }
+
+    func testNewRecordingSheetSavesSourceChangesWhenCancelled() async throws {
+        let (model, _) = try await fixture()
+        let draft = SettingsDraft(model: model)
+        let window = host(model)
+        defer { window.close() }
+        try await settle(window)
+
+        try press(sidebarRecording, in: window)
+        try await settle(window)
+        let sheet = try XCTUnwrap(window.attachedSheet)
+        XCTAssertNotNil(element("recording.recordingMicrophone", in: sheet.contentView))
+        try press("recording.recordingMicrophoneEnabled", in: sheet)
+        try await settle(window)
+        XCTAssertFalse(model.recordingSources.hasEnabledSource)
+        try enter(sheet)
+        try await settle(window)
+        XCTAssertTrue(window.attachedSheet === sheet)
+
+        try press("recording.recordingSystemAudioEnabled", in: sheet)
+        try escape(sheet)
+        try await settle(window)
+        XCTAssertNil(window.attachedSheet)
+        XCTAssertFalse(model.recordingSources.microphoneEnabled)
+        XCTAssertTrue(model.recordingSources.systemAudioEnabled)
+        XCTAssertEqual(draft.recordingSources, model.recordingSources)
+        XCTAssertFalse(draft.hasChanges(from: model))
+
+        try press(sidebarRecording, in: window)
+        try await settle(window)
+        let reopened = try XCTUnwrap(window.attachedSheet)
+        try press("recording.recordingSystemAudioEnabled", in: reopened)
+        XCTAssertFalse(model.recordingSources.hasEnabledSource)
+        try escape(reopened)
         await model.shutdown()
     }
 

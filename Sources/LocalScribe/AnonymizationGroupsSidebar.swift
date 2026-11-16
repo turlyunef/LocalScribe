@@ -32,9 +32,7 @@ struct AnonymizationGroupsSidebar: View {
             SidebarActions {
                 expansionButton(expanded: false)
                 expansionButton(expanded: true)
-                SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу текстов"), identifier: "texts.groups.add") {
-                    if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
-                }
+                SidebarAddGroupButton(title: L10n.text("Добавить группу текстов"), identifier: "texts.groups.add", editor: $editor)
                 .disabled(model.deletingTextJobs)
             } itemActions: {
                 SidebarActionButton(icon: "square.and.arrow.down", title: L10n.text("Загрузить файл"),

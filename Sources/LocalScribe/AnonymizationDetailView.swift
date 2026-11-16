@@ -55,6 +55,24 @@ struct AnonymizationDetailColumn: View {
         .onChange(of: workspace.selected?.resultWarningCount) {
             if tab == .warnings, workspace.selected?.resultWarningCount == 0 { tab = .text }
         }
+        .background(WorkspaceKeyboardShortcut { action in
+            switch action {
+            case .command(.importFile):
+                if tab == .restoration {
+                    guard let card = workspace.selected, workspace.canStartRestoration(card.id) else { return false }
+                    importRestoration(card)
+                } else {
+                    guard workspace.canImportFiles else { return false }
+                    workspace.presentImportPanel()
+                }
+                return true
+            case .command(.copyResult):
+                guard let card = workspace.selected, canCopyResult(card) else { return false }
+                copyResult(card)
+                return true
+            default: return false
+            }
+        })
     }
 
     // MARK: - Card
@@ -71,13 +89,12 @@ struct AnonymizationDetailColumn: View {
             } actions: {
                 cardActions(card, showsRestorationSwitch: showsResultActions)
             } result: {
-                HStack(spacing: 8) {
-                    statusLine(card)
-                    Spacer(minLength: 0)
-                    if showsResultActions { resultActions(card) }
-                }
+                statusLine(card)
+            } resultActions: {
+                if showsResultActions { resultActions(card) }
             }
             Divider()
+            cardNotices(card)
             Group {
                 switch tab {
                 case .text:
@@ -85,7 +102,7 @@ struct AnonymizationDetailColumn: View {
                 case .warnings:
                     warningsSection(card.id)
                 case .restoration:
-                    AnonymizationRestorationView(workspace: workspace, cardID: card.id,
+                    AnonymizationRestorationView(editor: editor, cardID: card.id,
                                                  scrollSync: restorationScrollSync)
                 }
             }
@@ -95,63 +112,102 @@ struct AnonymizationDetailColumn: View {
         .background(Color(nsColor: .textBackgroundColor))
     }
 
-    @ViewBuilder private func statusLine(_ card: AnonymizationCardSummary) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Label(card.statusTitle, systemImage: card.statusIcon)
-                    .foregroundStyle(.secondary)
-                    .accessibilityIdentifier("texts.detail.status")
-                if card.resultWarningCount > 0 {
-                    Button {
-                        openTab(tab == .warnings ? .text : .warnings)
-                    } label: {
-                        Label(L10n.text(tab == .warnings ? "К тексту" : "Предупреждения"),
-                              systemImage: tab == .warnings ? "arrow.left" : "exclamationmark.triangle")
-                    }
-                    .controlSize(.small)
-                    .accessibilityIdentifier("texts.detail.warningsTab")
-                }
-                if card.attemptState == .queued, let position = model.textQueuePosition(for: card.id) {
-                    Text(L10n.text("Позиция в очереди: %1$@", String(position)))
-                        .font(.caption).foregroundStyle(.secondary)
-                        .accessibilityIdentifier("texts.detail.queuePosition")
-                }
-            }
-            if let failure = editor.failureText {
-                Label(failure, systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption).foregroundStyle(.orange)
-                    .accessibilityIdentifier("texts.detail.failure")
-                if editor.failureIsSizeLimit {
-                    // AC-42: the sizes are shown with the failure, the model
-                    // settings and the left editor (still editable) resolve it.
-                    HStack(spacing: 8) {
-                        Button(L10n.text("Настроить модель")) { model.settingsWindow.show(tab: .anonymization) }
-                            .controlSize(.small)
-                            .accessibilityIdentifier("texts.detail.failure.settings")
-                        Text(L10n.text("Можно сократить текст слева и повторить обработку"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            if let loadFailure = editor.loadFailure {
-                Label(loadFailure, systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .accessibilityIdentifier("texts.detail.loadFailure")
-            }
-            if card.attemptState == .waitingModel, !editor.pendingRetryWaitsForModel {
+    private func statusLine(_ card: AnonymizationCardSummary) -> some View {
+        HStack(spacing: 8) {
+            Label(card.statusTitle, systemImage: card.statusIcon)
+                .foregroundStyle(.secondary)
+                .accessibilityIdentifier("texts.detail.status")
+            if card.resultWarningCount > 0 {
                 Button {
-                    model.settingsWindow.show(tab: .anonymization)
+                    openTab(tab == .warnings ? .text : .warnings)
                 } label: {
-                    Label(L10n.text("Настроить модель"), systemImage: "gear")
+                    Label(L10n.text(tab == .warnings ? "К тексту" : "Предупреждения"),
+                          systemImage: tab == .warnings ? "arrow.left" : "exclamationmark.triangle")
                 }
                 .controlSize(.small)
-                .accessibilityIdentifier("texts.openSettings")
+                .accessibilityIdentifier("texts.detail.warningsTab")
+            }
+            if card.attemptState == .queued, let position = model.textQueuePosition(for: card.id) {
+                Text(L10n.text("Позиция в очереди: %1$@", String(position)))
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("texts.detail.queuePosition")
             }
         }
     }
 
-    private func cardActions(_ card: AnonymizationCardSummary, showsRestorationSwitch: Bool) -> some View {
-        HStack(spacing: 8) {
+    @ViewBuilder private func cardNotices(_ card: AnonymizationCardSummary) -> some View {
+        let failure = editor.failureText
+        let loadFailure = editor.loadFailure
+        let showsModelSettings = card.attemptState == .waitingModel && !editor.pendingRetryWaitsForModel
+        if failure != nil || loadFailure != nil || showsModelSettings {
+            VStack(alignment: .leading, spacing: 4) {
+                if let failure {
+                    Label(failure, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption).foregroundStyle(.orange)
+                        .accessibilityIdentifier("texts.detail.failure")
+                    if editor.failureIsSizeLimit {
+                        // AC-42: the sizes are shown with the failure, the model
+                        // settings and the left editor (still editable) resolve it.
+                        HStack(spacing: 8) {
+                            Button(L10n.text("Настроить модель")) { model.settingsWindow.show(tab: .anonymization) }
+                                .controlSize(.small)
+                                .accessibilityIdentifier("texts.detail.failure.settings")
+                            Text(L10n.text("Можно сократить текст слева и повторить обработку"))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+                if let loadFailure {
+                    Label(loadFailure, systemImage: "exclamationmark.triangle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("texts.detail.loadFailure")
+                }
+                if showsModelSettings {
+                    Button {
+                        model.settingsWindow.show(tab: .anonymization)
+                    } label: {
+                        Label(L10n.text("Настроить модель"), systemImage: "gear")
+                    }
+                    .controlSize(.small)
+                    .accessibilityIdentifier("texts.openSettings")
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .padding(.horizontal, 20)
+            .padding(.top, 8)
+        }
+    }
+
+    @ViewBuilder private func cardActions(_ card: AnonymizationCardSummary, showsRestorationSwitch: Bool) -> some View {
+        let regular = cardActionRow(card, showsRestorationSwitch: showsRestorationSwitch, spacing: 8)
+            .controlSize(.small)
+        if tab == .restoration {
+            ViewThatFits(in: .horizontal) {
+                regular
+                cardActionRow(card, showsRestorationSwitch: showsRestorationSwitch, spacing: 4)
+                    .controlSize(.mini)
+                cardActionRow(card, showsRestorationSwitch: showsRestorationSwitch, spacing: 4, compact: true)
+                    .controlSize(.small)
+            }
+        } else {
+            regular
+        }
+    }
+
+    private func cardActionRow(_ card: AnonymizationCardSummary, showsRestorationSwitch: Bool,
+                               spacing: CGFloat, compact: Bool = false) -> some View {
+        HStack(spacing: spacing) {
+            if tab == .restoration {
+                if workspace.restorationBusyCardID == card.id {
+                    ProgressView()
+                }
+                if compact {
+                    restorationInputActions(card).labelStyle(.iconOnly)
+                } else {
+                    restorationInputActions(card)
+                }
+            }
             if showsRestorationSwitch {
                 let title = L10n.text(tab == .restoration ? "К обезличиванию" : "Обратное преобразование")
                 Button(title) { openTab(tab == .restoration ? .text : .restoration) }
@@ -191,12 +247,41 @@ struct AnonymizationDetailColumn: View {
                 .accessibilityIdentifier("texts.detail.delete")
             }
         }
-        .controlSize(.small)
         .fixedSize()
+    }
+
+    private func restorationInputActions(_ card: AnonymizationCardSummary) -> some View {
+        Group {
+            Button(L10n.text("Импортировать"), systemImage: "square.and.arrow.down") {
+                importRestoration(card)
+            }
+            .help(L10n.text("Импортировать"))
+            .accessibilityIdentifier("texts.restoration.import")
+            Button(L10n.text("Вставить"), systemImage: "document.on.clipboard") {
+                Task { await workspace.pasteRestoration(card.id) }
+            }
+            .help(L10n.text("Вставить"))
+            .accessibilityIdentifier("texts.restoration.paste")
+        }
+        .disabled(!workspace.canStartRestoration(card.id))
     }
 
     private func hasRestoration(_ card: AnonymizationCardSummary) -> Bool {
         editor.cardID == card.id && editor.document?.restoration != nil
+    }
+
+    private func importRestoration(_ card: AnonymizationCardSummary) {
+        Task { await workspace.importRestoration(card.id) }
+    }
+
+    private func canCopyResult(_ card: AnonymizationCardSummary) -> Bool {
+        if tab == .restoration { return hasRestoration(card) }
+        return editor.cardID == card.id && editor.hasPublishedResult
+    }
+
+    private func copyResult(_ card: AnonymizationCardSummary) {
+        if tab == .restoration { workspace.copyRestoration(card.id) }
+        else { workspace.copyText(card.id) }
     }
 
     private func openTab(_ tab: Tab) {
@@ -204,25 +289,25 @@ struct AnonymizationDetailColumn: View {
         self.tab = tab
     }
 
-    private func resultActions(_ card: AnonymizationCardSummary) -> some View {
+    @ViewBuilder private func resultActions(_ card: AnonymizationCardSummary) -> some View {
         let restoring = tab == .restoration
-        let resultAvailable = !restoring || hasRestoration(card)
-        return HStack(spacing: 4) {
+        let resultAvailable = canCopyResult(card)
+        Group {
             Button {
-                if restoring { workspace.copyRestoration(card.id) }
-                else { workspace.copyText(card.id) }
+                copyResult(card)
             } label: {
-                ArchiveActionIcon(icon: "doc.on.doc")
+                // Match the icon inset of the borderless result menus.
+                ArchiveActionIcon(icon: "doc.on.doc", horizontalOffset: -3)
             }
             .buttonStyle(.borderless)
-            .disabled(!resultAvailable)
+            .tint(resultAvailable ? Color.primary : nil)
             .accessibilityLabel(L10n.text("Копировать"))
             .accessibilityIdentifier("texts.detail.copy")
             .help(L10n.text("Копировать результат"))
 
-            downloadMenu(card, restoration: restoring).disabled(!resultAvailable)
+            downloadMenu(card, restoration: restoring)
         }
-        .fixedSize()
+        .disabled(!resultAvailable)
     }
 
     /// Retry (AC-17/18): «Обезличить заново» in the card's top-right. Before

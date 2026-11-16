@@ -11,6 +11,8 @@ final class RecordingActionsTests: XCTestCase {
     ]
 
     private func withActions(
+        width: CGFloat = 650,
+        liveCaptionControl: LiveCaptionControl? = nil,
         canEdit: Bool = true,
         canRepeatAnalysis: Bool = true,
         canRecreateSummary: Bool = true,
@@ -30,13 +32,14 @@ final class RecordingActionsTests: XCTestCase {
             canRecreateSummary: canRecreateSummary,
             canDelete: canDelete,
             showAudio: showAudio,
+            liveCaptionControl: liveCaptionControl,
             editResult: editResult,
             repeatAnalysis: repeatAnalysis,
             recreateSummary: { _ in },
             deleteRecording: deleteRecording
         )
         let hosting = NSHostingView(rootView: view)
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 650, height: 80),
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: 80),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = hosting
@@ -108,6 +111,27 @@ final class RecordingActionsTests: XCTestCase {
                 XCTAssertTrue(try action(identifier, in: hosting).accessibilityPerformPress?() ?? false)
             }
             XCTAssertEqual(calls, ["audio", "edit", "analysis", "delete"])
+        }
+    }
+
+    func testNarrowActionsKeepLiveCaptionsInTheSameRow() throws {
+        var startCount = 0
+        let liveCaptions = LiveCaptionControl(disabled: false, start: { startCount += 1 }, stop: {})
+        try withActions(width: 280, liveCaptionControl: liveCaptions) { hosting in
+            var ids = identifiers
+            ids.insert("recording.liveCaptions.start", at: 1)
+            let actions = try ids.map { try action($0, in: hosting) }
+            let frames = try actions.map { try XCTUnwrap($0.accessibilityFrame?()) }
+            let windowFrame = try XCTUnwrap(hosting.window).frame
+            for frame in frames {
+                XCTAssertEqual(frame.midY, frames[0].midY, accuracy: 2)
+                XCTAssertTrue(windowFrame.contains(frame))
+            }
+            for (left, right) in zip(frames, frames.dropFirst()) {
+                XCTAssertLessThanOrEqual(left.maxX, right.minX)
+            }
+            XCTAssertTrue(actions[1].accessibilityPerformPress?() ?? false)
+            XCTAssertEqual(startCount, 1)
         }
     }
 

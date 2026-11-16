@@ -24,6 +24,8 @@ struct RecordingDetailColumn: View {
     @ObservedObject var model: AppModel
     @Binding var recordingSheet: Bool
 
+    private var canStartFromSheet: Bool { model.canStartRecording && model.recordingSources.hasEnabledSource }
+
     var body: some View {
         VStack(spacing: 0) {
             if model.recordingID != nil {
@@ -38,11 +40,12 @@ struct RecordingDetailColumn: View {
             }
             if let selected = model.selected {
                 resultHeader(selected)
+                Divider()
                 if let message = model.resourcePauseMessage {
                     Label(L10n.message(message), systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 20).padding(.bottom, 10)
+                        .padding(.horizontal, 20).padding(.vertical, 6)
                         .accessibilityIdentifier("queue.resourcePause")
                 }
                 if let message = selected.lastError {
@@ -50,10 +53,13 @@ struct RecordingDetailColumn: View {
                         model.errorHandler.report(message: message)
                     }
                     .help(L10n.text("Открыть подробности последней ошибки или прерывания в отдельном окне"))
-                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.bottom, 10)
+                    .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 6)
                 }
-                if selected.activeRunId != nil && selected.pendingRunId != nil { Text(L10n.text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.")).font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
-                Divider()
+                if selected.activeRunId != nil && selected.pendingRunId != nil {
+                    Text(L10n.text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается."))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .padding(.horizontal, 20).padding(.vertical, 6)
+                }
                 if model.tab == .live, let captions = model.selectedCaptions {
                     LiveCaptionView(captions: captions).id(captions.recordingID)
                 } else if model.tab == .summary, model.summary == nil, !model.automaticSummaries {
@@ -84,7 +90,15 @@ struct RecordingDetailColumn: View {
             .sheet(isPresented: $recordingSheet) {
                 VStack(alignment: .leading, spacing: 18) {
                     Label(L10n.text("Новая запись"), systemImage: "mic.fill").font(.title2)
-                    RecordingSourceSummary(preferences: model.recordingSources, devices: model.microphoneDevices)
+                    VStack(alignment: .leading, spacing: 8) {
+                        RecordingSourceControls(
+                            preferences: Binding(get: { model.recordingSources }, set: model.setRecordingSources),
+                            devices: model.microphoneDevices, identifierPrefix: "recording"
+                        )
+                        Text(L10n.text("Выбор источников сохраняется сразу для будущих записей."))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     Text(L10n.text("Группа: %1$@ ✓", model.defaultGroup.displayName)).accessibilityIdentifier("recording.destination")
                     Text(L10n.text("Убедитесь, что участники знают о записи.")).foregroundStyle(.secondary)
                     Text(L10n.text("Запись можно сохранить и без установленных моделей.")).font(.callout).foregroundStyle(.secondary)
@@ -94,14 +108,14 @@ struct RecordingDetailColumn: View {
                             .keyboardShortcut(.cancelAction)
                             .help(L10n.text("Закрыть окно без начала записи"))
                         Button(L10n.text("Начать")) {
-                            guard model.canStartRecording else { return }
+                            guard canStartFromSheet else { return }
                             if model.requestRecording(groupID: model.defaultGroup.id) != nil {
                                 recordingSheet = false
                             }
                         }
                         .buttonStyle(.borderedProminent)
                         .keyboardShortcut(.defaultAction)
-                        .disabled(!model.canStartRecording)
+                        .disabled(!canStartFromSheet)
                         .help(L10n.text("Начать запись с выбранных источников"))
                     }
                 }.padding(28).frame(width: 440)
@@ -135,9 +149,9 @@ struct RecordingDetailColumn: View {
                     .accessibilityIdentifier("result.section")
                     // Keep the remaining controls in place when warnings appear.
                     .frame(width: RecordingResultPicker.reservedWidth(showsLive: model.selectedCaptions != nil), alignment: .leading)
-                Spacer(minLength: 0)
-                resultActions
             }
+        } resultActions: {
+            resultActions
         }
     }
 
@@ -184,28 +198,25 @@ struct RecordingDetailColumn: View {
         )
     }
 
-    private var resultActions: some View {
-        HStack(spacing: 4) {
-            ArchiveResultMenu(icon: "doc.on.doc", title: L10n.text("Копировать"),
-                              help: L10n.text("Копировать результат"), identifier: "result.copy") {
-                ForEach(model.exportParts, id: \.self) { part in
-                    Button(part.title) { model.copy(part) }
-                        .help(L10n.text("Копировать: %1$@", part.title))
-                }
+    @ViewBuilder private var resultActions: some View {
+        ArchiveResultMenu(icon: "doc.on.doc", title: L10n.text("Копировать"),
+                          help: L10n.text("Копировать результат"), identifier: "result.copy") {
+            ForEach(model.exportParts, id: \.self) { part in
+                Button(part.title) { model.copy(part) }
+                    .help(L10n.text("Копировать: %1$@", part.title))
             }
-            ArchiveResultMenu(icon: "square.and.arrow.up", title: L10n.text("Экспорт"),
-                              help: L10n.text("Экспорт"), identifier: "result.export") {
-                ForEach(model.exportParts, id: \.self) { part in
-                    Menu(part.title) {
-                        Button("Markdown (.md)") { model.export(markdown: true, part: part) }
-                            .help(L10n.text("Сохранить раздел «%1$@» в Markdown", part.title))
-                        Button(L10n.text("Текст (.txt)")) { model.export(markdown: false, part: part) }
-                            .help(L10n.text("Сохранить раздел «%1$@» в текстовый файл", part.title))
-                    }
+        }
+        ArchiveResultMenu(icon: "square.and.arrow.up", title: L10n.text("Экспорт"),
+                          help: L10n.text("Экспорт"), identifier: "result.export") {
+            ForEach(model.exportParts, id: \.self) { part in
+                Menu(part.title) {
+                    Button("Markdown (.md)") { model.export(markdown: true, part: part) }
+                        .help(L10n.text("Сохранить раздел «%1$@» в Markdown", part.title))
+                    Button(L10n.text("Текст (.txt)")) { model.export(markdown: false, part: part) }
+                        .help(L10n.text("Сохранить раздел «%1$@» в текстовый файл", part.title))
                 }
             }
         }
-        .fixedSize()
     }
 }
 
@@ -284,45 +295,6 @@ private struct RecordingResultPicker: NSViewRepresentable {
         @objc func select(_ control: NSSegmentedControl) {
             guard picker.parts.indices.contains(control.selectedSegment) else { return }
             picker.selection = picker.parts[control.selectedSegment]
-        }
-    }
-}
-
-private struct RecordingSourceSummary: View {
-    let preferences: RecordingSourcePreferences
-    @ObservedObject var devices: MicrophoneDevices
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if preferences.microphoneEnabled {
-                Label(microphoneTitle, systemImage: "mic")
-                if case .device(let uid, let name) = preferences.microphone,
-                   let actual = devices.snapshot.candidates(for: preferences.microphone).first, actual.uid != uid {
-                    Text(L10n.text("%1$@ · Не подключён", name))
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if preferences.systemAudioEnabled {
-                Label(L10n.text("Системный звук"), systemImage: "speaker.wave.2")
-            }
-            if !preferences.microphoneEnabled && !preferences.systemAudioEnabled {
-                Text(L10n.text("Источники записи не выбраны")).foregroundStyle(.secondary)
-            }
-        }
-        .accessibilityIdentifier("recording.sources")
-    }
-
-    private var microphoneTitle: String {
-        if let device = devices.snapshot.candidates(for: preferences.microphone).first {
-            return preferences.microphone == .builtIn ? L10n.text("Встроенный микрофон") : device.name
-        }
-        switch preferences.microphone {
-        case .builtIn:
-            return L10n.text("%1$@ · недоступен", L10n.text("Встроенный микрофон"))
-        case .systemDefault:
-            return L10n.text("%1$@ · недоступен", L10n.text("Как в настройках macOS"))
-        case let .device(_, name):
-            return L10n.text("%1$@ · Не подключён", name)
         }
     }
 }
@@ -408,7 +380,7 @@ struct RecordingTitleView: View {
     @FocusState private var focused: Bool
 
     var body: some View {
-        ZStack(alignment: .topLeading) {
+        ZStack(alignment: .leading) {
             if reservesTwoLines {
                 Text(verbatim: " ").lineLimit(2, reservesSpace: true).hidden()
             }

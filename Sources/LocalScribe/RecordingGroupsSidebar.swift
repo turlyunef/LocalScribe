@@ -27,9 +27,7 @@ struct RecordingGroupsSidebar: View {
             SidebarActions {
                 expansionButton(expanded: false)
                 expansionButton(expanded: true)
-                SidebarActionButton(icon: "folder.badge.plus", title: L10n.text("Добавить группу"), identifier: "groups.add") {
-                    if editor == nil { editor = GroupNameDraft(groupID: nil, name: "") }
-                }
+                SidebarAddGroupButton(title: L10n.text("Добавить группу"), identifier: "groups.add", editor: $editor)
                 .disabled(model.deletingGroupID != nil)
             } itemActions: {
                 if let newRecording {

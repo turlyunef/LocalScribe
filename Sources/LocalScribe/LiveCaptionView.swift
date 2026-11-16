@@ -17,7 +17,9 @@ struct LiveCaptionControl: View {
     }
 
     private static func button(running: Bool, action: @escaping () -> Void) -> some View {
-        Button(running ? L10n.text("Остановить предрасшифровку") : L10n.text("Начать предрасшифровку"), action: action)
+        let title = L10n.text(running ? "Остановить предрасшифровку" : "Начать предрасшифровку")
+        return Button(title, systemImage: running ? "captions.bubble.fill" : "captions.bubble", action: action)
+            .help(title)
             .accessibilityIdentifier(running ? "recording.liveCaptions.stop" : "recording.liveCaptions.start")
     }
 

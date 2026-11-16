@@ -741,10 +741,7 @@ struct QueueJobID: Hashable, Sendable {
         if backgroundRecognition != draft.backgroundRecognition { backgroundRecognition = draft.backgroundRecognition }
         if automaticLiveCaptions != draft.automaticLiveCaptions { automaticLiveCaptions = draft.automaticLiveCaptions }
         if automaticSummaries != draft.automaticSummaries { automaticSummaries = draft.automaticSummaries }
-        if recordingSources != draft.recordingSources {
-            draft.recordingSources.save(to: userDefaults)
-            recordingSources = draft.recordingSources
-        }
+        setRecordingSources(draft.recordingSources)
         if applicationLanguage != draft.applicationLanguage {
             userDefaults.set(draft.applicationLanguage.rawValue, forKey: ApplicationLanguage.defaultsKey)
         }
@@ -752,6 +749,12 @@ struct QueueJobID: Hashable, Sendable {
             userDefaults.set(draft.applicationTheme.rawValue, forKey: ApplicationTheme.defaultsKey)
             draft.applicationTheme.apply()
         }
+    }
+
+    func setRecordingSources(_ preferences: RecordingSourcePreferences) {
+        guard preferences != recordingSources else { return }
+        preferences.save(to: userDefaults)
+        recordingSources = preferences
     }
 
     private func writableAnonymizationStore() throws -> AnonymizationSettingsStore {

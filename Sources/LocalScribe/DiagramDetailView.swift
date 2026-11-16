@@ -41,13 +41,11 @@ struct DiagramDetailColumn: View {
             } actions: {
                 diagramActions(diagram)
             } result: {
-                HStack(spacing: 8) {
-                    Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(diagram.byteSize.formatted(.byteCount(style: .file).locale(L10n.locale))) · \(diagram.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale)))")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Spacer(minLength: 0)
-                    if workspace.result != nil { resultActions }
-                }
+                Text("\(diagram.pixelWidth)×\(diagram.pixelHeight) · \(diagram.byteSize.formatted(.byteCount(style: .file).locale(L10n.locale))) · \(diagram.createdAt.formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale)))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } resultActions: {
+                if workspace.result != nil { resultActions }
             }
             Divider()
             diagramContent(diagram)
@@ -129,27 +127,24 @@ struct DiagramDetailColumn: View {
         }
     }
 
-    private var resultActions: some View {
+    @ViewBuilder private var resultActions: some View {
         let parts = workspace.resultTabs + [.all]
-        return HStack(spacing: 4) {
-            ArchiveResultMenu(icon: "doc.on.doc", title: L10n.text("Копировать"),
-                              help: L10n.text("Копировать результат"), identifier: "diagrams.copy") {
-                ForEach(parts, id: \.self) { part in
-                    Button(part.title) { workspace.copy(part) }
-                }
-            }
-            ArchiveResultMenu(icon: "square.and.arrow.up", title: L10n.text("Экспорт"),
-                              help: L10n.text("Экспорт"), identifier: "diagrams.save") {
-                ForEach(parts, id: \.self) { part in
-                    Menu(part.title) {
-                        Button("Markdown (.md)") { workspace.presentExportPanel(part: part, format: .markdown) }
-                        Button(L10n.text("Текст (.txt)")) { workspace.presentExportPanel(part: part, format: .plainText) }
-                    }
-                }
-                Button("PlantUML (.puml)") { workspace.presentExportPanel(part: .all, format: .plantuml) }
+        ArchiveResultMenu(icon: "doc.on.doc", title: L10n.text("Копировать"),
+                          help: L10n.text("Копировать результат"), identifier: "diagrams.copy") {
+            ForEach(parts, id: \.self) { part in
+                Button(part.title) { workspace.copy(part) }
             }
         }
-        .fixedSize()
+        ArchiveResultMenu(icon: "square.and.arrow.up", title: L10n.text("Экспорт"),
+                          help: L10n.text("Экспорт"), identifier: "diagrams.save") {
+            ForEach(parts, id: \.self) { part in
+                Menu(part.title) {
+                    Button("Markdown (.md)") { workspace.presentExportPanel(part: part, format: .markdown) }
+                    Button(L10n.text("Текст (.txt)")) { workspace.presentExportPanel(part: part, format: .plainText) }
+                }
+            }
+            Button("PlantUML (.puml)") { workspace.presentExportPanel(part: .all, format: .plantuml) }
+        }
     }
 
     @ViewBuilder private func previewSection(_ diagram: DiagramManifest) -> some View {

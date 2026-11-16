@@ -43,12 +43,13 @@ final class ContentLayoutTests: XCTestCase {
         return nil
     }
 
-    private func host<V: View>(_ view: V, width: CGFloat, height: CGFloat = 700) -> (NSHostingView<V>, NSWindow) {
+    private func host<V: View>(_ view: V, width: CGFloat, height: CGFloat = 700,
+                               styleMask: NSWindow.StyleMask = [.titled]) -> (NSHostingView<V>, NSWindow) {
         _ = NSApplication.shared
         NSApplication.shared.accessibilitySetValue(true, forAttribute: .init(rawValue: "AXEnhancedUserInterface"))
         let hosting = NSHostingView(rootView: view)
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: width, height: height),
-                              styleMask: [.titled], backing: .buffered, defer: false)
+                              styleMask: styleMask, backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.contentView = hosting
         window.orderFront(nil)
@@ -347,6 +348,15 @@ final class ContentLayoutTests: XCTestCase {
         XCTAssertEqual(SettingsDraft(model: model).recordingSources, RecordingSourcePreferences())
         XCTAssertEqual(RecordingSourcePreferences(defaults: defaults), RecordingSourcePreferences())
 
+        var globalSources = model.recordingSources
+        globalSources.systemAudioEnabled = true
+        model.setRecordingSources(globalSources)
+        XCTAssertEqual(RecordingSourcePreferences(defaults: defaults), globalSources)
+        XCTAssertTrue(draft.recordingSources.systemAudioEnabled)
+        XCTAssertFalse(draft.recordingSources.microphoneEnabled)
+        XCTAssertEqual(draft.recordingSources.microphone, .device(uid: "usb", name: "USB Mic"))
+
+        draft.recordingSources.systemAudioEnabled = false
         try model.applySettings(draft)
         XCTAssertFalse(model.recordingSources.hasEnabledSource)
         XCTAssertEqual(RecordingSourcePreferences(defaults: defaults), draft.recordingSources)
@@ -689,6 +699,78 @@ final class ContentLayoutTests: XCTestCase {
         }
     }
 
+    func testSettingsGearFollowsSidebarVisibility() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let model = AppModel(repository: try RecordingRepository(root: root), startServices: false)
+        let (hosting, window) = host(ContentView(model: model), width: 850,
+                                     styleMask: [.titled, .closable, .miniaturizable, .resizable])
+        defer { window.close() }
+        window.makeKeyAndOrderFront(nil)
+        try await settle(hosting)
+
+        let toolbar = try XCTUnwrap(window.toolbar)
+        let settings = NSToolbarItem.Identifier("workspace.settings")
+        let expanded: [NSToolbarItem.Identifier] =
+            [.flexibleSpace, settings, .toggleSidebar, .sidebarTrackingSeparator]
+
+        func waitForToolbar(_ items: [NSToolbarItem.Identifier]) async throws {
+            for _ in 0..<20 {
+                try await settle(hosting)
+                if toolbar.itemIdentifiers == items { return }
+            }
+            XCTFail("Unexpected toolbar items: \(toolbar.itemIdentifiers)")
+        }
+
+        func click(_ location: NSPoint) throws {
+            let events = try [NSEvent.EventType.leftMouseDown, .leftMouseUp].map { type in
+                try XCTUnwrap(NSEvent.mouseEvent(with: type, location: location, modifierFlags: [],
+                                                timestamp: ProcessInfo.processInfo.systemUptime,
+                                                windowNumber: window.windowNumber, context: nil,
+                                                eventNumber: 0, clickCount: 1, pressure: 1))
+            }
+            NSApp.postEvent(events[1], atStart: false)
+            NSApp.sendEvent(events[0])
+            while let event = NSApp.nextEvent(matching: .leftMouseUp, until: Date(), inMode: .default, dequeue: true) {
+                NSApp.sendEvent(event)
+            }
+        }
+
+        XCTAssertEqual(toolbar.itemIdentifiers, expanded)
+        XCTAssertTrue(toolbar.visibleItems?.contains { $0.itemIdentifier == settings } == true)
+        XCTAssertTrue(window.titlebarAppearsTransparent)
+        XCTAssertEqual(window.titlebarSeparatorStyle, .none)
+        for edge in [NSRectEdge.minX, .maxX, .minY, .maxY] {
+            let toggle = try XCTUnwrap(toolbar.items.first { $0.itemIdentifier == .toggleSidebar })
+            XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(toggle.action), to: toggle.target, from: toggle))
+            try await waitForToolbar([])
+
+            let reveal = try XCTUnwrap(window.titlebarAccessoryViewControllers
+                .flatMap { subviews($0.view) }
+                .first { $0.accessibilityIdentifier() == "workspace.revealSidebar" })
+            let bounds = reveal.convert(reveal.bounds.insetBy(dx: 2, dy: 2), to: nil)
+            let point: NSPoint
+            switch edge {
+            case .minX: point = NSPoint(x: bounds.minX, y: bounds.midY)
+            case .maxX: point = NSPoint(x: bounds.maxX, y: bounds.midY)
+            case .minY: point = NSPoint(x: bounds.midX, y: bounds.minY)
+            case .maxY: point = NSPoint(x: bounds.midX, y: bounds.maxY)
+            @unknown default: continue
+            }
+            let titlebarHit = window.contentView?.superview?.hitTest(point)
+            XCTAssertTrue(titlebarHit?.isDescendant(of: reveal) == true, "Edge \(edge)")
+            try click(point)
+            try await waitForToolbar(expanded)
+            XCTAssertFalse(window.titlebarAccessoryViewControllers.contains { reveal.isDescendant(of: $0.view) })
+        }
+        XCTAssertTrue(toolbar.visibleItems?.contains { $0.itemIdentifier == settings } == true)
+        let gear = try XCTUnwrap(toolbar.items.first { $0.itemIdentifier == settings })
+        XCTAssertTrue(NSApp.sendAction(try XCTUnwrap(gear.action), to: gear.target, from: gear))
+        XCTAssertNotNil(model.settingsWindow.window)
+        model.settingsWindow.window?.close()
+        await model.shutdown()
+    }
+
     func testResultHeaderOmitsLanguageForRussianAndEnglishSummaries() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -991,8 +1073,30 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         diagram.pixelWidth = 4; diagram.pixelHeight = 4
         diagram.byteSize = Int64(png.length)
         diagram.sha256 = try Disk.hash(folder.appendingPathComponent("original.png"))
+        let run = DiagramRunInfo(sourceHash: diagram.sha256, modelID: "diagram", profileHash: "test")
+        let runFolder = diagramRepository.run(diagram.id, run.id)
+        try Disk.write(run, to: runFolder.appendingPathComponent("run.json"))
+        let result = DiagramResult(fingerprint: run.fingerprint, nodes: [DiagramNode(id: "1", label: "Начало")], edges: [])
+        try Disk.write(result, to: runFolder.appendingPathComponent("result.json"))
+        diagram.activeRunId = run.id
+        diagram.state = .completed
         try await diagramArchive.save(diagram)
         await model.reloadDiagrams()
+
+        let textArchive = try XCTUnwrap(model.textArchive)
+        let source = TextRevision(id: UUID().uuidString, text: "Отчёт")
+        let generated = TextRevision(id: UUID().uuidString, text: source.text)
+        let card = try await textArchive.importCard(.init(bytes: Data(source.text.utf8), importedNameStem: "Отчёт",
+                                                         sourceFormat: .txt, source: source))
+        try await textArchive.updateCard(card.id) { card in
+            let input = RunInput(source: source, profileID: "anon", packageID: "test", dataTypes: ["ФИО"])
+            card.latestAttempt = AnonymizationAttempt(
+                state: .failed, expectedResultRevisionID: generated.id, input: input,
+                failure: .processing("Обработка прервана.\nСохранён предыдущий результат.\nПопробуйте ещё раз."))
+            card.publishedResult = AnonymizationResult(input: input, generatedText: generated, text: generated,
+                                                       downloadNameStem: "Отчёт", bodyReplacementCount: 0, pairs: [])
+        }
+        await model.reloadTexts()
 
         let (hosting, window) = host(ContentView(model: model), width: 850)
         defer { window.close() }
@@ -1000,6 +1104,13 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
 
         func frame(_ id: String) throws -> NSRect {
             try XCTUnwrap(findElement(id, in: hosting)?.accessibilityFrame?(), id)
+        }
+        func assertResultPositions(_ ids: [String], match expected: [NSRect]) throws {
+            for (id, reference) in zip(ids, expected) {
+                let actual = try frame(id)
+                XCTAssertEqual(actual.midX, reference.midX, accuracy: 1, id)
+                XCTAssertEqual(actual.midY, reference.midY, accuracy: 1, id)
+            }
         }
         func segment(_ title: String) throws -> AnyObject {
             let picker = try XCTUnwrap(findElement("workspace.mode", in: hosting))
@@ -1035,6 +1146,12 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         XCTAssertEqual(recordingActions[1].maxX, searchFrame.maxX, accuracy: 1)
         XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
         XCTAssertNil(findElement("diagrams.import", in: hosting))
+        let resultIDs = ["result.copy", "result.export"]
+        let resultFrames = try resultIDs.map(frame)
+        let actionFrame = try frame("recording.showAudio")
+        XCTAssertGreaterThan(actionFrame.minY, resultFrames[0].maxY)
+        // Accessibility frames reflect the native controls' insets within each row.
+        XCTAssertLessThanOrEqual(actionFrame.minY - resultFrames[0].maxY, 14)
 
         _ = try segment("Схемы").accessibilityPerformPress?()
         try await settle(hosting)
@@ -1049,18 +1166,44 @@ final class DiagramModeSwitchLayoutTests: XCTestCase {
         let importFrame = try frame("diagrams.import")
         XCTAssertEqual(importFrame, recordingActions[1])
         XCTAssertEqual(model.selection, recording.id)
+        let diagramRow = try XCTUnwrap(findElement("diagrams.sidebar.diagram.\(diagram.id)", in: hosting))
+        _ = diagramRow.accessibilityPerformPress?()
+        try await settle(hosting)
+        try assertResultPositions(["diagrams.copy", "diagrams.save"], match: resultFrames)
 
         _ = try segment("Обезличивание").accessibilityPerformPress?()
         try await settle(hosting)
         XCTAssertEqual(try frame("texts.search"), searchFrame)
         XCTAssertEqual(try frame("texts.import"), importFrame)
         XCTAssertEqual(try groupButtons.map { try frame("texts.groups.\($0)") }, groupFrames)
+        let textRow = try XCTUnwrap(findElement("texts.sidebar.card.\(card.id)", in: hosting))
+        _ = textRow.accessibilityPerformPress?()
+        try await settle(hosting)
+        try assertResultPositions(["texts.detail.copy", "texts.detail.download"], match: resultFrames)
+        XCTAssertLessThan(try frame("texts.detail.failure").maxY, resultFrames[0].minY)
+
+        let restorationSwitch = try XCTUnwrap(findElement("texts.detail.restorationTab", in: hosting))
+        XCTAssertTrue(restorationSwitch.accessibilityPerformPress?() ?? false)
+        try await settle(hosting)
+        try assertResultPositions(["texts.detail.copy", "texts.detail.download"], match: resultFrames)
+        let restorationActions = try ["texts.restoration.import", "texts.restoration.paste",
+                                      "texts.detail.restorationTab", "texts.detail.restoration.retry",
+                                      "texts.detail.delete"].map(frame)
+        for action in restorationActions {
+            XCTAssertEqual(action.midY, restorationActions[0].midY, accuracy: 2)
+            XCTAssertGreaterThan(action.minY, resultFrames[0].maxY)
+        }
+        for (left, right) in zip(restorationActions, restorationActions.dropFirst()) {
+            XCTAssertLessThanOrEqual(left.maxX, right.minX)
+        }
+        XCTAssertLessThanOrEqual(try XCTUnwrap(restorationActions.last).maxX, resultFrames[1].maxX + 1)
 
         _ = try segment("Записи").accessibilityPerformPress?()
         try await settle(hosting)
         XCTAssertNotNil(findElement("sidebar.recording.\(recording.id)", in: hosting))
         XCTAssertNil(findElement("diagrams.import", in: hosting))
         XCTAssertEqual(try frame("workspace.mode"), switchFrame)
+        try assertResultPositions(resultIDs, match: resultFrames)
         await model.shutdown()
     }
     private func labelText(_ object: NSObject) -> String? {
