@@ -330,6 +330,23 @@ struct ModelSettings: View {
                 Text(L10n.text("Выбранные модели применяются к новым заданиям. Сохранённые записи меняются только по команде «Продолжить», «Обработать заново» или «Пересоздать итоги»."))
                     .font(.caption).foregroundStyle(.secondary)
             }
+            if recognitionDictionarySupported {
+                Section(L10n.text("Словарь распознавания")) {
+                    TextEditor(text: $draft.recognitionDictionaryText)
+                        .font(.system(size: NSFont.systemFontSize))
+                        .frame(minHeight: 72)
+                        .accessibilityLabel(L10n.text("Словарь распознавания"))
+                        .accessibilityIdentifier("settings.recognitionDictionary")
+                    Text(L10n.text("Один термин на строку: названия продуктов, аббревиатуры, имена участников. Модель получает их как подсказку по написанию при расшифровке новых заданий. Список общий для WhisperKit и Qwen3-ASR и сохраняется, даже если поле сейчас скрыто."))
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("settings.recognitionDictionary.hint")
+                    if let error = recognitionDictionaryError {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("settings.recognitionDictionary.error")
+                    }
+                }
+            }
             Section(L10n.text("Загрузить модели записей")) {
                 asrModelPicker
                 taskModelPicker(L10n.text("Итоги"), task: .summary, candidates: summaryProfiles,
@@ -668,6 +685,16 @@ struct ModelSettings: View {
     private var selectedASRProfile: ModelProfile? {
         let id = draft.modelIDs[.asr] ?? model.modelLibrary.selectedByRole[ModelRole.asr.rawValue]
         return profiles.first { $0.id == id && model.modelLibrary.isInstalled($0) }
+    }
+    /// The dictionary hint field follows the picker choice, including a profile
+    /// that is selected but not downloaded yet.
+    private var recognitionDictionarySupported: Bool {
+        guard let backend = profiles.first(where: { $0.id == asrID && $0.purpose == .asr })?.resolvedASRBackend else { return false }
+        return RecognitionDictionary.supportsHint(backend: backend)
+    }
+    private var recognitionDictionaryError: String? {
+        do { _ = try RecognitionDictionary.normalize(draft.recognitionDictionaryLines); return nil }
+        catch { return (error as? ScribeError)?.localizedDescription ?? error.localizedDescription }
     }
     private func isInstalled(_ profile: ModelProfile) -> Bool {
         profile.effectiveSupportedTasks.isEmpty

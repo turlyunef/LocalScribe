@@ -41,7 +41,8 @@ actor Pipeline {
             let capture = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
             guard stage == .transcribing, info.liveCapture == true, info.sourceHash == "capture:" + info.id,
                   manifest.pendingRunId == info.id, capture.schemaVersion == 1, capture.id == info.id, capture.fingerprint == info.fingerprint,
-                  capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs else { throw ScribeError.message("Некорректное задание фонового распознавания") }
+                  capture.modelIDs == info.modelIDs, capture.auxiliaryModelIDs == info.auxiliaryModelIDs,
+                  capture.recognitionTerms == info.recognitionTerms else { throw ScribeError.message("Некорректное задание фонового распознавания") }
         } else {
             guard info.sourceHash == manifest.sha256, manifest.sourceComplete, manifest.durationMs > 0,
                   try Disk.hash(recording.appendingPathComponent(manifest.originalRelativePath)) == info.sourceHash else { throw ScribeError.message("Исходник изменился или не завершён") }

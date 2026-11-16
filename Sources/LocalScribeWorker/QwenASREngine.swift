@@ -10,15 +10,19 @@ final class QwenASREngine: ASREngine {
     let capabilities = ASRCapabilities(inputModes: [.offline], wordTimings: .available)
     struct Hypothesis { let text: String; let language: String? }
     struct AlignedWord { let text: String; let start: Double; let end: Double }
-    typealias Recognize = ([Float]) throws -> Hypothesis
+    typealias Recognize = ([Float], String) throws -> Hypothesis
     typealias Align = ([Float], String) throws -> [AlignedWord]
     private let transcribe: Recognize
     private let align: Align
     private let warning: @Sendable (String) -> Void
     private let metrics: ASRMetricsRecorder?
+    /// Sanitized hint context passed to every generateSingleChunk call; empty
+    /// when the run has no recognition dictionary.
+    private let hintContext: String
 
-    init(asr: URL, tokenizer: URL, aligner: URL, metrics: ASRMetricsRecorder? = nil, warning: @escaping @Sendable (String) -> Void = { _ in }) throws {
+    init(asr: URL, tokenizer: URL, aligner: URL, terms: [String]? = nil, metrics: ASRMetricsRecorder? = nil, warning: @escaping @Sendable (String) -> Void = { _ in }) throws {
         self.warning = warning; self.metrics = metrics
+        self.hintContext = Self.buildContext(for: terms)
         metrics?.backend("qwen3", policy: Self.policyID)
         let started = ProcessInfo.processInfo.systemUptime
         defer { metrics?.modelLoaded(seconds: ProcessInfo.processInfo.systemUptime - started) }
@@ -31,9 +35,10 @@ final class QwenASREngine: ASREngine {
         try Task.checkCancellation()
         let alignment = try Qwen3ForcedAlignerModel.fromModelDirectory(aligner)
         try Task.checkCancellation()
-        transcribe = { samples in
+        let hintContext = self.hintContext
+        transcribe = { samples, _ in
             let result = try model.generateSingleChunk(audio: MLXArray(samples), maxTokens: 1024,
-                temperature: 0, context: "", language: nil)
+                temperature: 0, context: hintContext, language: nil)
             return Hypothesis(text: result.text, language: result.language)
         }
         align = { samples, text in
@@ -44,9 +49,43 @@ final class QwenASREngine: ASREngine {
         }
     }
 
-    init(warning: @escaping @Sendable (String) -> Void = { _ in }, transcribe: @escaping Recognize, align: @escaping Align) {
+    init(warning: @escaping @Sendable (String) -> Void = { _ in }, terms: [String]? = nil, transcribe: @escaping Recognize, align: @escaping Align) {
         self.warning = warning; self.metrics = nil
+        self.hintContext = Self.buildContext(for: terms)
         self.transcribe = transcribe; self.align = align
+    }
+
+    /// Build the system-level hint context. Terms are spelling hints only: the
+    /// wording keeps them applicable where they are actually heard and forbids
+    /// inserting them into silence or unrelated speech.
+    static func buildContext(for terms: [String]?) -> String {
+        let sanitized = (terms ?? []).map(Self.stripServiceMarkers).filter { !$0.isEmpty }
+        guard !sanitized.isEmpty else { return "" }
+        return "Расшифровка встречи. Если эти термины, названия и имена произносятся в аудио, передавай их написание точно как в списке: "
+            + sanitized.joined(separator: ", ")
+            + ". Не добавляй слова из списка, если они не произносятся в аудио."
+    }
+
+    /// The context is embedded into the Qwen chat template verbatim, so terms
+    /// must never be able to forge `<|im_start|>`/`<|im_end|>`/audio markers or
+    /// break out of the system message. Every `<|…|>` marker-looking span and
+    /// every control character is removed; everything else is kept for spelling.
+    static func stripServiceMarkers(_ term: String) -> String {
+        let scalars = Array(term.unicodeScalars)
+        var kept: [Unicode.Scalar] = []
+        var index = 0
+        while index < scalars.count {
+            let window = scalars[index...]
+            if window.prefix(2).elementsEqual(["<", "|"] as [Unicode.Scalar]),
+               let close = window.firstRange(of: ["|", ">"] as [Unicode.Scalar]) {
+                index = close.upperBound
+                continue
+            }
+            let scalar = scalars[index]
+            if !CharacterSet.controlCharacters.contains(scalar) { kept.append(scalar) }
+            index += 1
+        }
+        return String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func recognize(_ request: ASRRequest) async throws -> ASRResult {
@@ -77,7 +116,7 @@ final class QwenASREngine: ASREngine {
                 let aligned: [AlignedWord]
                 do {
                     let asrStarted = ProcessInfo.processInfo.systemUptime
-                    hypothesis = try transcribe(samples)
+                    hypothesis = try transcribe(samples, hintContext)
                     metrics?.backendCall(seconds: ProcessInfo.processInfo.systemUptime - asrStarted, alignment: false)
                     try Task.checkCancellation()
                     if hypothesis.text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {

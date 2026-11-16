@@ -128,6 +128,9 @@ struct QueueJobID: Hashable, Sendable {
     @Published var downloadBatch = ""
     @Published private(set) var anonymizationSettings = AnonymizationSettings()
     @Published private(set) var anonymizationSettingsDamaged = false
+    /// Normalized global recognition dictionary shared by WhisperKit and
+    /// Qwen3-ASR. Saved once in settings; a run pins its own snapshot.
+    @Published private(set) var recognitionDictionary: [String] = []
     @Published private(set) var readyPackageIDs: Set<String> = []
     private var packageReadinessLoaded = false
     let packageRegistry = ModelPackageRegistry()
@@ -139,6 +142,15 @@ struct QueueJobID: Hashable, Sendable {
               let selected = modelLibrary.activeCatalog(from: catalog, summary: summary),
               selected.models.allSatisfy({ hardware.compatibility(for: $0).isCompatible }) else { return nil }
         return selected
+    }
+
+    /// The dictionary hint applies only to WhisperKit and Qwen3-ASR jobs; other
+    /// backends never pin it, keeping their run fingerprints unchanged.
+    func recognitionTerms(for catalog: ModelCatalog) -> [String]? {
+        guard !recognitionDictionary.isEmpty,
+              let backend = catalog.models.first(where: { $0.purpose == .asr })?.resolvedASRBackend,
+              RecognitionDictionary.supportsHint(backend: backend) else { return nil }
+        return recognitionDictionary
     }
 
     func selectedTaskModel(_ task: ModelTask) -> ModelProfile? {
@@ -310,6 +322,9 @@ struct QueueJobID: Hashable, Sendable {
         self.automaticLiveCaptions = automaticLiveCaptions
         backgroundRecognition = !automaticLiveCaptions && (userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true)
         automaticSummaries = userDefaults.object(forKey: "automaticSummaries") as? Bool ?? true
+        recognitionDictionary = (userDefaults.stringArray(forKey: "recognitionDictionary") ?? []).filter {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
         recordingSources = RecordingSourcePreferences(defaults: userDefaults)
         microphoneDevices = suppliedMicrophoneDevices ?? MicrophoneDevices(observeChanges: startServices)
         workerOverride = workerExecutable
@@ -703,6 +718,7 @@ struct QueueJobID: Hashable, Sendable {
     func applySettings(_ draft: SettingsDraft) throws {
         var settings = anonymizationSettings
         try settings.applyDataTypes(draft.dataTypesLines)
+        let dictionary = try RecognitionDictionary.normalize(draft.recognitionDictionaryLines)
         let taskChanges = draft.taskModelChanges(from: self)
         let libraryChanges = draft.changedModels(in: modelLibrary)
         if !taskChanges.isEmpty || !libraryChanges.isEmpty {
@@ -738,6 +754,10 @@ struct QueueJobID: Hashable, Sendable {
         }
         if let updatedLibrary { modelLibrary = updatedLibrary }
         if settingsChanged || updatedLibrary != nil { updateModelsStatus() }
+        if dictionary != recognitionDictionary {
+            userDefaults.set(dictionary, forKey: "recognitionDictionary")
+            recognitionDictionary = dictionary
+        }
         if backgroundRecognition != draft.backgroundRecognition { backgroundRecognition = draft.backgroundRecognition }
         if automaticLiveCaptions != draft.automaticLiveCaptions { automaticLiveCaptions = draft.automaticLiveCaptions }
         if automaticSummaries != draft.automaticSummaries { automaticSummaries = draft.automaticSummaries }
@@ -1160,7 +1180,7 @@ struct QueueJobID: Hashable, Sendable {
             guard recordingID == id, !stopping, !shuttingDown, queuePauses.isEmpty,
                   generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0] else { return }
             do {
-                _ = try await archive.beginRun(id, catalog: catalog, liveCapture: true)
+                _ = try await archive.beginRun(id, catalog: catalog, liveCapture: true, recognitionTerms: recognitionTerms(for: catalog))
                 guard recordingID == id, !stopping, generation == queueGeneration,
                       admission == jobAdmission[.recording(id), default: 0] else { return }
                 await enqueueCapture(id)
@@ -1368,7 +1388,10 @@ struct QueueJobID: Hashable, Sendable {
         finalizingRecording = true
         defer { finalizingRecording = false }
         let summaryLanguage = summaryOnly ? language ?? transcript?.primaryLanguage ?? "ru" : language
-        do { m = try await archive.beginRun(m.id, catalog: catalog, summaryLanguage: summaryLanguage, summaryOnly: summaryOnly); await reload(); await enqueue(m.id) }
+        // Summary-only recreation reuses the saved transcript; the dictionary
+        // hint belongs to ASR runs only.
+        let terms = summaryOnly ? nil : recognitionTerms(for: catalog)
+        do { m = try await archive.beginRun(m.id, catalog: catalog, summaryLanguage: summaryLanguage, summaryOnly: summaryOnly, recognitionTerms: terms); await reload(); await enqueue(m.id) }
         catch { errorHandler.report(error) }
     }
     func queuePosition(for id: String) -> Int? {
@@ -1554,7 +1577,7 @@ struct QueueJobID: Hashable, Sendable {
             guard modelsReady, let selectedCatalog = activeCatalog else {
                 try await archive.update(id) { $0.state = .waitingForModels }; return
             }
-            m = try await archive.beginRun(m.id, catalog: selectedCatalog)
+            m = try await archive.beginRun(m.id, catalog: selectedCatalog, recognitionTerms: recognitionTerms(for: selectedCatalog))
         }
         var info = try await archive.perform { try $0.resumeRun(id, catalog: catalog) }
         guard activeJob == job else { throw CancellationError() }

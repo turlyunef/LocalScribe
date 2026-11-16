@@ -76,9 +76,9 @@ final class QwenASREngineTests: XCTestCase {
         var info = RunInfo(sourceHash: "source", profileHash: catalog.fingerprint)
         info.auxiliaryModelIDs = ["aligner": "aligner"]
         let factory = ASREngineFactory(loadWhisper: { _, _, _, _ in XCTFail("wrong backend"); throw CancellationError() },
-            loadQwen: { pinned, _, _, _ in
+            loadQwen: { _, pinned, _, _, _ in
                 XCTAssertEqual(pinned.models.last?.id, "aligner")
-                return QwenASREngine(transcribe: { _ in .init(text: "", language: nil) }, align: { _, _ in [] })
+                return QwenASREngine(transcribe: { _, _ in .init(text: "", language: nil) }, align: { _, _ in [] })
             })
         let recognizer = try await factory.make(info: info, catalog: catalog, models: URL(fileURLWithPath: "/missing"), metrics: nil, warning: { _ in })
         XCTAssertEqual(recognizer.capabilities.inputModes, [.offline])
@@ -103,7 +103,7 @@ final class QwenASREngineTests: XCTestCase {
         try Disk.directory(root); defer { try? FileManager.default.removeItem(at: root) }
         let url = try audio(root, milliseconds: 60_125)
         var lengths: [Int] = []
-        let engine = QwenASREngine(transcribe: { samples in
+        let engine = QwenASREngine(transcribe: { samples, _ in
             lengths.append(samples.count / 16)
             return .init(text: "Тест", language: "Russian")
         }, align: { samples, _ in
@@ -125,7 +125,7 @@ final class QwenASREngineTests: XCTestCase {
         try Disk.directory(root); defer { try? FileManager.default.removeItem(at: root) }
         let url = try audio(root, milliseconds: 1000)
         let task = Task {
-            let engine = QwenASREngine(transcribe: { _ in
+            let engine = QwenASREngine(transcribe: { _, _ in
                 withUnsafeCurrentTask { $0?.cancel() }
                 return .init(text: "Text", language: "English")
             }, align: { _, _ in XCTFail("alignment after cancellation"); return [] })

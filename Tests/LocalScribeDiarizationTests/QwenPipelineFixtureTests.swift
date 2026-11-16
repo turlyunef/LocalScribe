@@ -54,7 +54,7 @@ final class QwenPipelineFixtureTests: XCTestCase {
         try transcript.validate(durationMs: duration)
         let checkpoint = run.appendingPathComponent("asr/part-0.json"), hash = try Disk.hash(checkpoint)
         let failLoading = ASREngineFactory(loadWhisper: { _, _, _, _ in XCTFail("Whisper selected for Qwen"); throw CancellationError() },
-            loadQwen: { _, _, _, _ in QwenASREngine(transcribe: { _ in XCTFail("checkpoint was not reused"); throw CancellationError() }, align: { _, _ in [] }) })
+            loadQwen: { _, _, _, _, _ in QwenASREngine(transcribe: { _, _ in XCTFail("checkpoint was not reused"); throw CancellationError() }, align: { _, _ in [] }) })
         let resumed = try Pipeline(command: command, engineFactory: failLoading, emit: { _, _, _ in })
         _ = try await resumed.perform()
         XCTAssertEqual(try Disk.hash(checkpoint), hash)

@@ -158,11 +158,11 @@ public actor RecordingCoordinator {
         publish(try repository.load(id))
     }
     public func beginRun(_ id: String, catalog: ModelCatalog, summaryLanguage: String? = nil,
-                         summaryOnly: Bool = false, liveCapture: Bool = false) throws -> Manifest {
+                         summaryOnly: Bool = false, liveCapture: Bool = false, recognitionTerms: [String]? = nil) throws -> Manifest {
         initialize()
         var manifest = try repository.load(id)
         _ = try repository.beginRun(&manifest, catalog: catalog, summaryLanguage: summaryLanguage,
-                                    summaryOnly: summaryOnly, liveCapture: liveCapture)
+                                    summaryOnly: summaryOnly, liveCapture: liveCapture, recognitionTerms: recognitionTerms)
         publish(manifest)
         return manifest
     }

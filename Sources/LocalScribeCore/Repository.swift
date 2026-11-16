@@ -88,9 +88,15 @@ public struct RecordingRepository: Sendable {
         published = true
         return manifest
     }
-    public func beginRun(_ manifest: inout Manifest, catalog: ModelCatalog, summaryLanguage: String? = nil, summaryOnly: Bool = false, liveCapture: Bool = false) throws -> RunInfo {
+    public func beginRun(_ manifest: inout Manifest, catalog: ModelCatalog, summaryLanguage: String? = nil, summaryOnly: Bool = false, liveCapture: Bool = false, recognitionTerms: [String]? = nil) throws -> RunInfo {
         if manifest.sourceComplete, manifest.durationMs > Manifest.maximumDurationMs {
             throw ScribeError.message("Запись длиннее 3 часов. Автоматическое усечение отключено.")
+        }
+        if let recognitionTerms, !recognitionTerms.isEmpty {
+            try RecognitionDictionary.validate(recognitionTerms)
+            guard recognitionTerms == RecognitionDictionary.sanitized(recognitionTerms) else {
+                throw ScribeError.message("Некорректный снимок словаря распознавания")
+            }
         }
         if liveCapture {
             guard catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {
@@ -101,6 +107,7 @@ public struct RecordingRepository: Sendable {
             }
         }
         var info = RunInfo(sourceHash: manifest.sha256, profileHash: catalog.fingerprint, summaryLanguage: summaryLanguage)
+        if let recognitionTerms, !recognitionTerms.isEmpty { info.recognitionTerms = recognitionTerms }
         var modelIDs: [String: String] = [:]
         for profile in catalog.models {
             guard let role = profile.purpose else { continue }

@@ -105,11 +105,15 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public static let currentPipelineVersion = "1.0.0-audio2-asr12-live1-diarization4-summary17"
+    public static let currentPipelineVersion = "1.0.0-audio2-asr13-live1-diarization4-summary17"
     public var pipelineVersion = RunInfo.currentPipelineVersion
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
     public var auxiliaryModelIDs: [String: String]?
+    /// Normalized recognition dictionary snapshot pinned when the ASR job was
+    /// created; nil for runs made without a dictionary (all older runs). Terms
+    /// are single-line, so the joined fingerprint input is unambiguous.
+    public var recognitionTerms: [String]?
     public var transcriptSourceRunID: String?
     /// Nil identifies archives written before explicit result provenance.
     public var manualEdits: Bool? = false
@@ -118,7 +122,14 @@ public struct RunInfo: Codable, Sendable {
     public init(id: String = UUID().uuidString, sourceHash: String, profileHash: String, summaryLanguage: String? = nil) {
         self.id = id; self.sourceHash = sourceHash; self.profileHash = profileHash; self.summaryLanguage = summaryLanguage
     }
-    public var fingerprint: String { Disk.fingerprint(sourceHash + profileHash + pipelineVersion) }
+    /// Runs without a dictionary keep the historical formula; a non-empty
+    /// dictionary changes recognition and therefore the checkpoint identity.
+    public var fingerprint: String {
+        guard let terms = recognitionTerms, !terms.isEmpty else {
+            return Disk.fingerprint(sourceHash + profileHash + pipelineVersion)
+        }
+        return Disk.fingerprint(sourceHash + profileHash + pipelineVersion + "recognition:" + terms.joined(separator: "\n"))
+    }
     public func modelID(for role: ModelRole) throws -> String {
         let id = modelIDs?[role.rawValue] ?? role.rawValue
         guard ModelProfile.safeComponent(id) else { throw ScribeError.message("Недопустимый идентификатор модели") }

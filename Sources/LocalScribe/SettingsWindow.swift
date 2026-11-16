@@ -19,6 +19,7 @@ import LocalScribeCore
     @Published var diagramModelID: String
     @Published var anonymizationProfileID: String
     @Published var dataTypesText: String
+    @Published var recognitionDictionaryText: String
     private var savedRecordingSources: RecordingSourcePreferences
     private var recordingSourcesObserver: AnyCancellable?
     private let initialTaskSelections: [ModelTask: String]
@@ -40,6 +41,7 @@ import LocalScribeCore
         anonymizationProfileID = anonymization
         initialTaskSelections = [.summary: summary, .diagramRecognition: diagram, .anonymization: anonymization]
         dataTypesText = settings.dataTypes.joined(separator: "\n")
+        recognitionDictionaryText = model.recognitionDictionary.joined(separator: "\n")
         recordingSourcesObserver = model.$recordingSources.dropFirst().sink { [weak self] sources in
             self?.refreshRecordingSources(sources)
         }
@@ -61,6 +63,7 @@ import LocalScribeCore
     }
 
     var dataTypesLines: [String] { dataTypesText.components(separatedBy: .newlines) }
+    var recognitionDictionaryLines: [String] { recognitionDictionaryText.components(separatedBy: .newlines) }
     func taskModelChanges(from model: AppModel) -> [ModelTask: String] {
         let selections: [ModelTask: String] = [
             .summary: summaryModelID, .diagramRecognition: diagramModelID, .anonymization: anonymizationProfileID
@@ -83,6 +86,7 @@ import LocalScribeCore
             || !changedModels(in: model.modelLibrary).isEmpty
             || !taskModelChanges(from: model).isEmpty
             || AnonymizationSettings.sanitizeDataTypes(dataTypesLines) != model.anonymizationSettings.dataTypes
+            || RecognitionDictionary.sanitized(recognitionDictionaryLines) != model.recognitionDictionary
     }
 }
 

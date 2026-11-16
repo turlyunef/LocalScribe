@@ -15,7 +15,7 @@ final class GigaAMASREngineTests: XCTestCase {
         let factory = ASREngineFactory(loadWhisper: { _, _, _, _ in
             XCTFail("GigaAM used the Whisper loader")
             throw CancellationError()
-        }, loadGigaAM: { _, _, _, _ in
+        }, loadGigaAM: { _, _, _, _, _ in
             GigaAMASREngine { _ in
                 XCTFail("GigaAM tried to open closed fragments")
                 return .init(tokens: [], timestamps: [])

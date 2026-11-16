@@ -18,8 +18,8 @@ struct ASREngineFactory: Sendable {
         try await WhisperASREngine(info: info, models: models, metrics: metrics, warning: warning)
     }
 
-    typealias PinnedLoader = @Sendable (ModelCatalog, URL, ASRMetricsRecorder?, @escaping @Sendable (String) -> Void) async throws -> any ASREngine
-    var loadQwen: PinnedLoader = { pinned, root, metrics, warning in
+    typealias PinnedLoader = @Sendable (RunInfo, ModelCatalog, URL, ASRMetricsRecorder?, @escaping @Sendable (String) -> Void) async throws -> any ASREngine
+    var loadQwen: PinnedLoader = { info, pinned, root, metrics, warning in
         guard let profile = pinned.models.first(where: { $0.purpose == .asr }),
               let tokenizer = pinned.models.first(where: { $0.purpose == .tokenizer }),
               let aligner = pinned.models.first(where: { $0.id == profile.alignerID }),
@@ -31,10 +31,11 @@ struct ASREngineFactory: Sendable {
         try PinnedASRFiles.validate(tokenizer, at: root, requiring: tokenizerFiles)
         try PinnedASRFiles.validate(aligner, at: root, requiring: tokenizerFiles.union(["config.json", "model.safetensors"]))
         return try QwenASREngine(asr: root.appendingPathComponent(profile.id),
-            tokenizer: root.appendingPathComponent(tokenizer.id), aligner: root.appendingPathComponent(aligner.id), metrics: metrics, warning: warning)
+            tokenizer: root.appendingPathComponent(tokenizer.id), aligner: root.appendingPathComponent(aligner.id),
+            terms: info.recognitionTerms, metrics: metrics, warning: warning)
     }
 
-    var loadVibeVoice: PinnedLoader = { pinned, root, metrics, _ in
+    var loadVibeVoice: PinnedLoader = { _, pinned, root, metrics, _ in
         guard let profile = pinned.models.first(where: { $0.purpose == .asr }),
               let tokenizer = pinned.models.first(where: { $0.purpose == .tokenizer }),
               profile.asrPolicy == VibeVoiceASREngine.policyID, profile.tokenizerID == tokenizer.id, profile.alignerID == nil else {
@@ -51,7 +52,7 @@ struct ASREngineFactory: Sendable {
             tokenizer: root.appendingPathComponent(tokenizer.id), weightFiles: weights)
     }
 
-    var loadGigaAM: PinnedLoader = { pinned, root, metrics, _ in
+    var loadGigaAM: PinnedLoader = { _, pinned, root, metrics, _ in
         guard let profile = pinned.models.first(where: { $0.purpose == .asr }),
               let tokenizer = pinned.models.first(where: { $0.purpose == .tokenizer }),
               profile.asrPolicy == GigaAMASREngine.policyID, profile.tokenizerID == tokenizer.id, profile.alignerID == nil else {
@@ -76,9 +77,9 @@ struct ASREngineFactory: Sendable {
         case "whisper":
             try validateWhisper(pinned, at: models)
             engine = try await loadWhisper(info, models, metrics, warning)
-        case "qwen3": engine = try await loadQwen(pinned, models, metrics, warning)
-        case "vibevoice-asr": engine = try await loadVibeVoice(pinned, models, metrics, warning)
-        case "gigaam": engine = try await loadGigaAM(pinned, models, metrics, warning)
+        case "qwen3": engine = try await loadQwen(info, pinned, models, metrics, warning)
+        case "vibevoice-asr": engine = try await loadVibeVoice(info, pinned, models, metrics, warning)
+        case "gigaam": engine = try await loadGigaAM(info, pinned, models, metrics, warning)
         default: throw ScribeError.message("Движок выбранной модели распознавания не поддерживается")
         }
         try Task.checkCancellation()

@@ -153,7 +153,7 @@ final class ASREngineIntegrationTests: XCTestCase {
             let loads = Mutex(0)
             let factory = ASREngineFactory(loadWhisper: { _, _, _, _ in
                 XCTFail("Must keep the pinned VibeVoice backend"); throw CancellationError()
-            }, loadVibeVoice: { pinned, _, _, _ in
+            }, loadVibeVoice: { _, pinned, _, _, _ in
                 XCTAssertEqual(pinned.fingerprint, f.info.profileHash)
                 loads.withLock { $0 += 1 }
                 return FixtureASREngine(modes: [.offline]) { request in
@@ -201,7 +201,7 @@ final class ASREngineIntegrationTests: XCTestCase {
                 try file.write(from: buffer)
             }
             let requests = Mutex<[ASRRequest]>([])
-            let factory = ASREngineFactory(loadVibeVoice: { _, _, _, _ in
+            let factory = ASREngineFactory(loadVibeVoice: { _, _, _, _, _ in
                 FixtureASREngine(modes: [.offline]) { request in
                     requests.withLock { $0.append(request) }
                     return ASRResult(segments: [])
@@ -236,7 +236,7 @@ final class ASREngineIntegrationTests: XCTestCase {
             let part1 = f.run.appendingPathComponent("asr/part-1.json")
             let transcript = f.run.appendingPathComponent("asr-transcript.json")
             let requests = Mutex<[Range<Int>]>([])
-            let failing = ASREngineFactory(loadVibeVoice: { _, _, _, _ in
+            let failing = ASREngineFactory(loadVibeVoice: { _, _, _, _, _ in
                 FixtureASREngine(modes: [.offline]) { request in
                     if request.coreRange.lowerBound > 0 {
                         if cancel { withUnsafeCurrentTask { $0?.cancel() } }
@@ -253,7 +253,7 @@ final class ASREngineIntegrationTests: XCTestCase {
             XCTAssertFalse(FileManager.default.fileExists(atPath: part1.path))
             XCTAssertFalse(FileManager.default.fileExists(atPath: transcript.path))
             XCTAssertEqual(try f.repo.resumeRun(f.manifest.id, catalog: f.catalog).id, f.info.id)
-            let resuming = ASREngineFactory(loadVibeVoice: { _, _, _, _ in
+            let resuming = ASREngineFactory(loadVibeVoice: { _, _, _, _, _ in
                 FixtureASREngine(modes: [.offline]) { request in
                     requests.withLock { $0.append(request.coreRange) }
                     return ASRResult(segments: [])

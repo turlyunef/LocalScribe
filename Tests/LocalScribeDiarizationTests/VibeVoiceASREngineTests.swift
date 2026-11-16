@@ -31,8 +31,8 @@ final class VibeVoiceASREngineTests: XCTestCase {
         profiles[0].tokenizerID = "tokenizer"
         let catalog = ModelCatalog(models: profiles)
         let factory = ASREngineFactory(loadWhisper: { _, _, _, _ in XCTFail("wrong Whisper backend"); throw CancellationError() },
-            loadQwen: { _, _, _, _ in XCTFail("wrong Qwen backend"); throw CancellationError() },
-            loadVibeVoice: { _, _, _, _ in VibeVoiceASREngine(generate: { _ in "[]" }) })
+            loadQwen: { _, _, _, _, _ in XCTFail("wrong Qwen backend"); throw CancellationError() },
+            loadVibeVoice: { _, _, _, _, _ in VibeVoiceASREngine(generate: { _ in "[]" }) })
         let recognizer = try await factory.make(info: RunInfo(sourceHash: "source", profileHash: catalog.fingerprint),
             catalog: catalog, models: URL(fileURLWithPath: "/missing"), metrics: nil, warning: { _ in })
         XCTAssertEqual(recognizer.capabilities.inputModes, [.offline])

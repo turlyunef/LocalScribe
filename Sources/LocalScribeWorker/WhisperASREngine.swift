@@ -26,9 +26,20 @@ struct WhisperRecognitionPolicy: Sendable {
 
 final class WhisperASREngine: ASREngine {
     let capabilities = ASRCapabilities(inputModes: [.offline, .closedFragments], wordTimings: .available)
+    /// The prompt budget of the pinned WhisperKit: TextDecoder keeps at most
+    /// `Constants.maxTokenContext / 2 - 1` prompt tokens, so anything longer
+    /// would be silently trimmed there and is rejected here instead.
+    static let promptTokenBudget = 111
     static var decodingOptions: DecodingOptions {
         DecodingOptions(verbose: false, task: .transcribe, language: nil, temperatureFallbackCount: 2,
             detectLanguage: true, skipSpecialTokens: true, wordTimestamps: true, windowClipTime: 0, concurrentWorkerCount: 1)
+    }
+    private var promptTokens: [Int]?
+    /// Identical hint in primary and every recovery/review pass.
+    private var options: DecodingOptions {
+        var options = Self.decodingOptions
+        options.promptTokens = promptTokens
+        return options
     }
     private let transcribe: ([Float], DecodingOptions) async throws -> [TranscriptionResult]
     private let policy: WhisperRecognitionPolicy
@@ -47,16 +58,36 @@ final class WhisperASREngine: ASREngine {
         let folder = models.appendingPathComponent(try info.modelID(for: .asr)), tokenizer = models.appendingPathComponent(try info.modelID(for: .tokenizer))
         guard FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer.json").path), FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer_config.json").path) else { throw ScribeError.message("Отсутствует локальный токенизатор Whisper") }
         let kit = try await WhisperKit(WhisperKitConfig(modelFolder: folder.path, tokenizerFolder: tokenizer, verbose: false, logLevel: .none, prewarm: true, load: true, download: false))
+        guard let whisperTokenizer = kit.tokenizer else { throw ScribeError.message("Токенизатор Whisper не загружен") }
+        // Mirrors the SDK handling: special tokens are filtered, and an empty
+        // remainder must not produce a bare <|startofprev|> prefill.
+        self.promptTokens = try Self.promptTokens(for: info.recognitionTerms,
+            encode: { whisperTokenizer.encode(text: $0) },
+            specialTokenBegin: whisperTokenizer.specialTokens.specialTokenBegin)
         transcribe = { samples, options in try await kit.transcribe(audioArray: samples, decodeOptions: options) }
+    }
+
+    /// Encode the dictionary with the loaded model's tokenizer. The list is
+    /// encoded as a whole, so a budget violation is an error naming both counts
+    /// instead of a silent suffix trim inside WhisperKit.
+    static func promptTokens(for terms: [String]?, encode: (String) -> [Int], specialTokenBegin: Int) throws -> [Int]? {
+        guard let terms, !terms.isEmpty else { return nil }
+        let encoded = encode(terms.joined(separator: ", ")).filter { $0 < specialTokenBegin }
+        guard encoded.count <= promptTokenBudget else {
+            throw ScribeError.message("Словарь распознавания не помещается в контекст модели Whisper: \(encoded.count) токенов при лимите \(promptTokenBudget). Сократите список в настройках и повторите обработку.")
+        }
+        return encoded.isEmpty ? nil : encoded
     }
 
     /// Exercise scheduling, timestamp ownership and recovery without model weights.
     init(metrics: ASRMetricsRecorder? = nil, policy: WhisperRecognitionPolicy = .production,
          contextReview: ((ASRContextReviewBatch) throws -> Void)? = nil,
          warning: @escaping @Sendable (String) -> Void = { _ in },
+         promptTokens: [Int]? = nil,
          transcribe: @escaping ([Float], DecodingOptions) async throws -> [TranscriptionResult]) {
         self.metrics = metrics; self.policy = policy; self.warning = warning; self.transcribe = transcribe
         self.contextReview = contextReview
+        self.promptTokens = promptTokens
     }
     func recognize(_ request: ASRRequest) async throws -> ASRResult {
         try Task.checkCancellation()
@@ -78,7 +109,7 @@ final class WhisperASREngine: ASREngine {
             metrics?.window(milliseconds: end - offset, silent: energy <= 1e-12)
             if energy > 1e-12 {
                 // The SDK otherwise skips clips/tails shorter than one second.
-                let options = Self.decodingOptions
+                let options = self.options
                 let results = try await decode(samples, options: options, phase: .primary)
                 var recoveryContexts: [Range<Int>] = []
                 var recognized = mappedSegments(results, readStart: readStart, start: offset, end: end, durationMs: durationMs)
