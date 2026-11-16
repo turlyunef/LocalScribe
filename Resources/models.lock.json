@@ -2405,6 +2405,58 @@
       "supportedTasks": [
         "DIAGRAM_RECOGNITION"
       ]
+    },
+    {
+      "id": "tokenizer-gigaam-v3",
+      "repository": "csukuangfj/sherpa-onnx-nemo-transducer-giga-am-v3-russian-2025-12-16",
+      "revision": "0424d62637b37d8b7b1eb0f75a04d78dec55fdcc",
+      "license": "MIT",
+      "role": "tokenizer",
+      "name": "Токенизатор GigaAM-v3",
+      "files": [
+        {
+          "path": "tokens.txt",
+          "localPath": "tokens.txt",
+          "size": 196,
+          "sha256": "17cc514451bcceac9c280068c71502f8448f99e9fb1456b8d0761651fd0392f2"
+        }
+      ]
+    },
+    {
+      "id": "asr-gigaam-v3-rnnt-int8",
+      "repository": "csukuangfj/sherpa-onnx-nemo-transducer-giga-am-v3-russian-2025-12-16",
+      "revision": "0424d62637b37d8b7b1eb0f75a04d78dec55fdcc",
+      "license": "MIT",
+      "role": "asr",
+      "name": "GigaAM-v3 RNNT · INT8",
+      "files": [
+        {
+          "path": "decoder.onnx",
+          "localPath": "decoder.onnx",
+          "size": 3331651,
+          "sha256": "5d1cfef155d8e07f213bd2f3229b5f6c5c29355c7fa5c1b9eb62cb1925725254"
+        },
+        {
+          "path": "encoder.int8.onnx",
+          "localPath": "encoder.int8.onnx",
+          "size": 224570814,
+          "sha256": "0ec54e5f130a91c0f228d21795ede10b31c992a1f73e45dcd827e843a71a9b50"
+        },
+        {
+          "path": "joiner.onnx",
+          "localPath": "joiner.onnx",
+          "size": 1440448,
+          "sha256": "fd1d02f45c2ad3d6b67cc149811ad794ab4b020ed49a0a9e2790a8619d1cddd8"
+        }
+      ],
+      "recommendedMemoryGB": 8,
+      "workingMemoryGB": 2,
+      "tokenizerID": "tokenizer-gigaam-v3",
+      "asrBackend": "gigaam",
+      "asrPolicy": "gigaam-v3-rnnt-int8-sherpa1.13-core23s-context1s-v1",
+      "experimental": true,
+      "recommendationRank": 0,
+      "profileDescription": "Локальное распознавание русской речи на CPU. Модель обрабатывает готовые записи и может передавать английские термины кириллицей."
     }
   ]
 }

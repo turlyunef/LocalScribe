@@ -87,6 +87,9 @@ struct ContentView: View {
                 textWorkspace.stopImportAutoReveal()
             }
         }
+        .onChange(of: model.recordingID) { _, id in
+            if id != nil, model.captureCaptions?.recordingID == id { mode = .recordings }
+        }
         .disabled(blocked)
     }
 
@@ -347,6 +350,11 @@ struct ModelSettings: View {
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("settings.backgroundRecognition.modelsRequired")
                 }
+                Toggle(L10n.text("Показывать предрасшифровку в эфире"), isOn: $draft.automaticLiveCaptions)
+                    .toggleStyle(.checkbox)
+                    .disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording)
+                    .accessibilityIdentifier("settings.automaticLiveCaptions")
+                    .help(L10n.text("Открывает вкладку «В эфире» при начале записи. Язык речи совпадает с языком интерфейса."))
                 Toggle(L10n.text("Создавать автоматически итоги встречи"), isOn: $draft.automaticSummaries)
                     .toggleStyle(.checkbox)
                     .accessibilityIdentifier("settings.automaticSummaries")

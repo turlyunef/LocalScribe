@@ -93,6 +93,22 @@ final class ModelCompatibilityTests: XCTestCase {
         XCTAssertFalse(model.automaticSummaries)
         XCTAssertFalse(draft.hasChanges(from: model))
     }
+    func testGigaAMDownloadIncludesItsOwnTokenizer() throws {
+        let source = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+        let catalog = try Disk.read(ModelCatalog.self, at: source.appendingPathComponent("Resources/models.lock.json"))
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repository = try RecordingRepository(root: root)
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: "LocalScribeTests." + UUID().uuidString))
+        let model = AppModel(repository: repository, startServices: false, userDefaults: defaults, catalog: catalog, hardware: hardware)
+
+        let profileID = "asr-gigaam-v3-rnnt-int8"
+        let download = model.audioStackToInstall(asrID: profileID)
+        XCTAssertEqual(download.map(\.id), ["tokenizer-gigaam-v3", profileID, "diarization"])
+        XCTAssertEqual(download.prefix(2).flatMap(\.files).count, 4)
+        XCTAssertFalse(try XCTUnwrap(download.first { $0.id == profileID }).supportsClosedFragments)
+    }
+
     func testQwenInstallationIncludesAlignerAndSelectionDoesNotRewriteArchive() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

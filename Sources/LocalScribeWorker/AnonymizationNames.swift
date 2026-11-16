@@ -38,17 +38,31 @@ enum AnonymizationNames {
         let canonical: String
         let nameCase: RussianNameCase
         let feminine: Bool
+        let hasPatronymic: Bool
+        let surnameFirst: Bool
+
+        fileprivate init(canonical: String, nameCase: RussianNameCase, feminine: Bool,
+                         hasPatronymic: Bool = false, surnameFirst: Bool = false) {
+            self.canonical = canonical
+            self.nameCase = nameCase
+            self.feminine = feminine
+            self.hasPatronymic = hasPatronymic
+            self.surnameFirst = surnameFirst
+        }
     }
 
-    /// Analyzes «Имя Фамилия». Returns nil when the fragment is not a
-    /// two-word capitalized Cyrillic pair with recognized endings — those
-    /// values keep their raw form as the substitution key and never decline.
+    /// Analyzes «Имя Фамилия», optionally with a patronymic and surname-first
+    /// order for full names. Legacy keys use the original two-word analysis.
     static func analyze(_ fragment: String, legacy: Bool = false) -> Analysis? {
         let parts = legacy
             ? fragment.split(separator: " ", omittingEmptySubsequences: false).map(String.init)
             : fragment.split(whereSeparator: \.isWhitespace).map(String.init)
+        if !legacy, parts.count == 3 { return analyzeFullName(parts) }
         guard parts.count == 2 else { return nil }
-        let first = parts[0], last = parts[1]
+        return analyzePair(first: parts[0], last: parts[1], legacy: legacy)
+    }
+
+    private static func analyzePair(first: String, last: String, legacy: Bool = false) -> Analysis? {
         guard isCyrillicWord(first), isCyrillicWord(last),
               isCapitalized(first), isCapitalized(last),
               first.unicodeScalars.count >= 2, last.unicodeScalars.count >= 3 else { return nil }
@@ -149,9 +163,57 @@ enum AnonymizationNames {
         return Analysis(canonical: masculineCanonical(first, last), nameCase: .nominative, feminine: false)
     }
 
+    private static func analyzeFullName(_ parts: [String]) -> Analysis? {
+        for surnameFirst in [false, true] {
+            let first = parts[surnameFirst ? 1 : 0]
+            let patronymic = parts[surnameFirst ? 2 : 1]
+            let last = parts[surnameFirst ? 0 : 2]
+            guard let pair = analyzePair(first: first, last: last),
+                  let canonicalPatronymic = canonicalPatronymic(patronymic, for: pair) else { continue }
+            let canonicalPair = pair.canonical.split(separator: " ", maxSplits: 1)
+            return Analysis(canonical: "\(canonicalPair[0]) \(canonicalPatronymic) \(canonicalPair[1])",
+                            nameCase: pair.nameCase, feminine: pair.feminine,
+                            hasPatronymic: true, surnameFirst: surnameFirst)
+        }
+        return nil
+    }
+
+    private static func canonicalPatronymic(_ word: String, for name: Analysis) -> String? {
+        guard isCyrillicWord(word), isCapitalized(word) else { return nil }
+        let suffixes: [String]
+        if name.feminine {
+            switch name.nameCase {
+            case .nominative: suffixes = ["а"]
+            case .genitive: suffixes = ["ы"]
+            case .dative, .prepositional: suffixes = ["е"]
+            case .accusative: suffixes = ["у"]
+            case .instrumental: suffixes = ["ой", "ою"]
+            }
+        } else {
+            switch name.nameCase {
+            case .nominative: suffixes = [""]
+            case .genitive, .accusative: suffixes = ["а"]
+            case .dative: suffixes = ["у"]
+            case .instrumental: suffixes = ["ем", "ом"]
+            case .prepositional: suffixes = ["е"]
+            }
+        }
+        for suffix in suffixes where suffix.isEmpty || word.hasSuffix(suffix) {
+            let stem = String(word.dropLast(suffix.count))
+            if name.feminine, ["овн", "евн", "ичн"].contains(where: stem.hasSuffix) {
+                return stem + "а"
+            }
+            if !name.feminine, ["ич", "ыч"].contains(where: stem.hasSuffix) {
+                return stem
+            }
+        }
+        return nil
+    }
+
     /// The nominative form of a known male name: the word itself, or a stem
     /// completed with «а»/«я» («Никит» → «Никита»); nil for everything else.
     private static func normalizeMaleFirst(_ stemOrWord: String, legacy: Bool) -> String? {
+        if !legacy, stemOrWord == "Павл" { return "Павел" }
         if maleFirstNames.contains(stemOrWord) { return stemOrWord }
         if maleFirstNames.contains(stemOrWord + "а") { return stemOrWord + "а" }
         if maleFirstNames.contains(stemOrWord + "я") { return stemOrWord + "я" }
@@ -171,6 +233,36 @@ enum AnonymizationNames {
         guard parts.count == 2 else { return base }
         return declineFirst(parts[0], feminine: feminine, to: nameCase)
             + " " + declineSurname(parts[1], feminine: feminine, to: nameCase)
+    }
+
+    static func decline(base: String, for name: Analysis) -> String {
+        guard name.hasPatronymic else { return decline(base: base, feminine: name.feminine, to: name.nameCase) }
+        let parts = base.split(separator: " ").map(String.init)
+        guard parts.count == 3 else { return base }
+        let first = declineFirst(parts[0], feminine: name.feminine, to: name.nameCase)
+        let patronymic = declinePatronymic(parts[1], feminine: name.feminine, to: name.nameCase)
+        let last = declineSurname(parts[2], feminine: name.feminine, to: name.nameCase)
+        return (name.surnameFirst ? [last, first, patronymic] : [first, patronymic, last]).joined(separator: " ")
+    }
+
+    private static func declinePatronymic(_ word: String, feminine: Bool, to nameCase: RussianNameCase) -> String {
+        if feminine {
+            let stem = String(word.dropLast())
+            switch nameCase {
+            case .nominative: return word
+            case .genitive: return stem + "ы"
+            case .dative, .prepositional: return stem + "е"
+            case .accusative: return stem + "у"
+            case .instrumental: return stem + "ой"
+            }
+        }
+        switch nameCase {
+        case .nominative: return word
+        case .genitive, .accusative: return word + "а"
+        case .dative: return word + "у"
+        case .instrumental: return word + "ем"
+        case .prepositional: return word + "е"
+        }
     }
 
     private static func declineFirst(_ word: String, feminine: Bool, to nameCase: RussianNameCase) -> String {
@@ -197,12 +289,13 @@ enum AnonymizationNames {
             }
         }
         guard isConsonant(last) else { return word } // «Никита»-type bases stay as-is
+        let stem = word == "Павел" ? "Павл" : word
         switch nameCase {
         case .nominative: return word
-        case .genitive, .accusative: return word + "а"
-        case .dative: return word + "у"
-        case .instrumental: return word + "ом"
-        case .prepositional: return word + "е"
+        case .genitive, .accusative: return stem + "а"
+        case .dative: return stem + "у"
+        case .instrumental: return stem + "ом"
+        case .prepositional: return stem + "е"
         }
     }
 

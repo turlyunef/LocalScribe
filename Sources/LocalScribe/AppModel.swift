@@ -86,7 +86,11 @@ struct QueueJobID: Hashable, Sendable {
         didSet {
             sidebarSelection = SidebarSelection(selection)
             retainSearchSelection()
-            if oldValue != selection { jumpTo = nil; transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil }
+            if oldValue != selection {
+                jumpTo = nil; transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil
+                if tab == .live { tab = .transcript }
+                loadLiveCaptions()
+            }
             loadResult()
         }
     }
@@ -179,6 +183,9 @@ struct QueueJobID: Hashable, Sendable {
     @Published var backgroundRecognition: Bool {
         didSet { userDefaults.set(backgroundRecognition, forKey: "backgroundRecognition") }
     }
+    @Published private(set) var automaticLiveCaptions: Bool {
+        didSet { userDefaults.set(automaticLiveCaptions, forKey: "automaticLiveCaptions") }
+    }
     @Published var automaticSummaries: Bool {
         didSet { userDefaults.set(automaticSummaries, forKey: "automaticSummaries") }
     }
@@ -209,7 +216,7 @@ struct QueueJobID: Hashable, Sendable {
     }
     @Published var shuttingDown = false
     @Published private(set) var preparingStorage = true
-    @Published var tab: ExportPart = .transcript { didSet { refreshPresentation() } }
+    @Published var tab: RecordingResultTab = .transcript { didSet { refreshPresentation() } }
     @Published var jumpTo: ResultJumpRequest?
     let repository: RecordingRepository?
     let archive: RecordingCoordinator?
@@ -229,6 +236,12 @@ struct QueueJobID: Hashable, Sendable {
     private var startupStopReason: String?
     private var pendingCaptureWarnings: [String] = []
     private var liveCaptureStart: Task<Void, Never>?
+    @Published private(set) var captureCaptions: RecordingLiveCaptions?
+    @Published private var archivedCaptions: RecordingLiveCaptions?
+    private var captionsLoadTask: Task<Void, Never>?
+    private var captionsSwitchTask: Task<Void, Never>?
+    private var captionsOverrideID: String?
+    private let recognizeLiveCaptions: LiveCaptionRecognition.Recognizer
     private let requestMicrophoneAccess: @MainActor () async -> Bool
     private let makeRecordingCapture: @MainActor (MicrophoneDevices) -> any RecordingCapture
     @Published private var queued: [QueueJobID] = []
@@ -268,8 +281,17 @@ struct QueueJobID: Hashable, Sendable {
     private var resultSignature = ""
     private var resultLoadID = UUID()
     var selected: Manifest? { selection.flatMap { recordingsByID[$0] } }
-    var resultTabs: [ExportPart] { selected?.warnings.isEmpty == false ? [.transcript, .summary, .warnings] : [.transcript, .summary] }
-    var exportParts: [ExportPart] { resultTabs + [.all] }
+    var selectedCaptions: RecordingLiveCaptions? {
+        if let captureCaptions, captureCaptions.recordingID == selection { return captureCaptions }
+        return archivedCaptions?.recordingID == selection ? archivedCaptions : nil
+    }
+    var resultTabs: [RecordingResultTab] {
+        var tabs: [RecordingResultTab] = [.transcript, .summary]
+        if selectedCaptions != nil { tabs.append(.live) }
+        if selected?.warnings.isEmpty == false { tabs.append(.warnings) }
+        return tabs
+    }
+    var exportParts: [ExportPart] { resultTabs.compactMap(\.exportPart) + [.all] }
     var tools: URL { resources.appendingPathComponent("tools") }
     var worker: URL { workerOverride ?? Bundle.main.bundleURL.appendingPathComponent("Contents/Helpers/LocalScribeWorker") }
     init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
@@ -277,12 +299,16 @@ struct QueueJobID: Hashable, Sendable {
          microphoneDevices suppliedMicrophoneDevices: MicrophoneDevices? = nil,
          requestMicrophoneAccess: @escaping @MainActor () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) },
          makeRecordingCapture: @escaping @MainActor (MicrophoneDevices) -> any RecordingCapture = { MicrophoneRecorder(devices: $0) },
+         recognizeLiveCaptions: @escaping LiveCaptionRecognition.Recognizer = LiveCaptionRecognition.recognize,
          importProbe: @escaping @Sendable (URL, URL) throws -> AudioInfo = { try Media.probe($0, tools: $1, cancellable: true) }) {
         self.userDefaults = userDefaults
         self.requestMicrophoneAccess = requestMicrophoneAccess
         self.makeRecordingCapture = makeRecordingCapture
+        self.recognizeLiveCaptions = recognizeLiveCaptions
         self.hardware = hardware
-        backgroundRecognition = userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true
+        let automaticLiveCaptions = userDefaults.bool(forKey: "automaticLiveCaptions")
+        self.automaticLiveCaptions = automaticLiveCaptions
+        backgroundRecognition = !automaticLiveCaptions && (userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true)
         automaticSummaries = userDefaults.object(forKey: "automaticSummaries") as? Bool ?? true
         recordingSources = RecordingSourcePreferences(defaults: userDefaults)
         microphoneDevices = suppliedMicrophoneDevices ?? MicrophoneDevices(observeChanges: startServices)
@@ -380,6 +406,8 @@ struct QueueJobID: Hashable, Sendable {
             archiveRevision = snapshot.revision
             recordingGroups = snapshot.groups
             recordings = snapshot.manifests
+            if let captureCaptions, recordingID != captureCaptions.recordingID,
+               recordingsByID[captureCaptions.recordingID] == nil { self.captureCaptions = nil }
             var retained = sidebarSelection
             retained.retain(Set(recordings.map(\.id)))
             if let selection, !recordings.contains(where: { $0.id == selection }) {
@@ -401,7 +429,27 @@ struct QueueJobID: Hashable, Sendable {
     }
     private func refreshPresentation() {
         if tab == .warnings && !resultTabs.contains(.warnings) { tab = .transcript; return }
-        resultPresentation.update(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: tab)
+        guard let part = tab.exportPart else { return }
+        resultPresentation.update(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part)
+    }
+
+    private func loadLiveCaptions() {
+        captionsLoadTask?.cancel()
+        archivedCaptions = nil
+        guard let id = selection, let archive, captureCaptions?.recordingID != id else { return }
+        captionsLoadTask = Task {
+            do {
+                let phrases = try await archive.perform {
+                    try Task.checkCancellation()
+                    return try $0.liveCaptions(id)
+                }
+                guard !Task.isCancelled, selection == id, let phrases else { return }
+                archivedCaptions = RecordingLiveCaptions(recordingID: id, archive: archive, phrases: phrases)
+            } catch {
+                guard !Task.isCancelled, selection == id, selected != nil else { return }
+                errorHandler.report(message: L10n.text("Не удалось открыть предрасшифровку."))
+            }
+        }
     }
     func renameRecording(_ id: String, title: String) async {
         guard !preparingStorage, let archive else { return }
@@ -691,6 +739,7 @@ struct QueueJobID: Hashable, Sendable {
         if let updatedLibrary { modelLibrary = updatedLibrary }
         if settingsChanged || updatedLibrary != nil { updateModelsStatus() }
         if backgroundRecognition != draft.backgroundRecognition { backgroundRecognition = draft.backgroundRecognition }
+        if automaticLiveCaptions != draft.automaticLiveCaptions { automaticLiveCaptions = draft.automaticLiveCaptions }
         if automaticSummaries != draft.automaticSummaries { automaticSummaries = draft.automaticSummaries }
         if recordingSources != draft.recordingSources {
             draft.recordingSources.save(to: userDefaults)
@@ -1045,7 +1094,12 @@ struct QueueJobID: Hashable, Sendable {
                 await stopRecording(warning: interruption)
                 return
             }
-            startLiveCapture(id, archive: archive)
+            captureCaptions = nil
+            if automaticLiveCaptions {
+                startLiveCaptions(id)
+            } else {
+                startLiveCapture(id, archive: archive)
+            }
             await revealRecording(id, whileCapturing: true)
         } catch {
             _ = try? await capture.stop()
@@ -1108,7 +1162,7 @@ struct QueueJobID: Hashable, Sendable {
                       admission == jobAdmission[.recording(id), default: 0] else { return }
                 await enqueueCapture(id)
             } catch {
-                guard recordingID == id, !stopping else { return }
+                guard recordingID == id, !stopping, captionsOverrideID != id else { return }
                 do {
                     try await archive.update(id) { m in
                         guard m.captureProcessing != .cancelled else { return }
@@ -1123,10 +1177,58 @@ struct QueueJobID: Hashable, Sendable {
         }
     }
 
+    func startLiveCaptions(_ id: String) {
+        guard recordingID == id, !stopping, !resourcesPaused, let recorder, let archive else { return }
+        if captureCaptions?.recordingID != id {
+            captureCaptions = RecordingLiveCaptions(recordingID: id, archive: archive)
+        }
+        guard let captureCaptions, !captureCaptions.isRunning else { return }
+        deferBackgroundRecognitionForCaptions(id, archive: archive)
+        let locale = Locale(identifier: L10n.locale.identifier == "en" ? "en-US" : "ru-RU")
+        recorder.setLiveCaptionAudio(captureCaptions.start(locale: locale, recognize: recognizeLiveCaptions))
+        if selection == id { tab = .live }
+    }
+
+    func freezeLiveCaptions(_ id: String) {
+        guard recordingID == id, captureCaptions?.recordingID == id else { return }
+        recorder?.setLiveCaptionAudio(nil)
+        captureCaptions?.freeze()
+    }
+
+    private func deferBackgroundRecognitionForCaptions(_ id: String, archive: RecordingCoordinator) {
+        let job = QueueJobID.recording(id)
+        let needsWorkerStop = activeJob == job || processingJob == job
+        guard captionsOverrideID != id, liveCaptureStart != nil || needsWorkerStop || queued.contains(job) else { return }
+        captionsOverrideID = id
+        jobAdmission[job, default: 0] &+= 1
+        queued.removeAll { $0 == job }
+        if activeJob == job { activeJob = nil }
+        captionsSwitchTask = Task {
+            if needsWorkerStop {
+                await supervisor.cancel()
+                await waitUntilQueueIdle()
+            }
+            await liveCaptureStart?.value
+            do {
+                try await archive.update(id) { m in
+                    guard m.captureProcessing != nil else { return }
+                    m.captureProcessing = nil
+                    m.lastError = nil
+                }
+            } catch {
+                errorHandler.report(error)
+            }
+            captionsSwitchTask = nil
+            await reload()
+            await processQueue()
+        }
+    }
+
     func stopRecording(warning: String? = nil) async {
         guard let id = recordingID, let archive, !stopping else { return }
         finalizingRecordingID = id
         stopping = true; finalizingRecording = true; status = L10n.message("Сохраняем аудио…")
+        if selection == id, captureCaptions?.recordingID == id { tab = .transcript }
         if let warning { recordCaptureWarning(warning, id: id) }
         defer {
             finalizingRecordingID = nil
@@ -1134,6 +1236,7 @@ struct QueueJobID: Hashable, Sendable {
             indicators.captureWarnings = []
             indicators.waitingForSystemAudio = false
             liveCaptureStart = nil
+            captionsOverrideID = nil
             stopping = false; finalizingRecording = false; supervisor.recordingActive = false
             captureLimited = false; resourcesPaused = memoryLimited
             updateResourcePausePresentation()
@@ -1142,6 +1245,8 @@ struct QueueJobID: Hashable, Sendable {
         }
         do {
             let frames = try await recorder?.stop() ?? 0; recorder = nil
+            if captureCaptions?.recordingID == id { await captureCaptions?.finish() }
+            await captionsSwitchTask?.value
             await liveCaptureStart?.value
             for task in Array(warningTasks.values) { await task.value }
             let warnings = indicators.captureWarnings
@@ -1158,6 +1263,8 @@ struct QueueJobID: Hashable, Sendable {
             if let warning { errorHandler.report(message: warning) }
             try await finalizeCapture(id, expectedFrames: frames, warnings: warnings); recordingID = nil; await enqueue(id)
         } catch {
+            if captureCaptions?.recordingID == id { await captureCaptions?.finish() }
+            await captionsSwitchTask?.value
             await liveCaptureStart?.value
             for task in Array(warningTasks.values) { await task.value }
             let warnings = indicators.captureWarnings
@@ -1284,7 +1391,7 @@ struct QueueJobID: Hashable, Sendable {
                   let info = try? Disk.read(RunInfo.self, at: repository.run(id, pending).appendingPathComponent("run.json")) else { return false }
             return info.liveCapture == true
         }
-        guard valid, finalizingRecordingID != id, generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0],
+        guard valid, captionsOverrideID != id, finalizingRecordingID != id, generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0],
               !deletingJobIDs.contains(.recording(id)), activeJob != .recording(id), !shuttingDown else { return }
         if let reason = queuePauses.values.first ?? pauseReason {
             await interruptEnqueue(id, reason: reason); return
@@ -1355,7 +1462,7 @@ struct QueueJobID: Hashable, Sendable {
         try hardware.requireCompatibility(for: profile)
     }
     func processQueue() async {
-        guard deletingGroupID == nil, !deletingSidebarRecordings, !deletingDiagramJobs, !deletingTextJobs, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
+        guard deletingGroupID == nil, !deletingSidebarRecordings, !deletingDiagramJobs, !deletingTextJobs, !preparingStorage, !busy, !resourcesPaused, !suspendingQueue, queuePauses.isEmpty, resourcePauseTask == nil, captionsSwitchTask == nil, !installing, !verifyingModels, !startingRecording, !shuttingDown,
               repository != nil, let archive, catalog != nil else { return }
         busy = true
         defer {
@@ -1365,7 +1472,7 @@ struct QueueJobID: Hashable, Sendable {
             queueStatus = nil
             busy = false
         }
-        while deletingGroupID == nil && !deletingSidebarRecordings && !deletingDiagramJobs && !deletingTextJobs && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && !shuttingDown {
+        while deletingGroupID == nil && !deletingSidebarRecordings && !deletingDiagramJobs && !deletingTextJobs && queued.first.map({ enqueuing[$0] == nil }) == true && !resourcesPaused && !suspendingQueue && queuePauses.isEmpty && resourcePauseTask == nil && captionsSwitchTask == nil && !shuttingDown {
             if ProcessInfo.processInfo.thermalState == .critical {
                 showQueueStatus("Обработка ожидает охлаждения Mac")
                 try? await Task.sleep(for: .seconds(2)); continue
@@ -1569,6 +1676,7 @@ struct QueueJobID: Hashable, Sendable {
     func pauseForCaptureResources(memoryPressure: Bool = false) {
         if memoryPressure { memoryLimited = true } else { captureLimited = true }
         resourcesPaused = true
+        if let recordingID { freezeLiveCaptions(recordingID) }
         updateResourcePausePresentation()
         guard resourcePauseTask == nil else { return }
         let pauseMessage = resourcePauseMessage
@@ -1682,7 +1790,7 @@ struct QueueJobID: Hashable, Sendable {
         await cancel(id)
     }
     func cancel(_ id: String) async {
-        guard let archive else { return }
+        guard let archive, captionsOverrideID != id else { return }
         jobAdmission[.recording(id), default: 0] &+= 1
         enqueuing.removeValue(forKey: .recording(id))
         queued.removeAll { $0 == .recording(id) }
@@ -1693,6 +1801,7 @@ struct QueueJobID: Hashable, Sendable {
             suspendingQueue = false
             Task { await processQueue() }
         }
+        guard captionsOverrideID != id else { return }
         _ = try? await archive.update(id) { m in
             if m.state == .recording { m.captureProcessing = .cancelled } else { m.state = .cancelled }
         }

@@ -51,6 +51,19 @@ struct ASREngineFactory: Sendable {
             tokenizer: root.appendingPathComponent(tokenizer.id), weightFiles: weights)
     }
 
+    var loadGigaAM: PinnedLoader = { pinned, root, metrics, _ in
+        guard let profile = pinned.models.first(where: { $0.purpose == .asr }),
+              let tokenizer = pinned.models.first(where: { $0.purpose == .tokenizer }),
+              profile.asrPolicy == GigaAMASREngine.policyID, profile.tokenizerID == tokenizer.id, profile.alignerID == nil else {
+            throw ScribeError.message("Несовместимый комплект GigaAM.")
+        }
+        try PinnedASRFiles.validate(profile, at: root, requiring: GigaAMASREngine.weights)
+        try PinnedASRFiles.validate(tokenizer, at: root, requiring: ["tokens.txt"])
+        metrics?.backend("gigaam", policy: GigaAMASREngine.policyID)
+        return try GigaAMASREngine(model: root.appendingPathComponent(profile.id),
+            tokenizer: root.appendingPathComponent(tokenizer.id), metrics: metrics)
+    }
+
     func make(info: RunInfo, catalog: ModelCatalog, models: URL, metrics: ASRMetricsRecorder?,
               warning: @escaping @Sendable (String) -> Void) async throws -> SpeechRecognizer {
         try Task.checkCancellation()
@@ -65,6 +78,7 @@ struct ASREngineFactory: Sendable {
             engine = try await loadWhisper(info, models, metrics, warning)
         case "qwen3": engine = try await loadQwen(pinned, models, metrics, warning)
         case "vibevoice-asr": engine = try await loadVibeVoice(pinned, models, metrics, warning)
+        case "gigaam": engine = try await loadGigaAM(pinned, models, metrics, warning)
         default: throw ScribeError.message("Движок выбранной модели распознавания не поддерживается")
         }
         try Task.checkCancellation()

@@ -1,5 +1,12 @@
 # Подключение ASR-движков
 
+## GigaAM-v3 RNNT — 15.11.2026
+
+Профиль `asr-gigaam-v3-rnnt-int8` загружается через общий установщик вместе с
+`tokenizer-gigaam-v3`. `ASREngineFactory` проверяет оба закреплённых набора
+по SHA-256 и передаёт их локальному движку `gigaam`. Его собственная политика
+окон и зависимости входят в fingerprint. [Модель и упаковка](ASRModels.md#gigaam-v3-rnnt).
+
 ## Новые backend — 26.10.2026
 
 Интеграция Qwen3-ASR-1.7B + ForcedAligner и нативного long-form VibeVoice-ASR

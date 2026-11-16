@@ -28,7 +28,10 @@ final class ProcessingQueueTests: XCTestCase {
         await model.shutdown()
     }
 
-    private func fixture(_ root: URL, observeIO: (@Sendable (RecordingRepository.IOOperation) -> Void)? = nil) throws -> (RecordingRepository, AppModel, URL) {
+    private func fixture(
+        _ root: URL, observeIO: (@Sendable (RecordingRepository.IOOperation) -> Void)? = nil,
+        capture: (any RecordingCapture)? = nil
+    ) throws -> (RecordingRepository, AppModel, URL) {
         var repo = try RecordingRepository(root: root)
         repo.observeIO = observeIO
         let executable = root.appendingPathComponent("worker.py")
@@ -83,7 +86,12 @@ final class ProcessingQueueTests: XCTestCase {
         let suite = "LocalScribeTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
         addTeardownBlock { UserDefaults.standard.removePersistentDomain(forName: suite) }
-        let model = AppModel(repository: repo, startServices: false, workerExecutable: executable, userDefaults: defaults, catalog: catalog)
+        let model = AppModel(repository: repo, startServices: false, workerExecutable: executable, userDefaults: defaults, catalog: catalog,
+                             requestMicrophoneAccess: { true }, makeRecordingCapture: { capture ?? MicrophoneRecorder(devices: $0) },
+                             recognizeLiveCaptions: { _, stream, ready, _ in
+            await ready()
+            for await _ in stream {}
+        })
         for profile in profiles { model.modelLibrary.installed(profile, catalog: catalog) }
         try model.modelLibrary.select(profiles[0], catalog: catalog)
         model.modelsReady = true
@@ -108,7 +116,10 @@ final class ProcessingQueueTests: XCTestCase {
         var m = Manifest(sourceType: "microphone", title: "Capture", filename: "original.caf")
         m.state = .recording
         let info = try repo.beginRun(&m, catalog: XCTUnwrap(model.activeCatalog), liveCapture: true)
-        let folder = repo.folder(m.id).appendingPathComponent("capture")
+        try Self.writeCapturePart(to: repo.folder(m.id).appendingPathComponent("capture"))
+        return (m, info)
+    }
+    private static func writeCapturePart(to folder: URL) throws {
         try Disk.directory(folder)
         let format = try XCTUnwrap(AVAudioFormat(standardFormatWithSampleRate: 16000, channels: 1))
         let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16000))
@@ -116,7 +127,20 @@ final class ProcessingQueueTests: XCTestCase {
         buffer.floatChannelData![0].initialize(repeating: 0.125, count: 16000)
         let file = try AVAudioFile(forWriting: folder.appendingPathComponent("part-000000.caf"), settings: format.settings)
         try file.write(from: buffer)
-        return (m, info)
+    }
+
+    private final class CaptionSwitchCapture: RecordingCapture {
+        var onMeter: ((CaptureMeterReading) -> Void)?
+        var onStopNeeded: ((String) -> Void)?
+        var onWarning: ((String) -> Void)?
+        var onResourcePressure: (() -> Void)?
+        var onMicrophoneStatus: ((CaptureMicrophoneStatus) -> Void)?
+
+        func start(folder: URL, microphone: MicrophoneCaptureRequest?, systemAudio: Bool) async throws {
+            try ProcessingQueueTests.writeCapturePart(to: folder)
+        }
+        func enableFallbackMicrophone() {}
+        func stop() async throws -> Int64 { 16_000 }
     }
     private func finishLiveWorker(_ root: URL, repo: RecordingRepository, m: Manifest, info: RunInfo) throws {
         let fragments = try CaptureIntegrity.fragments(at: repo.folder(m.id).appendingPathComponent("capture"))
@@ -797,6 +821,39 @@ final class ProcessingQueueTests: XCTestCase {
         try await waitUntil { !model.busy && (try? repo.load(m.id).state) == .completed }
         XCTAssertEqual(try repo.load(m.id).activeRunId, info.id)
         XCTAssertEqual(try events(root).map(\.stage), [.transcribing, .preparingAudio, .summarizing])
+    }
+
+    func testManualLiveCaptionsDeferOnlyTheCurrentCaptureWorkerUntilStop() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, _) = try fixture(root, capture: CaptionSwitchCapture())
+        let settings = SettingsDraft(model: model)
+        settings.recordingSources.microphoneEnabled = false
+        settings.recordingSources.systemAudioEnabled = true
+        try model.applySettings(settings)
+        await model.startRecording()
+        let id = try XCTUnwrap(model.recordingID)
+        try await waitUntil { model.status == "fixture-ready-" + id }
+        let m = try repo.load(id)
+        let run = try XCTUnwrap(m.pendingRunId)
+        let info = try Disk.read(RunInfo.self, at: repo.run(id, run).appendingPathComponent("capture-run.json"))
+
+        model.startLiveCaptions(id)
+        XCTAssertEqual(model.tab, .live)
+        try await waitUntil { !model.busy && (try? repo.load(id).captureProcessing) == nil }
+        XCTAssertEqual(model.recordingID, id)
+        XCTAssertTrue(model.backgroundRecognition)
+        XCTAssertEqual(try events(root).count, 1)
+        XCTAssertEqual(try repo.load(id).pendingRunId, run)
+
+        try finishLiveWorker(root, repo: repo, m: m, info: info)
+        await model.stopRecording()
+        try await waitUntil { !model.busy && (try? repo.load(id).state) == .completed }
+        XCTAssertEqual(model.tab, .transcript)
+        XCTAssertTrue(model.resultTabs.contains(.live))
+        XCTAssertEqual(try events(root).map(\.stage), [.transcribing, .transcribing, .preparingAudio, .summarizing])
+        XCTAssertEqual(try repo.load(id).activeRunId, run)
+        await model.shutdown()
     }
     func testSavingQueuedCaptureKeepsFIFOAndStartsAutomatically() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

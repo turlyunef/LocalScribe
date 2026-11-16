@@ -206,10 +206,17 @@ actor AnonymizationEngine {
 
         // 3. Substitution assignment over history with deterministic draws.
         var historyByKey: [String: AutomaticSubstitution] = [:]
-        var substitutesByType: [String: Set<String>] = [:]
-        for entry in input.automaticSubstitutions ?? [] {
-            historyByKey[Self.key(dataType: entry.dataType, canonical: entry.sourceValue)] = entry
-            substitutesByType[entry.dataType, default: []].insert(entry.substituteValue)
+        var legacyMarkerKeys = Set<String>()
+        var occupiedSubstitutes = Set<String>()
+        let history = input.automaticSubstitutions ?? []
+        for entry in history {
+            let key = Self.key(dataType: entry.dataType, canonical: entry.sourceValue)
+            if SeededAnonymizationValueSource.isLegacyMarker(entry.substituteValue) {
+                legacyMarkerKeys.insert(key)
+            } else {
+                historyByKey[key] = entry
+                occupiedSubstitutes.insert(entry.substituteValue)
+            }
         }
         let allItems = (bodyPlan.replacements + namePlan.replacements).map { item in
             (item: item, name: Self.nameAnalysis(item))
@@ -217,6 +224,8 @@ actor AnonymizationEngine {
         let itemsByKey = Dictionary(grouping: allItems) { entry in
             Self.key(dataType: entry.item.dataType, canonical: entry.name?.canonical ?? entry.item.value)
         }
+        occupiedSubstitutes.formUnion(allItems.map { $0.name?.canonical ?? $0.item.value })
+        var replacedLegacyKeys = Set<String>()
         var assigned: [String: String] = [:]
         var newSubstitutions: [AutomaticSubstitution] = []
         func prepared(_ items: [AnonymizationReplacementPlan.Item]) throws -> [AnonymizationAssemblyReplacement] {
@@ -231,13 +240,13 @@ actor AnonymizationEngine {
                 } else {
                     let forms = itemsByKey[key] ?? []
                     // Old runs may have stored an inflected surname in the key.
-                    // Look up the old keys from the current occurrences without
-                    // rewriting the archived substitution history.
-                    let previous = historyByKey[key] ?? forms.lazy.compactMap { form in
-                        let legacy = AnonymizationNames.analyze(form.item.value, legacy: true)?.canonical
-                        let legacyKey = Self.key(dataType: item.dataType, canonical: legacy ?? form.item.value)
-                        return historyByKey[legacyKey]
-                    }.first
+                    let previousKeys = [key] + forms.flatMap { form in
+                        let raw = Self.key(dataType: item.dataType, canonical: form.item.value)
+                        let legacy = form.name.flatMap { _ in AnonymizationNames.analyze(form.item.value, legacy: true) }
+                        return [raw, Self.key(dataType: item.dataType, canonical: legacy?.canonical ?? form.item.value)]
+                    }
+                    let previous = previousKeys.lazy.compactMap { historyByKey[$0] }.first
+                    replacedLegacyKeys.formUnion(previousKeys.filter { legacyMarkerKeys.contains($0) })
                     func differsFromSource(_ candidate: String) -> Bool {
                         forms.allSatisfy { Self.render(candidate, for: $0.name) != $0.item.value }
                     }
@@ -247,12 +256,19 @@ actor AnonymizationEngine {
                         }
                         base = previous.substituteValue
                     } else {
-                        let shape = Self.valueShape(item, name: analysis)
-                        var occupied = substitutesByType[item.dataType] ?? []
+                        let kind = AnonymizationValueShape.DataKind(wording: item.dataType)
+                        let shape = analysis.map(AnonymizationValueShape.name) ?? .of(item.value, kind: kind)
+                        var occupied = occupiedSubstitutes
                         var usable: String?
-                        for _ in 0..<8 {
-                            let candidate = valueSource.value(for: canonical, shape: shape, occupied: occupied)
-                            if candidate != canonical, !occupied.contains(candidate), differsFromSource(candidate) {
+                        for _ in 0..<32 {
+                            let candidate = try valueSource.value(for: canonical, shape: shape, occupied: occupied)
+                            if candidate != canonical, !occupied.contains(candidate), differsFromSource(candidate),
+                               forms.allSatisfy({ form in
+                                   let rendered = Self.render(candidate, for: form.name)
+                                   return !occupiedSubstitutes.contains(rendered)
+                                       && !Self.containsStandalone(rendered, in: input.source.text)
+                                       && !Self.containsStandalone(rendered, in: input.importedNameStem)
+                               }) {
                                 usable = candidate
                                 break
                             }
@@ -260,11 +276,12 @@ actor AnonymizationEngine {
                         }
                         guard let usable else { throw ScribeError.message("Не удалось подобрать уникальную подстановку") }
                         base = usable
-                        substitutesByType[item.dataType, default: []].insert(base)
                         newSubstitutions.append(AutomaticSubstitution(dataType: item.dataType,
                                                                       sourceValue: canonical, substituteValue: base))
                     }
                     assigned[key] = base
+                    occupiedSubstitutes.insert(base)
+                    occupiedSubstitutes.formUnion(forms.map { Self.render(base, for: $0.name) })
                 }
                 assembled.append(AnonymizationAssemblyReplacement(range: item.range, text: Self.render(base, for: analysis)))
             }
@@ -326,7 +343,9 @@ actor AnonymizationEngine {
             bodyReplacementCount: UInt(bodyReplacements.count),
             pairs: pairs,
             warnings: warnings)
-        let substitutions = (input.automaticSubstitutions ?? []) + newSubstitutions
+        let substitutions = history.filter {
+            !replacedLegacyKeys.contains(Self.key(dataType: $0.dataType, canonical: $0.sourceValue))
+        } + newSubstitutions
         let artifact = AnonymizationRunArtifact(result: result, substitutions: substitutions)
         try artifact.validate(sourceScalarCount: sourceScalars.count, importedNameScalarCount: nameScalars.count)
         try Disk.write(artifact, to: attemptURL.appendingPathComponent(AnonymizationRunArtifact.filename))
@@ -364,30 +383,37 @@ actor AnonymizationEngine {
     }
 
     private static func nameAnalysis(_ item: AnonymizationReplacementPlan.Item) -> AnonymizationNames.Analysis? {
-        switch item.dataType {
-        case AnonymizationStructuredDetection.emails, AnonymizationStructuredDetection.phones,
-             AnonymizationStructuredDetection.addresses, "Названия компаний", "Company names", "Даты", "Dates":
-            return nil
-        default:
+        switch AnonymizationValueShape.DataKind(wording: item.dataType) {
+        case .person:
             return AnonymizationNames.analyze(item.value)
+        case .custom:
+            return AnonymizationCompany(item.value).hasLegalForm ? nil : AnonymizationNames.analyze(item.value)
+        default:
+            return nil
         }
     }
 
-    private static func valueShape(_ item: AnonymizationReplacementPlan.Item,
-                                   name: AnonymizationNames.Analysis?) -> AnonymizationValueShape {
-        switch item.dataType {
-        case AnonymizationStructuredDetection.emails: return .emailAddress
-        case AnonymizationStructuredDetection.phones: return .phone
-        case AnonymizationStructuredDetection.addresses:
-            return .postalAddress(russian: item.value.unicodeScalars.contains { (0x0400...0x052F).contains($0.value) })
-        case "Названия компаний", "Company names": return .generic
-        default: return name.map { .russianName(feminine: $0.feminine) } ?? .of(item.value)
+    /// Avoid substitutions the reverse transform could mistake for unchanged
+    /// source text. Match the restore path's scalar word boundaries.
+    private static func containsStandalone(_ value: String, in text: String) -> Bool {
+        guard let first = value.unicodeScalars.first, let last = value.unicodeScalars.last else { return false }
+        let scalars = text.unicodeScalars
+        let word = CharacterSet.alphanumerics.union(.nonBaseCharacters)
+        var start = text.startIndex
+        while let range = text.range(of: value, options: .literal, range: start..<text.endIndex) {
+            let continuesLeft = range.lowerBound > scalars.startIndex && word.contains(first)
+                && word.contains(scalars[scalars.index(before: range.lowerBound)])
+            let continuesRight = range.upperBound < scalars.endIndex && word.contains(last)
+                && word.contains(scalars[range.upperBound])
+            if !continuesLeft, !continuesRight { return true }
+            start = scalars.index(after: range.lowerBound)
         }
+        return false
     }
 
     private static func render(_ base: String, for name: AnonymizationNames.Analysis?) -> String {
         guard let name else { return base }
-        return AnonymizationNames.decline(base: base, feminine: name.feminine, to: name.nameCase)
+        return AnonymizationNames.decline(base: base, for: name)
     }
 
     private static func key(dataType: String, canonical: String) -> String {

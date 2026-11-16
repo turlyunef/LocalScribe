@@ -3,6 +3,21 @@ import AppKit
 import UniformTypeIdentifiers
 import LocalScribeCore
 
+enum RecordingResultTab: CaseIterable {
+    case transcript, summary, live, warnings
+
+    var exportPart: ExportPart? {
+        switch self {
+        case .transcript: return .transcript
+        case .summary: return .summary
+        case .live: return nil
+        case .warnings: return .warnings
+        }
+    }
+
+    var title: String { exportPart?.title ?? L10n.text("В эфире") }
+}
+
 /// Right column of the recording archive: live recording bar, result header,
 /// result tabs, status line, recording sheets and the shared file-drop receiver.
 struct RecordingDetailColumn: View {
@@ -39,7 +54,9 @@ struct RecordingDetailColumn: View {
                 }
                 if selected.activeRunId != nil && selected.pendingRunId != nil { Text(L10n.text("Показан предыдущий успешный результат. Новая версия ещё обрабатывается.")).font(.caption).foregroundStyle(.secondary).padding(.horizontal,20) }
                 Divider()
-                if model.tab == .summary, model.summary == nil, !model.automaticSummaries {
+                if model.tab == .live, let captions = model.selectedCaptions {
+                    LiveCaptionView(captions: captions).id(captions.recordingID)
+                } else if model.tab == .summary, model.summary == nil, !model.automaticSummaries {
                     Text(L10n.text("Автоматическое создание итогов отключено"))
                         .foregroundStyle(.secondary)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -90,7 +107,7 @@ struct RecordingDetailColumn: View {
                 }.padding(28).frame(width: 440)
             }
             .sheet(item: $model.resultEdit) { draft in
-                ResultEditorView(initial: draft, initialPart: model.tab, save: model.saveResultEdits,
+                ResultEditorView(initial: draft, initialPart: model.tab.exportPart ?? .transcript, save: model.saveResultEdits,
                                  cancel: { model.resultEdit = nil }, reportError: model.errorHandler.report)
             }
     }
@@ -117,7 +134,7 @@ struct RecordingDetailColumn: View {
                     .accessibilityLabel(L10n.text("Результат"))
                     .accessibilityIdentifier("result.section")
                     // Keep the remaining controls in place when warnings appear.
-                    .frame(width: RecordingResultPicker.reservedWidth, alignment: .leading)
+                    .frame(width: RecordingResultPicker.reservedWidth(showsLive: model.selectedCaptions != nil), alignment: .leading)
                 Spacer(minLength: 0)
                 resultActions
             }
@@ -156,6 +173,10 @@ struct RecordingDetailColumn: View {
             canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
             canDelete: model.deletingGroupID == nil && !model.finalizingRecording && model.recordingID != selected.id,
             showAudio: model.showAudio,
+            liveCaptionControl: model.recordingID == selected.id && !model.finalizingRecording
+                ? LiveCaptionControl(captions: model.selectedCaptions, disabled: model.resourcePauseMessage != nil,
+                                     start: { model.startLiveCaptions(selected.id) }, stop: { model.freezeLiveCaptions(selected.id) })
+                : nil,
             editResult: model.beginResultEditing,
             repeatAnalysis: { Task { await model.repeatAnalysis(summaryOnly: false) } },
             recreateSummary: { language in Task { await model.repeatAnalysis(summaryOnly: true, language: language) } },
@@ -191,14 +212,14 @@ struct RecordingDetailColumn: View {
 /// The SwiftUI segmented Picker redistributes space when the number of options changes.
 /// AppKit lets each segment keep a width determined by its own label.
 private struct RecordingResultPicker: NSViewRepresentable {
-    var parts: [ExportPart]
-    @Binding var selection: ExportPart
+    var parts: [RecordingResultTab]
+    @Binding var selection: RecordingResultTab
 
-    static var reservedWidth: CGFloat {
-        width(for: ExportPart.allCases.filter { $0 != .all })
+    static func reservedWidth(showsLive: Bool) -> CGFloat {
+        width(for: RecordingResultTab.allCases.filter { showsLive || $0 != .live })
     }
 
-    private static func width(for parts: [ExportPart]) -> CGFloat {
+    private static func width(for parts: [RecordingResultTab]) -> CGFloat {
         parts.reduce(0) { $0 + segmentWidth($1.title) }
     }
 
@@ -229,7 +250,7 @@ private struct RecordingResultPicker: NSViewRepresentable {
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView: NSView, context: Context) -> CGSize? {
-        CGSize(width: Self.reservedWidth, height: context.coordinator.control.intrinsicContentSize.height)
+        CGSize(width: Self.reservedWidth(showsLive: parts.contains(.live)), height: context.coordinator.control.intrinsicContentSize.height)
     }
 
     func updateNSView(_ nsView: NSView, context: Context) {

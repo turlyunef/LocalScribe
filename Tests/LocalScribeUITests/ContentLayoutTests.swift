@@ -1,5 +1,6 @@
 import AppKit
 import CoreAudio
+import CoreMedia
 import SwiftUI
 import UniformTypeIdentifiers
 import XCTest
@@ -59,6 +60,43 @@ final class ContentLayoutTests: XCTestCase {
         // Let SwiftUI update both its layout and accessibility tree.
         try await Task.sleep(for: .milliseconds(100))
         view.layoutSubtreeIfNeeded()
+    }
+
+    func testLiveCaptionsFollowOnlyAtTheBottom() async throws {
+        var text = LiveCaptionText()
+        let (hosting, window) = host(LiveCaptionTextView(text: text), width: 520, height: 300)
+        defer { window.close() }
+        try await settle(hosting)
+        let scroll = try XCTUnwrap(subviews(hosting).compactMap { $0 as? NSScrollView }.first)
+        let clip = scroll.contentView
+
+        func append(_ index: Int) {
+            let range = CMTimeRange(start: CMTime(value: Int64(index), timescale: 1), duration: CMTime(value: 1, timescale: 1))
+            text.receive(LiveCaptionUpdate(range: range, finalizedThrough: range.end, text: "Реплика \(index)"))
+        }
+        func distanceFromBottom() -> CGFloat { clip.documentRect.maxY - clip.bounds.maxY }
+        func scrollTo(_ y: CGFloat) {
+            clip.scroll(to: clip.constrainBoundsRect(NSRect(origin: NSPoint(x: 0, y: y), size: clip.bounds.size)).origin)
+            scroll.reflectScrolledClipView(clip)
+        }
+
+        for index in 0..<60 { append(index) }
+        hosting.rootView = LiveCaptionTextView(text: text)
+        try await settle(hosting)
+        XCTAssertLessThanOrEqual(distanceFromBottom(), 2)
+
+        scrollTo(100)
+        let readerPosition = clip.bounds.origin.y
+        append(60)
+        hosting.rootView = LiveCaptionTextView(text: text)
+        try await settle(hosting)
+        XCTAssertEqual(clip.bounds.origin.y, readerPosition, accuracy: 1)
+
+        scrollTo(clip.documentRect.maxY - clip.bounds.height)
+        append(61)
+        hosting.rootView = LiveCaptionTextView(text: text)
+        try await settle(hosting)
+        XCTAssertLessThanOrEqual(distanceFromBottom(), 2)
     }
 
     private func assertActionAlignment(_ primaryID: String, in view: NSView) throws {
@@ -617,7 +655,7 @@ final class ContentLayoutTests: XCTestCase {
         model.automaticSummaries = false; model.tab = .summary
         try await settle(hosting)
         XCTAssertEqual(text(try element("result.automaticSummariesDisabled", in: hosting)), "Автоматическое создание итогов отключено")
-        for part in [ExportPart.transcript, .summary] {
+        for part in [RecordingResultTab.transcript, .summary] {
             model.tab = part
             for enabled in [true, false] {
                 model.automaticSummaries = enabled
@@ -666,7 +704,7 @@ final class ContentLayoutTests: XCTestCase {
             window.setContentSize(NSSize(width: width, height: 700))
             for language in ["ru", "en"] {
                 model.summary = Summary(language: language)
-                for part in [ExportPart.transcript, .summary] {
+                for part in [RecordingResultTab.transcript, .summary] {
                     model.tab = part
                     try await settle(hosting)
                     let picker = try element("result.section", in: hosting)

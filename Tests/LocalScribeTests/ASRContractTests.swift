@@ -59,7 +59,7 @@ final class ASRContractTests: XCTestCase {
         let catalog = try Disk.read(ModelCatalog.self, at: source.appendingPathComponent("Resources/models.lock.json"))
         let profiles = catalog.models.filter { $0.purpose == .asr }
         XCTAssertEqual(Set(profiles.map(\.id)), ["asr", "asr-base", "asr-small", "asr-medium", "asr-turbo",
-                                                   "asr-qwen3-1.7b-bf16", "asr-qwen3-1.7b-8bit", "asr-vibevoice-4bit"])
+                                                   "asr-qwen3-1.7b-bf16", "asr-qwen3-1.7b-8bit", "asr-vibevoice-4bit", "asr-gigaam-v3-rnnt-int8"])
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
         let repo = try RecordingRepository(root: root)

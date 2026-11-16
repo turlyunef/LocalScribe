@@ -15,6 +15,8 @@ done
 for tool in Assets/tools/ffmpeg Assets/tools/ffprobe; do
     xcrun vtool -show-build "$tool" | awk '$1 == "minos" { found=1; if ($2 != "26.0") exit 1 } END { if (!found) exit 1 }' || { echo "Rebuild bundled audio tools: bash scripts/build_ffmpeg.sh" >&2; exit 1; }
 done
+LOCALSCRIBE_GIGAAM_STATIC_ARCHIVE="$(bash scripts/build_gigaam_runtime.sh)"
+export LOCALSCRIBE_GIGAAM_STATIC_ARCHIVE
 swift package resolve --force-resolved-versions
 swift build -c release -j 4 --force-resolved-versions
 BIN="$(swift build -c release --show-bin-path)"

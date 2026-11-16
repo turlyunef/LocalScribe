@@ -38,8 +38,13 @@ enum CaptureMicrophoneStatus: Equatable {
     var onMicrophoneStatus: ((CaptureMicrophoneStatus) -> Void)? { get set }
 
     func start(folder: URL, microphone: MicrophoneCaptureRequest?, systemAudio: Bool) async throws
+    func setLiveCaptionAudio(_ input: LiveCaptionAudio?)
     func enableFallbackMicrophone()
     func stop() async throws -> Int64
+}
+
+extension RecordingCapture {
+    func setLiveCaptionAudio(_ input: LiveCaptionAudio?) {}
 }
 
 @MainActor final class MicrophoneRecorder: RecordingCapture {
@@ -656,6 +661,10 @@ enum CaptureMicrophoneStatus: Equatable {
         microphoneWasMuted = false
     }
 
+    func setLiveCaptionAudio(_ input: LiveCaptionAudio?) {
+        ingress?.setLiveCaptionAudio(input)
+    }
+
     func stop() async throws -> Int64 {
         sources.removeAll()
         inventoryObservation?.cancel()
@@ -1025,6 +1034,10 @@ final class CaptureIngress: @unchecked Sendable {
         admitted.removeAll()
         invalidateMicrophone()
         return true
+    }
+
+    func setLiveCaptionAudio(_ input: LiveCaptionAudio?) {
+        queue.async { self.writer?.liveCaptionAudio = input }
     }
 
     func finish() async throws -> Int64 {

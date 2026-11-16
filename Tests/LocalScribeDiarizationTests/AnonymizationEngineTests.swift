@@ -637,7 +637,9 @@ final class AnonymizationEngineTests: XCTestCase {
         XCTAssertEqual(result.bodyReplacementCount, 1)
         XCTAssertTrue(result.text.text.contains("сотрудник Анна Петрова"), "имя вне списка типов сохранено")
         XCTAssertFalse(result.text.text.contains("AB-2741"))
-        XCTAssertTrue(result.text.text.contains("X-"), "обобщённый генератор даёт маркерное значение")
+        let replacement = try XCTUnwrap(outcome.artifact.substitutions.first?.substituteValue)
+        XCTAssertNotNil(replacement.range(of: #"^[A-Z]{2}-[0-9]{4}$"#, options: .regularExpression))
+        XCTAssertTrue(result.text.text.contains(replacement))
     }
 
     // MARK: - AC-44/48: history reuse, keys, collisions
@@ -831,7 +833,43 @@ final class AnonymizationEngineTests: XCTestCase {
         XCTAssertEqual(outcome.artifact.substitutions.count, 3)
         let company = try XCTUnwrap(outcome.artifact.substitutions.first { $0.dataType == type })
         XCTAssertEqual(company.sourceValue, "Северный Ветер")
-        XCTAssertTrue(company.substituteValue.hasPrefix("X-"))
+        XCTAssertNotNil(company.substituteValue.range(of: #"^[А-ЯЁ][а-яё]+ [А-ЯЁ][а-яё]+$"#, options: .regularExpression))
+        XCTAssertNotEqual(company.substituteValue, company.sourceValue)
+    }
+
+    func testRerunReplacesMarkersAndKeepsNamesSharedByBodyAndFilename() async throws {
+        let companyType = "  Наименования организаций "
+        let company = "ООО «Ромашка»"
+        let name = "Петрова Анна Ивановна"
+        let inflected = "Анной Ивановной Петровой"
+        let personType = "ФИО"
+        let history = [
+            AutomaticSubstitution(dataType: companyType, sourceValue: company, substituteValue: "X-4500"),
+            AutomaticSubstitution(dataType: personType, sourceValue: name, substituteValue: "X-4567"),
+            AutomaticSubstitution(dataType: personType, sourceValue: inflected, substituteValue: "X-10001"),
+            AutomaticSubstitution(dataType: personType, sourceValue: "Андрей Иванов", substituteValue: "Борис Соколов")
+        ]
+        let recognizer = ScriptedRecognizer(markers: [
+            .init(companyType, company), .init(personType, name), .init(personType, inflected)
+        ])
+        let (engine, _) = try makeEngine(text: "\(company). Докладчик \(name). Работа согласована с \(inflected). \(company).",
+                                        dataTypes: [companyType, personType], importedNameStem: company,
+                                        history: history, recognizer: recognizer)
+        let artifact = try await engine.run().artifact
+        let fakeCompany = try XCTUnwrap(artifact.substitutions.first { $0.dataType == companyType }?.substituteValue)
+        XCTAssertTrue(fakeCompany.hasPrefix("ООО «"))
+        XCTAssertTrue(fakeCompany.hasSuffix("»"))
+        XCTAssertNotEqual(fakeCompany, company)
+        XCTAssertEqual(artifact.result.downloadNameStem, fakeCompany)
+        XCTAssertEqual(artifact.result.text.text.components(separatedBy: fakeCompany).count, 3)
+        let fakeName = try XCTUnwrap(artifact.substitutions.first { $0.sourceValue == "Анна Ивановна Петрова" }?.substituteValue)
+        let nominative = try XCTUnwrap(AnonymizationNames.analyze(name))
+        let instrumental = try XCTUnwrap(AnonymizationNames.analyze(inflected))
+        XCTAssertTrue(artifact.result.text.text.contains(AnonymizationNames.decline(base: fakeName, for: nominative)))
+        XCTAssertTrue(artifact.result.text.text.contains(AnonymizationNames.decline(base: fakeName, for: instrumental)))
+        XCTAssertEqual(artifact.substitutions.count, 3)
+        XCTAssertTrue(artifact.substitutions.contains(history[3]))
+        XCTAssertFalse(artifact.result.text.text.contains("X-"))
     }
 
     func testWholeMarkdownDestinationEncodesPhoneReplacement() throws {
@@ -889,7 +927,7 @@ final class AnonymizationEngineTests: XCTestCase {
             XCTAssertTrue(feminine)
         } else { XCTFail("ru name") }
         if case .englishName = AnonymizationValueShape.of("Anna Petrova") {} else { XCTFail("en name") }
-        if case .generic = AnonymizationValueShape.of("AB-2741") {} else { XCTFail("generic") }
+        if case .identifier = AnonymizationValueShape.of("AB-2741") {} else { XCTFail("identifier") }
         if case .postalAddress = AnonymizationValueShape.of("ул. Лесная, д. 12") {} else { XCTFail("address") }
     }
 
@@ -920,7 +958,7 @@ final class AnonymizationEngineTests: XCTestCase {
             let shape = AnonymizationValueShape.of(source)
             var rng = SplitMix64(seed: 7)
             for _ in 0..<32 {
-                let value = AnonymizationValueFactory.draw(shape: shape, using: &rng)
+                let value = AnonymizationValueFactory.draw(for: source, shape: shape, using: &rng)
                 let parts = value.components(separatedBy: order == .monthYear ? "/" : (source.contains(".") ? "." : "-"))
                     .compactMap(Int.init)
             if order == .monthYear {
@@ -972,12 +1010,30 @@ final class AnonymizationEngineTests: XCTestCase {
         }
     }
 
-    func testSeededSourceRegeneratesOnCollision() {
+    func testSeededSourceRegeneratesOnCollision() throws {
         let source = SeededAnonymizationValueSource(seed: 42)
-        let occupied: Set<String> = []
-        let first = source.value(for: "X-1000", shape: .generic, occupied: occupied)
-        let second = source.value(for: "X-1000", shape: .generic, occupied: [first])
+        let first = try source.value(for: "AB-1000", shape: .identifier, occupied: [])
+        let repeatedSource = SeededAnonymizationValueSource(seed: 42)
+        let second = try repeatedSource.value(for: "AB-1000", shape: .identifier, occupied: [first])
         XCTAssertNotEqual(first, second)
-        XCTAssertNotEqual(first, "X-1000")
+        XCTAssertNotEqual(first, "AB-1000")
+    }
+
+    func testWrittenDatesAndShortNamesKeepTheirForm() throws {
+        let generator = SeededAnonymizationValueSource(seed: 4)
+        let russianDate = "15 ноября 2026"
+        let englishDate = "November 15, 2026"
+        for (source, pattern) in [
+            (russianDate, #"^[0-9]{2} (января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря) [0-9]{4}$"#),
+            (englishDate, #"^(January|February|March|April|May|June|July|August|September|October|November|December) [0-9]{2}, [0-9]{4}$"#)
+        ] {
+            let value = try generator.value(for: source, shape: .of(source, kind: .date), occupied: [])
+            XCTAssertNotEqual(value, source)
+            XCTAssertNotNil(value.range(of: pattern, options: .regularExpression))
+        }
+        let source = "Иванов И.И."
+        let name = try generator.value(for: source, shape: .of(source, kind: .person), occupied: [])
+        XCTAssertNotEqual(name, source)
+        XCTAssertNotNil(name.range(of: #"^[А-ЯЁ][а-яё]+ [А-ЯЁ]\.[А-ЯЁ]\.$"#, options: .regularExpression))
     }
 }

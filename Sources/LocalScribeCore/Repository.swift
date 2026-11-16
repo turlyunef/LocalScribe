@@ -205,6 +205,19 @@ public struct RecordingRepository: Sendable {
         try Disk.write(final, to: path.appendingPathComponent("run.json"))
         return final
     }
+    public func liveCaptions(_ id: String) throws -> [String]? {
+        guard UUID(uuidString: id) != nil else { throw ScribeError.message("Недопустимый идентификатор записи") }
+        let url = folder(id).appendingPathComponent("live-captions.json")
+        guard FileManager.default.fileExists(atPath: url.path) else { return nil }
+        _ = try load(id)
+        return try Disk.read([String].self, at: url)
+    }
+
+    public func saveLiveCaptions(_ phrases: [String], for id: String) throws {
+        _ = try load(id)
+        try Disk.write(phrases, to: folder(id).appendingPathComponent("live-captions.json"), requireReadableSize: true)
+    }
+
     public func delete(_ manifest: Manifest) throws {
         guard UUID(uuidString: manifest.id) != nil else { throw ScribeError.message("Недопустимый идентификатор записи") }
         try FileManager.default.removeItem(at: folder(manifest.id))

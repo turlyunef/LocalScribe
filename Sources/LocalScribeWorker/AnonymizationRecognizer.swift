@@ -182,6 +182,7 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
             Copy each value verbatim. Keep internal punctuation and line breaks. Exclude the printed line prefixes, surrounding whitespace, labels, sentence punctuation, and surrounding markup.
             For example, if the type is ticket numbers, in "Номер заявки AB-2741." the value is "AB-2741".
             Include each spelling and grammatical form of a value as it appears, including declined personal names. Check link destinations, comments and metadata.
+            For person names, keep any patronymic, middle name or initials that are part of the name. For company names, keep any legal form and brand quotes that are part of the name.
             Report the first line of each match. If the exact fragment starts more than once on that line, include its 1-based "occurrence" among all exact copies starting on that line.
             Mark "doubtful" true only when the span may not really be a value of the requested type.
             Use status "ok" with an empty matches array when there are no matches.

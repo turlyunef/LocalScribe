@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import CoreAudio
+import CoreMedia
 import Foundation
 import XCTest
 @testable import LocalScribe
@@ -52,6 +53,7 @@ import LocalScribeCore
     private func withModel(
         captures: [Capture], authorize: @escaping @MainActor () async -> Bool,
         inputs: (() -> MicrophoneDevicesSnapshot)? = nil,
+        recognize: @escaping LiveCaptionRecognition.Recognizer = LiveCaptionRecognition.recognize,
         run: (AppModel, RecordingRepository, MicrophoneDevices) async throws -> Void
     ) async throws {
         let name = "RecordingStartTests.\(UUID())"
@@ -75,7 +77,7 @@ import LocalScribeCore
                              requestMicrophoneAccess: authorize, makeRecordingCapture: { _ in
             XCTAssertFalse(remaining.isEmpty)
             return remaining.isEmpty ? Capture() : remaining.removeFirst()
-        })
+        }, recognizeLiveCaptions: recognize)
         model.backgroundRecognition = false
         await model.reload()
         do { try await run(model, repo, devices) }
@@ -90,6 +92,71 @@ import LocalScribeCore
     }
 
     private enum StartError: Error { case timeout }
+
+    func testLiveCaptionsFreezeRestartAndReopenWithTheRecording() async throws {
+        let sequence = CaptionSequence()
+        try await withModel(captures: [Capture()], authorize: { true }, recognize: { _, stream, ready, receive in
+            let number = await sequence.next()
+            await ready()
+            let range = CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1))
+            await receive(LiveCaptionUpdate(range: range, finalizedThrough: .zero, text: "Черновик \(number)"))
+            for await _ in stream {}
+            // A late final result from the frozen first recognizer must be ignored.
+            await receive(LiveCaptionUpdate(range: range, finalizedThrough: range.end, text: "Реплика \(number)"))
+        }) { model, repo, _ in
+            let draft = SettingsDraft(model: model)
+            draft.automaticLiveCaptions = true
+            try model.applySettings(draft)
+            await model.startRecording()
+            let id = try XCTUnwrap(model.recordingID)
+            XCTAssertEqual(model.tab, .live)
+            let captions = try XCTUnwrap(model.selectedCaptions)
+            try await waitForStart { captions.text.tentative.first?.text == "Черновик 1" }
+            model.freezeLiveCaptions(id)
+            XCTAssertEqual(captions.text.phrases, ["Черновик 1"])
+            XCTAssertFalse(captions.isRunning)
+            model.startLiveCaptions(id)
+            try await waitForStart { captions.text.tentative.first?.text == "Черновик 2" }
+            await model.stopRecording()
+            XCTAssertEqual(model.tab, .transcript)
+            XCTAssertTrue(model.resultTabs.contains(.live))
+            XCTAssertEqual(try repo.liveCaptions(id), ["Черновик 1", "Реплика 2"])
+            XCTAssertTrue(try repo.load(id).sourceComplete)
+
+            let reopened = AppModel(repository: repo, startServices: false)
+            await reopened.reload()
+            reopened.selection = id
+            try await waitForStart { reopened.selectedCaptions != nil }
+            XCTAssertEqual(reopened.selectedCaptions?.text.phrases, ["Черновик 1", "Реплика 2"])
+            await reopened.deleteSidebarRecordings([id])
+            XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(id).path))
+            await reopened.shutdown()
+        }
+    }
+
+    private actor CaptionSequence {
+        var value = 0
+        func next() -> Int { value += 1; return value }
+    }
+
+    func testLiveCaptionTapSkipsBufferedFramesBeforeManualStart() async throws {
+        let format = try XCTUnwrap(CapturePCM16Sink.format)
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16))
+        buffer.frameLength = 16
+        let samples = try XCTUnwrap(buffer.int16ChannelData?[0])
+        for index in 0..<16 { samples[index] = Int16(index) }
+        let origin: UInt64 = 10_000
+        let start = origin + AVAudioTime.hostTime(forSeconds: 8.5 / format.sampleRate)
+        let tap = LiveCaptionAudio(startHostTime: start)
+        tap.append(buffer, startingAt: 0, originHostTime: origin)
+        tap.finish()
+        var iterator = tap.stream.makeAsyncIterator()
+        let first = await iterator.next()
+        let clipped = try XCTUnwrap(first).buffer
+        XCTAssertEqual(clipped.frameLength, 7)
+        XCTAssertEqual(clipped.int16ChannelData?[0][0], 9)
+        XCTAssertEqual(clipped.int16ChannelData?[0][6], 15)
+    }
 
     func testMenuBarStartsWithoutWindowAndQuitSavesRecordingAndIndex() async throws {
         let capture = Capture()

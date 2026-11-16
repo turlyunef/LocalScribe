@@ -543,5 +543,19 @@
   "Не удалось сохранить статус остановленной записи: %1$@": "Could not save the status of the stopped recording: %1$@",
   "Не удалось сохранить статус прерванной записи: %1$@": "Could not save the status of the interrupted recording: %1$@",
   "Не удалось сохранить статус записи перед закрытием приложения: %1$@": "Could not save the recording status before the app closes: %1$@",
-  "Не удалось сохранить статус постановки записи в очередь: %1$@": "Could not save the queued recording status: %1$@"
+  "Не удалось сохранить статус постановки записи в очередь: %1$@": "Could not save the queued recording status: %1$@",
+  "Токенизатор GigaAM-v3": "GigaAM-v3 tokenizer",
+  "Локальное распознавание русской речи на CPU. Модель обрабатывает готовые записи и может передавать английские термины кириллицей.": "Local Russian speech recognition on the CPU. The model processes completed recordings and may render English terms in Cyrillic.",
+  "В эфире": "Live",
+  "Показывать предрасшифровку в эфире": "Show live captions",
+  "Открывает вкладку «В эфире» при начале записи. Язык речи совпадает с языком интерфейса.": "Opens the Live tab when recording starts. Captions use the app’s language.",
+  "Начать предрасшифровку": "Start Live Captions",
+  "Остановить предрасшифровку": "Stop Live Captions",
+  "Подготавливаем языковой пакет macOS…": "Preparing the macOS language pack…",
+  "Ожидаем речь…": "Listening for speech…",
+  "Здесь пока нет реплик.": "No captions yet.",
+  "Этот язык недоступен для локальной предрасшифровки.": "On-device live captions are unavailable in this language.",
+  "Предрасшифровка прервалась.": "Live captioning was interrupted.",
+  "Не удалось сохранить предрасшифровку.": "Could not save live captions.",
+  "Не удалось открыть предрасшифровку.": "Could not open live captions."
 }

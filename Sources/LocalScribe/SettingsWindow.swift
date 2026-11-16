@@ -3,7 +3,12 @@ import SwiftUI
 import LocalScribeCore
 
 @MainActor final class SettingsDraft: ObservableObject {
-    @Published var backgroundRecognition: Bool
+    @Published var backgroundRecognition: Bool {
+        didSet { if backgroundRecognition && automaticLiveCaptions { automaticLiveCaptions = false } }
+    }
+    @Published var automaticLiveCaptions: Bool {
+        didSet { if automaticLiveCaptions && backgroundRecognition { backgroundRecognition = false } }
+    }
     @Published var automaticSummaries: Bool
     @Published var applicationLanguage: ApplicationLanguage
     @Published var applicationTheme: ApplicationTheme
@@ -17,6 +22,7 @@ import LocalScribeCore
 
     init(model: AppModel) {
         backgroundRecognition = model.backgroundRecognition
+        automaticLiveCaptions = model.automaticLiveCaptions
         automaticSummaries = model.automaticSummaries
         applicationLanguage = model.applicationLanguage
         applicationTheme = model.applicationTheme
@@ -47,7 +53,8 @@ import LocalScribeCore
     }
 
     func hasChanges(from model: AppModel) -> Bool {
-        backgroundRecognition != model.backgroundRecognition || automaticSummaries != model.automaticSummaries
+        backgroundRecognition != model.backgroundRecognition || automaticLiveCaptions != model.automaticLiveCaptions
+            || automaticSummaries != model.automaticSummaries
             || applicationLanguage != model.applicationLanguage
             || applicationTheme != model.applicationTheme
             || recordingSources != model.recordingSources

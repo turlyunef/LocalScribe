@@ -35,6 +35,7 @@ final class TimedCaptureWriter {
     private var ended: Set<CaptureAudioSource> = []
     private var finished = false
     private var failure: Error?
+    var liveCaptionAudio: LiveCaptionAudio?
 
     var totalFrames: Int64 { sink.totalFrames }
     var reachedLimit: Bool { tracks.values.contains { $0.acceptedThrough >= sink.totalFrameLimit } }
@@ -174,6 +175,9 @@ final class TimedCaptureWriter {
             }
             output.frameLength = AVAudioFrameCount(count)
             try sink.append(output)
+            if let originHostTime {
+                liveCaptionAudio?.append(output, startingAt: start, originHostTime: originHostTime)
+            }
         }
     }
 }
