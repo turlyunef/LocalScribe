@@ -271,11 +271,14 @@ enum SettingsTab {
 }
 
 struct ModelSettings: View {
+    private static let recognitionDictionaryMaxHeight =
+        25 * NSLayoutManager().defaultLineHeight(for: .systemFont(ofSize: NSFont.systemFontSize))
     @ObservedObject var model: AppModel
     @ObservedObject var draft: SettingsDraft
     @State private var asrID = ""
     @State private var showFiles = false
     @State private var choseASR = false
+    @State private var dictionaryBudgetError: (check: WhisperDictionaryValidation, message: String)?
     private var profiles: [ModelProfile] { model.catalog?.models ?? [] }
     private var summaryProfiles: [ModelProfile] { profiles.filter { $0.supports(.summary) } }
     private var diagramProfiles: [ModelProfile] { profiles.filter { $0.supports(.diagramRecognition) } }
@@ -301,17 +304,32 @@ struct ModelSettings: View {
         return asrCompatible || selectedSummaryProfile != nil
     }
     var body: some View {
+        let check = recognitionDictionaryBudgetCheck
         TabView(selection: $model.settingsTab) {
             Tab(L10n.text("Записи"), systemImage: "waveform", value: .recordings) { recordingSettings }
             Tab(L10n.text("Схемы"), systemImage: "square.grid.2x2", value: .diagrams) { diagramSettings }
             Tab(L10n.text("Обезличивание"), systemImage: "character.cursor.ibeam", value: .anonymization) { anonymizationSettingsTab }
             Tab(L10n.text("Общие"), systemImage: "gearshape", value: .general) { generalSettings }
         }
+        .disabled(draft.saving)
         .onAppear { initializeSelection() }
         .onChange(of: profiles.map(\.id)) { _, _ in initializeSelection() }
         .onChange(of: model.modelLibrary.selectedByRole) { _, _ in initializeSelection() }
         .onChange(of: model.modelLibrary.installedAt) { _, installed in
             draft.modelIDs = draft.modelIDs.filter { installed[$0.value] != nil }
+        }
+        .task(id: check) {
+            guard let check else { dictionaryBudgetError = nil; return }
+            do {
+                try await Task.sleep(for: .milliseconds(250))
+                try await check.validate()
+                try Task.checkCancellation()
+                dictionaryBudgetError = nil
+            } catch is CancellationError {
+            } catch {
+                guard !Task.isCancelled else { return }
+                dictionaryBudgetError = (check, L10n.message(error.localizedDescription))
+            }
         }
     }
 
@@ -334,7 +352,7 @@ struct ModelSettings: View {
                 Section(L10n.text("Словарь распознавания")) {
                     TextEditor(text: $draft.recognitionDictionaryText)
                         .font(.system(size: NSFont.systemFontSize))
-                        .frame(minHeight: 72)
+                        .frame(minHeight: 72, maxHeight: Self.recognitionDictionaryMaxHeight)
                         .accessibilityLabel(L10n.text("Словарь распознавания"))
                         .accessibilityIdentifier("settings.recognitionDictionary")
                     Text(L10n.text("Один термин на строку: названия продуктов, аббревиатуры, имена участников. Модель получает их как подсказку по написанию при расшифровке новых заданий. Список общий для WhisperKit и Qwen3-ASR и сохраняется, даже если поле сейчас скрыто."))
@@ -693,8 +711,15 @@ struct ModelSettings: View {
         return RecognitionDictionary.supportsHint(backend: backend)
     }
     private var recognitionDictionaryError: String? {
-        do { _ = try RecognitionDictionary.normalize(draft.recognitionDictionaryLines); return nil }
-        catch { return (error as? ScribeError)?.localizedDescription ?? error.localizedDescription }
+        do {
+            _ = try RecognitionDictionary.normalize(draft.recognitionDictionaryLines)
+            if let error = dictionaryBudgetError, error.check == recognitionDictionaryBudgetCheck { return error.message }
+            return nil
+        } catch { return L10n.message(error.localizedDescription) }
+    }
+    private var recognitionDictionaryBudgetCheck: WhisperDictionaryValidation? {
+        guard let terms = try? RecognitionDictionary.normalize(draft.recognitionDictionaryLines) else { return nil }
+        return model.whisperDictionaryValidation(asrID: asrID, terms: terms)
     }
     private func isInstalled(_ profile: ModelProfile) -> Bool {
         profile.effectiveSupportedTasks.isEmpty

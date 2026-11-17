@@ -22,6 +22,9 @@ let package = Package(
         .target(name: "CWorkerIsolation", linkerSettings: [.linkedLibrary("sandbox")]),
         .target(name: "CGigaAM", cSettings: gigaAMArchive == nil ? [] : [.define("LOCALSCRIBE_GIGAAM_STATIC")]),
         .target(name: "LocalScribeCore", resources: [.process("Localization")]),
+        .target(name: "LocalScribeWhisperHints", dependencies: [
+            "LocalScribeCore", .product(name: "WhisperKit", package: "argmax-oss-swift")
+        ]),
         .target(name: "LocalScribeQwen", dependencies: [
             .product(name: "MLX", package: "mlx-swift"),
             .product(name: "MLXNN", package: "mlx-swift"),
@@ -44,8 +47,8 @@ let package = Package(
             .enableUpcomingFeature("NonisolatedNonsendingByDefault")
         ]),
         .executableTarget(name: "LocalScribeModelService", dependencies: ["LocalScribeCore"], swiftSettings: [.swiftLanguageMode(.v5)]),
-        .executableTarget(name: "LocalScribe", dependencies: ["LocalScribeCore"], swiftSettings: [.swiftLanguageMode(.v5)]),
-        .executableTarget(name: "LocalScribeWorker", dependencies: ["LocalScribeCore", "CWorkerIsolation", "LocalScribeSpeakerKit", "LocalScribeQwen", "LocalScribeVibeVoice", "CGigaAM",
+        .executableTarget(name: "LocalScribe", dependencies: ["LocalScribeCore", "LocalScribeWhisperHints"], swiftSettings: [.swiftLanguageMode(.v5)]),
+        .executableTarget(name: "LocalScribeWorker", dependencies: ["LocalScribeCore", "LocalScribeWhisperHints", "CWorkerIsolation", "LocalScribeSpeakerKit", "LocalScribeQwen", "LocalScribeVibeVoice", "CGigaAM",
             .product(name: "WhisperKit", package: "argmax-oss-swift"),
             .product(name: "MLXLLM", package: "mlx-swift-lm"),
             .product(name: "MLXVLM", package: "mlx-swift-lm"),

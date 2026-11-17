@@ -35,8 +35,7 @@ final class QwenASREngine: ASREngine {
         try Task.checkCancellation()
         let alignment = try Qwen3ForcedAlignerModel.fromModelDirectory(aligner)
         try Task.checkCancellation()
-        let hintContext = self.hintContext
-        transcribe = { samples, _ in
+        transcribe = { samples, hintContext in
             let result = try model.generateSingleChunk(audio: MLXArray(samples), maxTokens: 1024,
                 temperature: 0, context: hintContext, language: nil)
             return Hypothesis(text: result.text, language: result.language)
@@ -71,21 +70,13 @@ final class QwenASREngine: ASREngine {
     /// break out of the system message. Every `<|…|>` marker-looking span and
     /// every control character is removed; everything else is kept for spelling.
     static func stripServiceMarkers(_ term: String) -> String {
-        let scalars = Array(term.unicodeScalars)
-        var kept: [Unicode.Scalar] = []
-        var index = 0
-        while index < scalars.count {
-            let window = scalars[index...]
-            if window.prefix(2).elementsEqual(["<", "|"] as [Unicode.Scalar]),
-               let close = window.firstRange(of: ["|", ">"] as [Unicode.Scalar]) {
-                index = close.upperBound
-                continue
-            }
-            let scalar = scalars[index]
-            if !CharacterSet.controlCharacters.contains(scalar) { kept.append(scalar) }
-            index += 1
+        let scalars = term.unicodeScalars.filter { !CharacterSet.controlCharacters.contains($0) }
+        var cleaned = String(String.UnicodeScalarView(scalars))
+        // Removing one span can expose another across the join.
+        while let marker = cleaned.range(of: #"<\|[\s\S]*?\|>"#, options: .regularExpression) {
+            cleaned.removeSubrange(marker)
         }
-        return String(String.UnicodeScalarView(kept)).trimmingCharacters(in: .whitespacesAndNewlines)
+        return cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     func recognize(_ request: ASRRequest) async throws -> ASRResult {

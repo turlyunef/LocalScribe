@@ -1,4 +1,7 @@
 {
+  "Каждый термин словаря распознавания должен занимать одну строку.": "Enter one recognition dictionary term per line.",
+  "Словарь изменился. Сохраните настройки ещё раз.": "The dictionary changed. Save the settings again.",
+  "Словарь распознавания не помещается в контекст модели Whisper: %1$@ токенов при лимите %2$@. Сократите список в настройках и выберите «Обработать заново» для существующего задания.": "The recognition dictionary uses %1$@ tokens, exceeding Whisper’s limit of %2$@. Shorten the list in Settings and choose Reprocess for an existing job.",
   " · загрузка не завершена": " · download incomplete",
   " · загрузка отменена": " · download canceled",
   " · импорт отменён": " · import canceled",

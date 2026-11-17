@@ -105,7 +105,7 @@ public struct RunInfo: Codable, Sendable {
     public var id: String
     public var sourceHash: String
     public var profileHash: String
-    public static let currentPipelineVersion = "1.0.0-audio2-asr13-live1-diarization4-summary17"
+    public static let currentPipelineVersion = "1.0.0-audio2-asr14-live1-diarization4-summary17"
     public var pipelineVersion = RunInfo.currentPipelineVersion
     public var summaryLanguage: String?
     public var modelIDs: [String: String]?
@@ -121,6 +121,23 @@ public struct RunInfo: Codable, Sendable {
     public var createdAt = Date()
     public init(id: String = UUID().uuidString, sourceHash: String, profileHash: String, summaryLanguage: String? = nil) {
         self.id = id; self.sourceHash = sourceHash; self.profileHash = profileHash; self.summaryLanguage = summaryLanguage
+    }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try values.decode(Int.self, forKey: .schemaVersion)
+        id = try values.decode(String.self, forKey: .id)
+        sourceHash = try values.decode(String.self, forKey: .sourceHash)
+        profileHash = try values.decode(String.self, forKey: .profileHash)
+        pipelineVersion = try values.decode(String.self, forKey: .pipelineVersion)
+        summaryLanguage = try values.decodeIfPresent(String.self, forKey: .summaryLanguage)
+        modelIDs = try values.decodeIfPresent([String: String].self, forKey: .modelIDs)
+        auxiliaryModelIDs = try values.decodeIfPresent([String: String].self, forKey: .auxiliaryModelIDs)
+        recognitionTerms = try values.decodeIfPresent([String].self, forKey: .recognitionTerms)
+        transcriptSourceRunID = try values.decodeIfPresent(String.self, forKey: .transcriptSourceRunID)
+        manualEdits = try values.decodeIfPresent(Bool.self, forKey: .manualEdits)
+        liveCapture = try values.decodeIfPresent(Bool.self, forKey: .liveCapture)
+        createdAt = try values.decode(Date.self, forKey: .createdAt)
+        try RecognitionDictionary.validateSnapshot(recognitionTerms)
     }
     /// Runs without a dictionary keep the historical formula; a non-empty
     /// dictionary changes recognition and therefore the checkpoint identity.

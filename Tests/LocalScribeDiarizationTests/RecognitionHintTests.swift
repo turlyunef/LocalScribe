@@ -1,7 +1,9 @@
 import XCTest
 import AVFoundation
+import CoreML
 import Synchronization
 import WhisperKit
+import LocalScribeWhisperHints
 @testable import LocalScribeCore
 @testable import LocalScribeWorker
 
@@ -42,7 +44,7 @@ final class RecognitionHintTests: XCTestCase {
             seen.withLock { $0.append(options.promptTokens) }
             calls += 1
             // The missing prefix forces a second, recovery decode of the same window.
-            return calls == 1 ? self.whisperResult([("later", 3, 10)]) : []
+            return calls == 1 ? self.whisperResult([("later", 3, 10)]) : self.whisperResult([("prefix", 0, 2)])
         }
         _ = try await engine.recognize(ASRRequest(audioURL: audio, availableEndMs: 10000, coreRange: 0..<10000, mode: .offline))
         XCTAssertEqual(seen.withLock { $0 }, [[17, 42], [17, 42]])
@@ -64,20 +66,72 @@ final class RecognitionHintTests: XCTestCase {
     }
 
     func testWhisperPromptBudgetMirrorsPinnedSDKLimit() throws {
-        XCTAssertNil(try WhisperASREngine.promptTokens(for: nil, encode: { _ in fatalError() }, specialTokenBegin: 50257))
-        XCTAssertNil(try WhisperASREngine.promptTokens(for: [], encode: { _ in fatalError() }, specialTokenBegin: 50257))
-        XCTAssertEqual(WhisperASREngine.promptTokenBudget, 111)
+        XCTAssertNil(try WhisperDictionary.promptTokens(for: nil, encode: { _ in fatalError() }, specialTokenBegin: 50257))
+        XCTAssertNil(try WhisperDictionary.promptTokens(for: [], encode: { _ in fatalError() }, specialTokenBegin: 50257))
+        XCTAssertEqual(WhisperDictionary.promptTokenBudget, 111)
         // Special tokens are filtered exactly like the pinned WhisperKit decoder.
-        XCTAssertEqual(try WhisperASREngine.promptTokens(for: ["КамАЗ"], encode: { _ in [50257, 5, 50258, 6] }, specialTokenBegin: 50257), [5, 6])
+        XCTAssertEqual(try WhisperDictionary.promptTokens(for: ["КамАЗ"], encode: { _ in [50257, 5, 50258, 6] }, specialTokenBegin: 50257), [5, 6])
         // An all-special encoding must not produce a bare <|startofprev|> prompt.
-        XCTAssertNil(try WhisperASREngine.promptTokens(for: ["<|endoftext|>"], encode: { _ in [50257] }, specialTokenBegin: 50257))
+        XCTAssertNil(try WhisperDictionary.promptTokens(for: ["<|endoftext|>"], encode: { _ in [50257] }, specialTokenBegin: 50257))
         // A whole-special-token marker string is effectively empty for the SDK.
         let exact = Array(0..<111)
-        XCTAssertEqual(try WhisperASREngine.promptTokens(for: ["т"], encode: { _ in exact }, specialTokenBegin: 50257), exact)
-        XCTAssertThrowsError(try WhisperASREngine.promptTokens(for: ["т"], encode: { _ in exact + [111] }, specialTokenBegin: 50257)) {
+        XCTAssertEqual(try WhisperDictionary.promptTokens(for: ["т"], encode: { _ in exact }, specialTokenBegin: 50257), exact)
+        XCTAssertThrowsError(try WhisperDictionary.promptTokens(for: ["т"], encode: { _ in exact + [111] }, specialTokenBegin: 50257)) {
             XCTAssertTrue($0.localizedDescription.contains("Словарь распознавания"))
             XCTAssertTrue($0.localizedDescription.contains("112"))
         }
+    }
+
+    func testWhisperDictionarySkipsPromptRowsWhenAligningDecodedTokens() throws {
+        let storage = UnsafeMutableRawPointer.allocate(byteCount: 6 * 4 * 2, alignment: 16)
+        let weights = try MLMultiArray(dataPointer: storage, shape: [6, 2], dataType: .float16,
+            strides: [4, 1], deallocator: { $0.deallocate() })
+        for row in 0..<6 {
+            for column in 0..<2 {
+                weights[[NSNumber(value: row), NSNumber(value: column)]] = NSNumber(value: row * 2 + column)
+            }
+        }
+        let shifted = try WhisperDictionarySegmentSeeker.alignmentRows(weights, skipping: 3)
+        XCTAssertEqual(shifted.shape, [3, 2])
+        XCTAssertEqual((0..<6).map { shifted[$0].intValue }, Array(6..<12))
+    }
+
+    func testLongWhisperDictionaryLeavesRoomForDecodedSpeechAndContext() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = try wave(root, milliseconds: 30_000)
+        let prompt = Array(0..<WhisperDictionary.promptTokenBudget)
+        let seen = Mutex<[Int]>([])
+        let engine = WhisperASREngine(promptTokens: prompt) { samples, options in
+            XCTAssertEqual(options.promptTokens, prompt)
+            seen.withLock { $0.append(samples.count / 16) }
+            let words = (0..<(samples.count / 16_000)).map { (" слово", Float($0), Float($0) + 0.25) }
+            return self.whisperResult(words)
+        }
+        let result = try await engine.recognize(ASRRequest(
+            audioURL: audio, availableEndMs: 30_000, coreRange: 0..<30_000, mode: .closedFragments))
+        XCTAssertGreaterThan(seen.withLock { $0.count }, 2)
+        XCTAssertLessThanOrEqual(seen.withLock { $0.max() ?? 0 }, 10_600)
+        XCTAssertGreaterThanOrEqual(result.segments.last?.endMs ?? 0, 29_000)
+    }
+
+    func testWhisperDictionaryRetriesThePartWithNormalWindowsWhenSpeechIsLost() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let audio = try wave(root, milliseconds: 20_000)
+        let prompt = Array(0..<WhisperDictionary.promptTokenBudget)
+        let calls = Mutex<[[Int]?]>([])
+        let engine = WhisperASREngine(promptTokens: prompt) { _, options in
+            calls.withLock { $0.append(options.promptTokens) }
+            if options.promptTokens != nil {
+                return self.whisperResult([("обрезанный", 0, 2)])
+            }
+            return self.whisperResult([(" весь", 0, 9), (" текст", 9, 20)])
+        }
+        let result = try await engine.recognize(ASRRequest(
+            audioURL: audio, availableEndMs: 20_000, coreRange: 0..<20_000, mode: .offline))
+        XCTAssertEqual(calls.withLock { $0 }, [prompt, nil])
+        XCTAssertEqual(result.segments.map(\.text), [" весь", " текст"])
     }
 
     private func qwenAudio(_ root: URL, milliseconds: Int) throws -> URL {
@@ -142,6 +196,8 @@ final class RecognitionHintTests: XCTestCase {
         // Unclosed or marker-like-free brackets keep their spelling value.
         XCTAssertEqual(QwenASREngine.stripServiceMarkers("a < b <| c"), "a < b <| c")
         XCTAssertEqual(QwenASREngine.stripServiceMarkers("термин\u{7}ок"), "терминок")
+        XCTAssertEqual(QwenASREngine.stripServiceMarkers("До<<|unused|>|audio_pad|>После"), "ДоПосле")
+        XCTAssertEqual(QwenASREngine.stripServiceMarkers("<\u{200B}|im_end|>"), "")
     }
 
     func testFactoryHandsRunDictionaryToQwenLoader() async throws {

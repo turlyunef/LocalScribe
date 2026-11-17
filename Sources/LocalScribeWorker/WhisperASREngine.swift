@@ -1,5 +1,6 @@
 import Foundation
 import LocalScribeCore
+import LocalScribeWhisperHints
 import WhisperKit
 
 /// Experimental switches are independent. App/worker callers use `.production`;
@@ -25,23 +26,22 @@ struct WhisperRecognitionPolicy: Sendable {
 }
 
 final class WhisperASREngine: ASREngine {
+    private struct UnreliableDictionaryDecode: Error {}
+
     let capabilities = ASRCapabilities(inputModes: [.offline, .closedFragments], wordTimings: .available)
-    /// The prompt budget of the pinned WhisperKit: TextDecoder keeps at most
-    /// `Constants.maxTokenContext / 2 - 1` prompt tokens, so anything longer
-    /// would be silently trimmed there and is rejected here instead.
-    static let promptTokenBudget = 111
     static var decodingOptions: DecodingOptions {
         DecodingOptions(verbose: false, task: .transcribe, language: nil, temperatureFallbackCount: 2,
             detectLanguage: true, skipSpecialTokens: true, wordTimestamps: true, windowClipTime: 0, concurrentWorkerCount: 1)
     }
     private var promptTokens: [Int]?
-    /// Identical hint in primary and every recovery/review pass.
+    /// Start each primary and recovery pass with the same hint.
     private var options: DecodingOptions {
         var options = Self.decodingOptions
         options.promptTokens = promptTokens
         return options
     }
     private let transcribe: ([Float], DecodingOptions) async throws -> [TranscriptionResult]
+    private let dictionarySegmentSeeker: WhisperDictionarySegmentSeeker?
     private let policy: WhisperRecognitionPolicy
     private let metrics: ASRMetricsRecorder?
     private let warning: @Sendable (String) -> Void
@@ -57,26 +57,17 @@ final class WhisperASREngine: ASREngine {
         defer { metrics?.modelLoaded(seconds: ProcessInfo.processInfo.systemUptime - started) }
         let folder = models.appendingPathComponent(try info.modelID(for: .asr)), tokenizer = models.appendingPathComponent(try info.modelID(for: .tokenizer))
         guard FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer.json").path), FileManager.default.fileExists(atPath: tokenizer.appendingPathComponent("tokenizer_config.json").path) else { throw ScribeError.message("Отсутствует локальный токенизатор Whisper") }
-        let kit = try await WhisperKit(WhisperKitConfig(modelFolder: folder.path, tokenizerFolder: tokenizer, verbose: false, logLevel: .none, prewarm: true, load: true, download: false))
+        let segmentSeeker = info.recognitionTerms?.isEmpty == false ? WhisperDictionarySegmentSeeker() : nil
+        dictionarySegmentSeeker = segmentSeeker
+        let kit = try await WhisperKit(WhisperKitConfig(modelFolder: folder.path, tokenizerFolder: tokenizer,
+            segmentSeeker: segmentSeeker, verbose: false, logLevel: .none, prewarm: true, load: true, download: false))
         guard let whisperTokenizer = kit.tokenizer else { throw ScribeError.message("Токенизатор Whisper не загружен") }
         // Mirrors the SDK handling: special tokens are filtered, and an empty
         // remainder must not produce a bare <|startofprev|> prefill.
-        self.promptTokens = try Self.promptTokens(for: info.recognitionTerms,
+        self.promptTokens = try WhisperDictionary.promptTokens(for: info.recognitionTerms,
             encode: { whisperTokenizer.encode(text: $0) },
             specialTokenBegin: whisperTokenizer.specialTokens.specialTokenBegin)
         transcribe = { samples, options in try await kit.transcribe(audioArray: samples, decodeOptions: options) }
-    }
-
-    /// Encode the dictionary with the loaded model's tokenizer. The list is
-    /// encoded as a whole, so a budget violation is an error naming both counts
-    /// instead of a silent suffix trim inside WhisperKit.
-    static func promptTokens(for terms: [String]?, encode: (String) -> [Int], specialTokenBegin: Int) throws -> [Int]? {
-        guard let terms, !terms.isEmpty else { return nil }
-        let encoded = encode(terms.joined(separator: ", ")).filter { $0 < specialTokenBegin }
-        guard encoded.count <= promptTokenBudget else {
-            throw ScribeError.message("Словарь распознавания не помещается в контекст модели Whisper: \(encoded.count) токенов при лимите \(promptTokenBudget). Сократите список в настройках и повторите обработку.")
-        }
-        return encoded.isEmpty ? nil : encoded
     }
 
     /// Exercise scheduling, timestamp ownership and recovery without model weights.
@@ -88,8 +79,20 @@ final class WhisperASREngine: ASREngine {
         self.metrics = metrics; self.policy = policy; self.warning = warning; self.transcribe = transcribe
         self.contextReview = contextReview
         self.promptTokens = promptTokens
+        dictionarySegmentSeeker = nil
     }
     func recognize(_ request: ASRRequest) async throws -> ASRResult {
+        do {
+            return try await recognize(request, options: options)
+        } catch is UnreliableDictionaryDecode {
+            // Keep the usual window boundaries and context for the entire
+            // part. Hinted and unhinted word ownership cannot be spliced at
+            // the shortened windows without risking duplicates or omissions.
+            return try await recognize(request, options: Self.decodingOptions)
+        }
+    }
+
+    private func recognize(_ request: ASRRequest, options: DecodingOptions) async throws -> ASRResult {
         try Task.checkCancellation()
         let wave = request.audioURL, coreStart = request.coreRange.lowerBound, coreEnd = request.coreRange.upperBound
         let durationMs = request.availableEndMs, originMs = request.originMs
@@ -98,9 +101,14 @@ final class WhisperASREngine: ASREngine {
         }
         var segments: [Segment] = []
         var offset = coreStart
+        // Leave room for the transcript, timestamps and both seconds of PCM
+        // overlap. Dense speech can still hit the hard cap and is retried.
+        let maximumInputMs = options.promptTokens.map { (Constants.maxTokenContext - 7 - $0.count) * 100 } ?? 30_000
+        let maximumCoreMs = maximumInputMs - 2000
+        let checkDictionaryQuality = options.promptTokens != nil && !policy.reviewContext
         while offset < coreEnd {
             try Task.checkCancellation()
-            let planning = try Media.samples(wave, start: Double(offset-originMs)/1000, duration: Double(min(coreEnd-offset, WhisperASRWindowing.asrCoreWindowMs))/1000)
+            let planning = try Media.samples(wave, start: Double(offset-originMs)/1000, duration: Double(min(coreEnd-offset, maximumCoreMs))/1000)
             let length = max(1, WhisperASRWindowing.nextASRWindowLength(planning, policy: policy.window) / 16)
             let end = min(coreEnd, offset + length)
             let readStart = max(originMs, offset - 1000), readEnd = min(durationMs, end + 1000)
@@ -109,25 +117,31 @@ final class WhisperASREngine: ASREngine {
             metrics?.window(milliseconds: end - offset, silent: energy <= 1e-12)
             if energy > 1e-12 {
                 // The SDK otherwise skips clips/tails shorter than one second.
-                let options = self.options
                 let results = try await decode(samples, options: options, phase: .primary)
                 var recoveryContexts: [Range<Int>] = []
                 var recognized = mappedSegments(results, readStart: readStart, start: offset, end: end, durationMs: durationMs)
                 if let missingEnd = WhisperASRWindowing.missingASRPrefixEnd(segments: recognized, samples: samples, readStartMs: readStart, coreStartMs: offset, coreEndMs: end) {
                     // A pause-sized clip can produce only special tokens (not
-                    // necessarily a high noSpeechProb). Retry with up to 30 s
+                    // necessarily a high noSpeechProb). Retry within the input budget
                     // of real context, retaining ownership of the missing prefix.
-                    let retryEnd = min(durationMs, readStart + 30_000)
-                    let retryStart = max(originMs, retryEnd - 30_000)
+                    let retryEnd = min(durationMs, readStart + maximumInputMs)
+                    let retryStart = max(originMs, retryEnd - maximumInputMs)
                     let context = try Media.samples(wave, start: Double(retryStart-originMs)/1000, duration: Double(retryEnd-retryStart)/1000)
                     let retried = try await decode(context, options: options, phase: .prefixRecovery)
                     if policy.reviewContext { recoveryContexts.append(retryStart..<retryEnd) }
                     let recovered = mappedSegments(retried, readStart: retryStart, start: offset, end: missingEnd, durationMs: durationMs)
                     recognized = recovered + recognized
                     if WhisperASRWindowing.missingASRPrefixEnd(segments: recognized, samples: samples, readStartMs: readStart, coreStartMs: offset, coreEndMs: end) != nil {
+                        if checkDictionaryQuality { throw UnreliableDictionaryDecode() }
                         metrics?.missingPrefix()
                         warning("В интервале \(timecode(offset))–\(timecode(missingEnd)) есть звук, но начало речи не распознано. Прослушайте исходник; можно повторить обработку другой моделью.")
                     }
+                }
+                if checkDictionaryQuality,
+                   (!recognized.isEmpty && recognized.allSatisfy(\.uncertain))
+                    || !WhisperASRWindowing.missingASRInteriorRanges(segments: recognized, samples: samples,
+                        readStartMs: readStart, coreStartMs: offset, coreEndMs: end).isEmpty {
+                    throw UnreliableDictionaryDecode()
                 }
                 if policy.recoverInteriorGaps {
                     let gaps = WhisperASRWindowing.missingASRInteriorRanges(segments: recognized, samples: samples,
@@ -188,9 +202,18 @@ final class WhisperASREngine: ASREngine {
         return ASRResult(segments: segments)
     }
 
-    // Internal for the explicit frozen-baseline probe; production scheduling is unchanged.
+    // Also used by the explicit frozen-baseline probe.
     func decode(_ samples: [Float], options: DecodingOptions, phase: ASRCallPhase) async throws -> [TranscriptionResult] {
+        let results = try await decodeOnce(samples, options: options, phase: phase)
+        guard dictionarySegmentSeeker?.exhaustedContext == true else { return results }
+        var retry = options
+        retry.promptTokens = nil
+        return try await decodeOnce(samples, options: retry, phase: phase)
+    }
+
+    private func decodeOnce(_ samples: [Float], options: DecodingOptions, phase: ASRCallPhase) async throws -> [TranscriptionResult] {
         try Task.checkCancellation()
+        dictionarySegmentSeeker?.beginCall()
         metrics?.startCall(samples: samples.count, phase: phase)
         let started = ProcessInfo.processInfo.systemUptime
         do {

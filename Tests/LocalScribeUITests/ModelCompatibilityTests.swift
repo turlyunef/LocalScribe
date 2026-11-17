@@ -47,7 +47,7 @@ final class ModelCompatibilityTests: XCTestCase {
         let heavy = try XCTUnwrap(catalog.models.last)
         // Spoofing metadata in a direct caller must not bypass the authoritative catalog.
         var spoof = heavy; spoof.recommendedMemoryGB = 0; spoof.workingMemoryGB = 0
-        model.installModels([spoof]); model.importModel(spoof); model.selectModel(spoof)
+        model.installModels([spoof]); model.importModel(spoof); await model.selectModel(spoof)
         XCTAssertFalse(model.installing)
         XCTAssertEqual(model.errorHandler.messages.count, 3)
         XCTAssertTrue(model.errorHandler.messages.allSatisfy { $0.contains("32 ГБ") })
@@ -128,7 +128,7 @@ final class ModelCompatibilityTests: XCTestCase {
         manifest.state = .queued; try repo.save(manifest)
         let path = repo.folder(manifest.id).appendingPathComponent("manifest.json"), before = try Data(contentsOf: path)
         let oldPosition = model.queuePosition(for: manifest.id)
-        model.selectModel(qwen)
+        await model.selectModel(qwen)
         XCTAssertEqual(try Data(contentsOf: path), before)
         XCTAssertEqual(model.queuePosition(for: manifest.id), oldPosition)
         XCTAssertEqual(model.activeCatalog?.models.last?.id, "aligner")

@@ -2,6 +2,23 @@ import AppKit
 import Combine
 import SwiftUI
 import LocalScribeCore
+import LocalScribeWhisperHints
+
+struct WhisperDictionaryValidation: Equatable, Sendable {
+    let models: URL
+    let profile: ModelProfile
+    let terms: [String]
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        lhs.models == rhs.models && lhs.profile.id == rhs.profile.id && lhs.profile.revision == rhs.profile.revision
+            && lhs.profile.files.map(\.sha256) == rhs.profile.files.map(\.sha256) && lhs.terms == rhs.terms
+    }
+
+    func validate() async throws {
+        let tokenizer = try await WhisperDictionaryTokenizer(profile: profile, models: models)
+        _ = try tokenizer.promptTokens(for: terms)
+    }
+}
 
 @MainActor final class SettingsDraft: ObservableObject {
     @Published var backgroundRecognition: Bool {
@@ -20,6 +37,8 @@ import LocalScribeCore
     @Published var anonymizationProfileID: String
     @Published var dataTypesText: String
     @Published var recognitionDictionaryText: String
+    @Published var saving = false
+    private(set) var validatedDictionary: WhisperDictionaryValidation?
     private var savedRecordingSources: RecordingSourcePreferences
     private var recordingSourcesObserver: AnyCancellable?
     private let initialTaskSelections: [ModelTask: String]
@@ -64,6 +83,15 @@ import LocalScribeCore
 
     var dataTypesLines: [String] { dataTypesText.components(separatedBy: .newlines) }
     var recognitionDictionaryLines: [String] { recognitionDictionaryText.components(separatedBy: .newlines) }
+
+    func validateRecognitionDictionary(using model: AppModel) async throws {
+        let terms = try RecognitionDictionary.normalize(recognitionDictionaryLines)
+        let check = model.whisperDictionaryValidation(for: self, terms: terms)
+        try await check?.validate()
+        try Task.checkCancellation()
+        validatedDictionary = check
+    }
+
     func taskModelChanges(from model: AppModel) -> [ModelTask: String] {
         let selections: [ModelTask: String] = [
             .summary: summaryModelID, .diagramRecognition: diagramModelID, .anonymization: anonymizationProfileID
@@ -94,6 +122,7 @@ import LocalScribeCore
     private weak var model: AppModel?
     private let defaults: UserDefaults
     private var draft: SettingsDraft?
+    private var saveTask: Task<Void, Never>?
     private(set) var window: NSWindow?
 
     init(model: AppModel, defaults: UserDefaults) {
@@ -154,11 +183,20 @@ import LocalScribeCore
     }
 
     private func saveAndClose() {
-        guard let model, let draft else { return }
-        do {
-            try model.applySettings(draft)
-            window?.close()
-        } catch { model.errorHandler.report(error) }
+        guard let model, let draft, saveTask == nil else { return }
+        draft.saving = true
+        saveTask = Task { [weak self] in
+            defer {
+                draft.saving = false
+                if self?.draft === draft { self?.saveTask = nil }
+            }
+            do {
+                try await draft.validateRecognitionDictionary(using: model)
+                try model.applySettings(draft)
+                self?.window?.close()
+            } catch is CancellationError {
+            } catch { model.errorHandler.report(error) }
+        }
     }
 
     func windowShouldClose(_ sender: NSWindow) -> Bool {
@@ -190,6 +228,8 @@ import LocalScribeCore
     }
 
     func windowWillClose(_ notification: Notification) {
+        saveTask?.cancel()
+        saveTask = nil
         window = nil
         draft = nil
     }

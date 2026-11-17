@@ -59,7 +59,8 @@ final class RecognitionDictionarySettingsTests: XCTestCase {
     }
 
     private func makeModel(root: URL, defaults: UserDefaults, worker: URL? = nil,
-                           asrBackend: String? = nil, recommendWhisper: Bool = true) throws -> (RecordingRepository, AppModel, ModelCatalog) {
+                           asrBackend: String? = nil, recommendWhisper: Bool = true,
+                           tokenizerFiles: [String: String] = [:]) throws -> (RecordingRepository, AppModel, ModelCatalog) {
         let repo = try RecordingRepository(root: root)
         var profiles = ModelRole.audioRoles.map { role in
             ModelProfile(id: role.rawValue, repository: "test/model", revision: "test-revision", license: "test", files: [], role: role)
@@ -74,6 +75,14 @@ final class RecognitionDictionarySettingsTests: XCTestCase {
             let file = folder.appendingPathComponent("weights.bin")
             try data.write(to: file)
             profiles[index].files = [ModelFile(path: "weights.bin", localPath: "weights.bin", size: Int64(data.count), sha256: try Disk.hash(file))]
+            if profiles[index].purpose == .tokenizer {
+                for (name, json) in tokenizerFiles.sorted(by: { $0.key < $1.key }) {
+                    let data = Data(json.utf8)
+                    let file = folder.appendingPathComponent(name)
+                    try data.write(to: file)
+                    profiles[index].files.append(ModelFile(path: name, localPath: name, size: Int64(data.count), sha256: try Disk.hash(file)))
+                }
+            }
         }
         let catalog = ModelCatalog(models: profiles)
         let model = AppModel(repository: repo, startServices: false, workerExecutable: worker, userDefaults: defaults, catalog: catalog,
@@ -172,6 +181,37 @@ final class RecognitionDictionarySettingsTests: XCTestCase {
         }
     }
 
+    func testInstalledWhisperTokenizerRejectsAnOversizedDictionaryBeforeSave() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let defaults = try makeDefaults()
+        let files = [
+            "tokenizer_config.json": #"{"tokenizer_class":"WhisperTokenizer","unk_token":"?"}"#,
+            "tokenizer.json": #"{"model":{"type":"BPE","unk_token":"?","vocab":{"a":0,",":1," ":2,"?":3},"merges":[]}}"#
+        ]
+        let (_, model, _) = try makeModel(root: root, defaults: defaults, tokenizerFiles: files)
+        let draft = SettingsDraft(model: model)
+        draft.recognitionDictionaryText = String(repeating: "a", count: 60) + "\n" + String(repeating: "a", count: 61)
+        let (hosting, window) = try hostSettings(model, draft: draft)
+        defer { window.close() }
+        try await waitUntil { findElement("settings.recognitionDictionary.error", in: hosting) != nil }
+        do {
+            try await draft.validateRecognitionDictionary(using: model)
+            XCTFail("Expected a tokenizer budget error")
+        } catch {
+            XCTAssertTrue(error.localizedDescription.contains("при лимите 111"), error.localizedDescription)
+        }
+        XCTAssertThrowsError(try model.applySettings(draft))
+        XCTAssertTrue(model.recognitionDictionary.isEmpty)
+        XCTAssertNil(defaults.stringArray(forKey: "recognitionDictionary"))
+
+        draft.recognitionDictionaryText = "aaa"
+        try await draft.validateRecognitionDictionary(using: model)
+        try model.applySettings(draft)
+        XCTAssertEqual(model.recognitionDictionary, ["aaa"])
+        await model.shutdown()
+    }
+
     // MARK: - Visibility of the settings field
 
     private func hostSettings(_ model: AppModel, draft: SettingsDraft) throws -> (NSHostingView<ModelSettings>, NSWindow) {
@@ -236,6 +276,50 @@ final class RecognitionDictionarySettingsTests: XCTestCase {
             XCTAssertEqual(present, testCase.expected, "backend \(testCase.backend ?? "whisper")")
             await model.shutdown()
         }
+    }
+
+    func testDictionaryEditorGrowsTo25LinesAndScrollsToEditableOverflow() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (_, model, _) = try makeModel(root: root, defaults: makeDefaults())
+        let draft = SettingsDraft(model: model)
+        let (hosting, window) = try hostSettings(model, draft: draft)
+        defer { window.close() }
+
+        func textView(in view: NSView) -> NSTextView? {
+            if let editor = view as? NSTextView { return editor }
+            return view.subviews.lazy.compactMap { textView(in: $0) }.first
+        }
+
+        try await waitUntil { textView(in: hosting) != nil }
+        let editor = try XCTUnwrap(textView(in: hosting))
+        let scroll = try XCTUnwrap(editor.enclosingScrollView)
+        let font = try XCTUnwrap(editor.font)
+        let lineHeight = NSLayoutManager().defaultLineHeight(for: font)
+        XCTAssertEqual(scroll.contentSize.height, 72, accuracy: 1)
+
+        for count in [12, 25, 26, 100] {
+            let text = (1...count).map { "Термин \($0)" }.joined(separator: "\n")
+            draft.recognitionDictionaryText = text
+            let expectedHeight = CGFloat(min(count, 25)) * lineHeight
+            try await waitUntil {
+                hosting.layoutSubtreeIfNeeded()
+                return editor.string == text && abs(scroll.contentSize.height - expectedHeight) < 1
+            }
+        }
+
+        let end = NSRange(location: editor.string.utf16.count, length: 0)
+        editor.scrollRangeToVisible(end)
+        XCTAssertGreaterThan(scroll.contentView.bounds.minY, 0)
+        editor.insertText("!", replacementRange: end)
+        try await waitUntil { draft.recognitionDictionaryText.hasSuffix("Термин 100!") }
+
+        draft.recognitionDictionaryText = ""
+        try await waitUntil {
+            hosting.layoutSubtreeIfNeeded()
+            return editor.string.isEmpty && abs(scroll.contentSize.height - 72) < 1
+        }
+        await model.shutdown()
     }
 
     // MARK: - Run creation points pin the snapshot

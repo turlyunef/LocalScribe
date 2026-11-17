@@ -165,9 +165,9 @@ final class ProcessingQueueTests: XCTestCase {
         _ = try await model.archive?.refresh(m.id); await model.reload(); model.selection = m.id
         return (m, info, try Data(contentsOf: checkpoint))
     }
-    private func selectB(_ model: AppModel) throws {
+    private func selectB(_ model: AppModel) async throws {
         let b = try XCTUnwrap(model.catalog?.models.first { $0.id == "asr-b" })
-        model.selectModel(b)
+        await model.selectModel(b)
         XCTAssertEqual(model.modelLibrary.selectedByRole["asr"], b.id)
     }
     func testPauseInvalidatesResumeBeforeItEnqueues() async throws {
@@ -708,7 +708,7 @@ final class ProcessingQueueTests: XCTestCase {
             let (m, info, checkpoint) = try await interrupted(repo, model: model, legacy: legacy)
             let infoPath = repo.run(m.id, info.id).appendingPathComponent("run.json")
             let runBytes = try Data(contentsOf: infoPath)
-            try selectB(model)
+            try await selectB(model)
             XCTAssertNotEqual(model.activeCatalog?.fingerprint, info.profileHash)
             XCTAssertEqual(try repo.load(m.id).pendingRunId, info.id)
             model.resume(m.id)
@@ -731,7 +731,7 @@ final class ProcessingQueueTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: root) }
         let (repo, model, release) = try fixture(root)
         let (m, info, _) = try await interrupted(repo, model: model)
-        try selectB(model)
+        try await selectB(model)
         let b = try XCTUnwrap(model.catalog?.models.first { $0.id == "asr-b" })
         try FileManager.default.removeItem(at: repo.models.appendingPathComponent(b.id))
         // Simulate an unavailable new-job selection while all pinned A files exist.
@@ -752,7 +752,7 @@ final class ProcessingQueueTests: XCTestCase {
         let (m, info, checkpoint) = try await interrupted(repo, model: model)
         let infoPath = repo.run(m.id, info.id).appendingPathComponent("run.json")
         let oldRun = try Data(contentsOf: infoPath)
-        try selectB(model)
+        try await selectB(model)
         try FileManager.default.removeItem(at: repo.models.appendingPathComponent("asr"))
         model.resume(m.id)
         try await waitUntil { !model.busy && !model.finalizingRecording && (try? repo.load(m.id).state) == .failed }

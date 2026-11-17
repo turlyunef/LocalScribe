@@ -92,12 +92,7 @@ public struct RecordingRepository: Sendable {
         if manifest.sourceComplete, manifest.durationMs > Manifest.maximumDurationMs {
             throw ScribeError.message("Запись длиннее 3 часов. Автоматическое усечение отключено.")
         }
-        if let recognitionTerms, !recognitionTerms.isEmpty {
-            try RecognitionDictionary.validate(recognitionTerms)
-            guard recognitionTerms == RecognitionDictionary.sanitized(recognitionTerms) else {
-                throw ScribeError.message("Некорректный снимок словаря распознавания")
-            }
-        }
+        try RecognitionDictionary.validateSnapshot(recognitionTerms)
         if liveCapture {
             guard catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {
                 throw ScribeError.message("Выбранная модель поддерживает только обработку готовой записи")

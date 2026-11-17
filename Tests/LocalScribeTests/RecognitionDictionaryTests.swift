@@ -84,6 +84,12 @@ final class RecognitionDictionaryTests: XCTestCase {
         XCTAssertEqual(saved.recognitionTerms, terms)
         XCTAssertThrowsError(try repo.beginRun(&m, catalog: catalog, recognitionTerms: [" ", "термин", "термин"]))
         XCTAssertThrowsError(try repo.beginRun(&m, catalog: catalog, recognitionTerms: [String(repeating: "д", count: 200)]))
+        XCTAssertThrowsError(try repo.beginRun(&m, catalog: catalog, recognitionTerms: ["LocalScribe\nКамАЗ"]))
+        XCTAssertEqual(m.pendingRunId, info.id)
+        var damaged = info
+        damaged.recognitionTerms = ["LocalScribe\nКамАЗ"]
+        XCTAssertEqual(damaged.fingerprint, info.fingerprint)
+        XCTAssertThrowsError(try JSONDecoder().decode(RunInfo.self, from: JSONEncoder().encode(damaged)))
         // An empty list never pins a dictionary.
         let empty = try repo.beginRun(&m, catalog: catalog, recognitionTerms: [])
         XCTAssertNil(empty.recognitionTerms)

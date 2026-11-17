@@ -37,6 +37,9 @@ public enum RecognitionDictionary {
         guard terms.count <= maximumTerms else {
             throw ScribeError.message("Словарь распознавания превышает \(maximumTerms) терминов. Удалите лишние строки.")
         }
+        guard terms.allSatisfy({ $0.rangeOfCharacter(from: .newlines) == nil }) else {
+            throw ScribeError.message("Каждый термин словаря распознавания должен занимать одну строку.")
+        }
         for term in terms where term.count > maximumTermCharacters {
             throw ScribeError.message("Термин словаря распознавания длиннее \(maximumTermCharacters) символов. Разбейте или сократите его.")
         }
@@ -51,6 +54,14 @@ public enum RecognitionDictionary {
         let terms = sanitized(lines)
         try validate(terms)
         return terms
+    }
+
+    static func validateSnapshot(_ terms: [String]?) throws {
+        guard let terms, !terms.isEmpty else { return }
+        try validate(terms)
+        guard terms == sanitized(terms) else {
+            throw ScribeError.message("Некорректный снимок словаря распознавания")
+        }
     }
 
     /// A pinned snapshot is meaningful only for the supported backends.

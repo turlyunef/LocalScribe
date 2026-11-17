@@ -700,7 +700,7 @@ struct QueueJobID: Hashable, Sendable {
             }
         }
     }
-    func selectModel(_ profile: ModelProfile) {
+    func selectModel(_ profile: ModelProfile) async {
         guard canManageModels,
               let profile = compatibleProfiles([profile])?.first else { return }
         do {
@@ -711,6 +711,7 @@ struct QueueJobID: Hashable, Sendable {
             case let role?: draft.modelIDs[role] = profile.id
             case nil: return
             }
+            try await draft.validateRecognitionDictionary(using: self)
             try applySettings(draft)
         }
         catch { errorHandler.report(error) }
@@ -719,6 +720,9 @@ struct QueueJobID: Hashable, Sendable {
         var settings = anonymizationSettings
         try settings.applyDataTypes(draft.dataTypesLines)
         let dictionary = try RecognitionDictionary.normalize(draft.recognitionDictionaryLines)
+        if let check = whisperDictionaryValidation(for: draft, terms: dictionary), draft.validatedDictionary != check {
+            throw ScribeError.message("Словарь изменился. Сохраните настройки ещё раз.")
+        }
         let taskChanges = draft.taskModelChanges(from: self)
         let libraryChanges = draft.changedModels(in: modelLibrary)
         if !taskChanges.isEmpty || !libraryChanges.isEmpty {
@@ -769,6 +773,24 @@ struct QueueJobID: Hashable, Sendable {
             userDefaults.set(draft.applicationTheme.rawValue, forKey: ApplicationTheme.defaultsKey)
             draft.applicationTheme.apply()
         }
+    }
+
+    func whisperDictionaryValidation(for draft: SettingsDraft, terms: [String]) -> WhisperDictionaryValidation? {
+        let selected = modelLibrary.selectedByRole
+        let asrID = draft.modelIDs[.asr] ?? selected[ModelRole.asr.rawValue] ?? initialModelID(for: .asr)
+        let tokenizerID = draft.modelIDs[.tokenizer] ?? selected[ModelRole.tokenizer.rawValue]
+        guard terms != recognitionDictionary || draft.modelIDs[.asr] != nil || draft.modelIDs[.tokenizer] != nil else { return nil }
+        return whisperDictionaryValidation(asrID: asrID, terms: terms, tokenizerID: tokenizerID)
+    }
+
+    func whisperDictionaryValidation(asrID: String, terms: [String], tokenizerID: String? = nil) -> WhisperDictionaryValidation? {
+        guard !terms.isEmpty, let repository, let catalog,
+              let asr = catalog.models.first(where: { $0.id == asrID && $0.purpose == .asr }),
+              asr.resolvedASRBackend == "whisper",
+              let profile = catalog.models.first(where: { $0.id == (asr.tokenizerID ?? tokenizerID ?? "tokenizer") && $0.purpose == .tokenizer }),
+              modelLibrary.isInstalled(profile),
+              Set(profile.files.map(\.localPath)).isSuperset(of: ["tokenizer.json", "tokenizer_config.json"]) else { return nil }
+        return WhisperDictionaryValidation(models: repository.models, profile: profile, terms: terms)
     }
 
     func setRecordingSources(_ preferences: RecordingSourcePreferences) {
