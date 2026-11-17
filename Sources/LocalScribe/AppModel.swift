@@ -87,6 +87,7 @@ struct QueueJobID: Hashable, Sendable {
             sidebarSelection = SidebarSelection(selection)
             retainSearchSelection()
             if oldValue != selection {
+                playback.select(playbackSource)
                 jumpTo = nil; transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil
                 if tab == .live { tab = .transcript }
                 loadLiveCaptions()
@@ -101,6 +102,7 @@ struct QueueJobID: Hashable, Sendable {
     let errorHandler = AppErrorHandler()
     let indicators = ActivityIndicators()
     let resultPresentation = ResultPresentation()
+    let playback = RecordingPlayback()
     private var resultRevision: UInt64 = 0
     private(set) var copyTask: Task<Void, Never>?
     private var exportTasks: [UUID: Task<Void, Never>] = [:]
@@ -1922,7 +1924,10 @@ struct QueueJobID: Hashable, Sendable {
         deletingJobIDs.formUnion(jobs)
         // Cancellation can publish a new snapshot before the files are removed.
         // Discard any in-flight read for the selected recording before that reload.
-        if let selection, ids.contains(selection) { resultSignature = "" }
+        if let selection, ids.contains(selection) {
+            playback.select(nil)
+            resultSignature = ""
+        }
         for job in jobs {
             jobAdmission[job, default: 0] &+= 1
             enqueuing.removeValue(forKey: job)
@@ -2753,6 +2758,31 @@ struct QueueJobID: Hashable, Sendable {
     }
 
     func showAudio() { guard let selected, let repository else { return }; NSWorkspace.shared.activateFileViewerSelecting([repository.folder(selected.id).appendingPathComponent(selected.originalRelativePath)]) }
+
+    var playbackSource: RecordingPlayback.Source? {
+        guard let selected, let repository, selected.schemaVersion == 1, selected.sourceComplete,
+              (0...Manifest.maximumDurationMs).contains(selected.durationMs), !shuttingDown,
+              !deletingJobIDs.contains(.recording(selected.id)) else { return nil }
+        return RecordingPlayback.Source(selected, folder: repository.folder(selected.id), tools: tools)
+    }
+
+    func isSavingAudio(for id: String) -> Bool {
+        id == recordingID || id == finalizingRecordingID
+    }
+
+    func activateResultSegment(_ id: String, recordingID: String, from tab: RecordingResultTab) {
+        guard selection == recordingID, self.tab == tab, !resultPresentation.isRendering,
+              !deletingJobIDs.contains(.recording(recordingID)),
+              let segment = transcript?.segments.first(where: { $0.id == id }) else { return }
+        let startsPlayback = tab == .summary
+        if startsPlayback {
+            jumpTo = ResultJumpRequest(segmentID: id)
+            self.tab = .transcript
+        }
+        guard let source = playbackSource else { return }
+        playback.select(source)
+        playback.seek(to: Double(segment.startMs) / 1000, play: startsPlayback)
+    }
     func rendered(_ part: ExportPart, markdown: Bool = false) async throws -> String {
         try await renderedResult(part, markdown: markdown).text
     }
@@ -2806,6 +2836,7 @@ struct QueueJobID: Hashable, Sendable {
     }
     func shutdown() async {
         shuttingDown = true
+        await playback.shutdown()
         copyTask?.cancel()
         for task in Array(exportTasks.values) { await task.value }
         recordingSearch.shutdown()

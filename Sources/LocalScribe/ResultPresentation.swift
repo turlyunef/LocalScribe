@@ -7,6 +7,50 @@ struct ResultJumpRequest: Equatable {
     let segmentID: String
 }
 
+struct TranscriptPlaybackIndex: Sendable {
+    private let documentOrder: [ExportTimestamp]
+    private let timeOrder: [ExportTimestamp]
+    private let latestEnds: [Int]
+
+    init(_ result: RenderedExport) {
+        let segments = result.timestamps.filter { $0.segmentRange != nil }
+        documentOrder = segments
+        timeOrder = segments.sorted {
+            $0.startMs == $1.startMs ? $0.range.location < $1.range.location : $0.startMs < $1.startMs
+        }
+        var latest = 0
+        latestEnds = timeOrder.map {
+            latest = max(latest, $0.endMs)
+            return latest
+        }
+    }
+
+    func segment(at milliseconds: Double) -> ExportTimestamp? {
+        // Pick the earliest active segment in an overlap. The running maximum
+        // finds it in logarithmic time even when earlier segments overlap.
+        let index = firstIndex(count: latestEnds.count) { Double(latestEnds[$0]) > milliseconds }
+        guard index < timeOrder.count, Double(timeOrder[index].startMs) <= milliseconds else { return nil }
+        return timeOrder[index]
+    }
+
+    func segment(atTextOffset offset: Int) -> ExportTimestamp? {
+        let index = firstIndex(count: documentOrder.count) { (documentOrder[$0].segmentRange.map(NSMaxRange) ?? 0) > offset }
+        guard index < documentOrder.count, let range = documentOrder[index].segmentRange,
+              NSLocationInRange(offset, range) else { return nil }
+        return documentOrder[index]
+    }
+
+    private func firstIndex(count: Int, where matches: (Int) -> Bool) -> Int {
+        var lower = 0
+        var upper = count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if matches(middle) { upper = middle } else { lower = middle + 1 }
+        }
+        return lower
+    }
+}
+
 /// Frequent capture/progress changes are observed only by the indicator views.
 @MainActor final class ActivityIndicators: ObservableObject {
     @Published var status = ""
@@ -48,12 +92,23 @@ struct ResultJumpRequest: Equatable {
         let markdown: Bool
     }
 
-    @Published private(set) var result = RenderedExport()
+    private struct Presentation: Sendable {
+        let result: RenderedExport
+        let playbackIndex: TranscriptPlaybackIndex?
+
+        init(_ result: RenderedExport = RenderedExport(), part: ExportPart? = nil, markdown: Bool = false) {
+            self.result = result
+            playbackIndex = part == .transcript && !markdown ? TranscriptPlaybackIndex(result) : nil
+        }
+    }
+    @Published private var presented = Presentation()
+    var result: RenderedExport { presented.result }
+    var playbackIndex: TranscriptPlaybackIndex? { presented.playbackIndex }
     @Published private(set) var isRendering = false
     private(set) var renderCount = 0
     private var content: ContentKey?
     private var requested: Key?
-    private var cache: [Key: RenderedExport] = [:]
+    private var cache: [Key: Presentation] = [:]
     private(set) var task: Task<Void, Never>?
     private let renderer: Renderer
 
@@ -72,16 +127,16 @@ struct ResultJumpRequest: Equatable {
     func update(manifest: Manifest?, transcript: Transcript?, summary: Summary?, revision: UInt64, part: ExportPart) {
         guard let manifest else {
             task?.cancel(); task = nil; requested = nil; content = nil; cache.removeAll()
-            result = RenderedExport(); isRendering = false
+            presented = Presentation(); isRendering = false
             return
         }
         let key = key(manifest, revision: revision, part: part, markdown: false)
         guard requested != key else { return }
         requested = key; task?.cancel(); task = nil
-        if let cached = cache[key] { result = cached; isRendering = false; return }
+        if let cached = cache[key] { presented = cached; isRendering = false; return }
         // Clear links as well as text immediately; an older async result must not
         // remain interactive while a different recording/tab is being prepared.
-        result = RenderedExport(); isRendering = true
+        presented = Presentation(); isRendering = true
         task = Task { [weak self] in
             // Coalesce transcript + summary publication and rapid tab changes.
             await Task.yield()
@@ -89,10 +144,10 @@ struct ResultJumpRequest: Equatable {
             self.renderCount += 1
             let renderer = self.renderer
             let value = await Task.detached(priority: .userInitiated) {
-                renderer(manifest, transcript, summary, part, false)
+                Presentation(renderer(manifest, transcript, summary, part, false), part: part)
             }.value
             guard !Task.isCancelled, self.requested == key else { return }
-            self.cache[key] = value; self.result = value; self.isRendering = false; self.task = nil
+            self.cache[key] = value; self.presented = value; self.isRendering = false; self.task = nil
         }
     }
 
@@ -102,15 +157,15 @@ struct ResultJumpRequest: Equatable {
                 part: ExportPart, markdown: Bool) async throws -> RenderedExport {
         let key = key(manifest, revision: revision, part: part, markdown: markdown)
         try Task.checkCancellation()
-        if let cached = cache[key] { return cached }
+        if let cached = cache[key] { return cached.result }
         renderCount += 1
         let renderer = self.renderer
         let value = await Task.detached(priority: .userInitiated) {
-            renderer(manifest, transcript, summary, part, markdown)
+            Presentation(renderer(manifest, transcript, summary, part, markdown), part: part, markdown: markdown)
         }.value
         try Task.checkCancellation()
         guard content == key.content else { throw CancellationError() }
         cache[key] = value
-        return value
+        return value.result
     }
 }

@@ -8,6 +8,9 @@ public struct ExportTimestamp: Sendable, Equatable {
     public let segmentID: String
     public let range: NSRange
     public let isTranscript: Bool
+    public let startMs: Int
+    public let endMs: Int
+    public let segmentRange: NSRange?
 }
 
 public struct RenderedExport: Sendable, Equatable {
@@ -41,9 +44,13 @@ public enum ExportService {
             result.text += text
             offset += text.utf16.count
         }
-        func timestamp(_ segment: Segment, isTranscript: Bool) {
+        func timestamp(_ segment: Segment, blockLength: Int? = nil) {
             let text = "[\(timecode(segment.startMs))]"
-            result.timestamps.append(ExportTimestamp(segmentID: segment.id, range: NSRange(location: offset, length: text.utf16.count), isTranscript: isTranscript))
+            result.timestamps.append(ExportTimestamp(
+                segmentID: segment.id, range: NSRange(location: offset, length: text.utf16.count),
+                isTranscript: blockLength != nil, startMs: segment.startMs, endMs: segment.endMs,
+                segmentRange: blockLength.map { NSRange(location: offset, length: $0) }
+            ))
         }
         func clean(_ text: String) -> String { Self.clean(text, markdown: markdown) }
         func heading(_ title: String) -> String { (markdown ? "## " : "") + title + "\n\n" }
@@ -102,7 +109,7 @@ public enum ExportService {
                         let evidence = Set(f.evidenceSegmentIds).compactMap { evidenceIndex[$0] }.sorted().compactMap { t?.segments[$0] }
                         for (index, segment) in evidence.enumerated() {
                             if index > 0 { append(" ") }
-                            timestamp(segment, isTranscript: false)
+                            timestamp(segment)
                             append("[\(timecode(segment.startMs))]")
                         }
                         append("\n")
@@ -116,8 +123,9 @@ public enum ExportService {
             if let t {
                 if t.segments.isEmpty { append(L10n.text("Речь не обнаружена.") + "\n") }
                 for seg in t.segments {
-                    timestamp(seg, isTranscript: true)
-                    append(renderSegment(seg, markdown: markdown))
+                    let block = renderSegment(seg, markdown: markdown)
+                    timestamp(seg, blockLength: block.utf16.count - 2)
+                    append(block)
                 }
             } else { append(L10n.text("Расшифровка ещё не готова.") + "\n") }
         }

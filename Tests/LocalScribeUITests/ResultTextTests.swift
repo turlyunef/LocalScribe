@@ -141,4 +141,79 @@ final class ResultTextTests: XCTestCase {
             XCTAssertNil(view.textStorage?.attribute(.link, at: quotedTimestamp.location, effectiveRange: nil))
         }
     }
+
+    func testPlaybackHighlightUsesWholeUtteranceAndPreservesSelection() throws {
+        let segments = [
+            Segment(id: "first", startMs: 0, endMs: 2000, text: "Реплика 😀", language: "ru"),
+            Segment(id: "second", startMs: 2750, endMs: 3500, text: "Другая реплика", language: "ru"),
+        ]
+        let rendered = render(segments)
+        let index = TranscriptPlaybackIndex(rendered)
+        let playback = RecordingPlayback()
+        var manifest = Manifest(sourceType: "import", title: "Test", filename: "unused.wav")
+        manifest.durationMs = 3500
+        let folder = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        playback.select(.init(manifest, folder: folder, tools: folder))
+        let result = ResultTextView(result: rendered, jumpRequest: nil, playback: playback, playbackIndex: index, onJump: { _ in })
+        try withResult(result) { _, view in
+            let first = try XCTUnwrap(rendered.timestamps[0].segmentRange)
+            let second = try XCTUnwrap(rendered.timestamps[1].segmentRange)
+            let chosenText = (rendered.text as NSString).range(of: "Реплика 😀")
+            view.setSelectedRange(chosenText)
+            playback.seek(to: 1.231)
+            XCTAssertNotNil(view.textStorage?.attribute(.backgroundColor, at: first.location, effectiveRange: nil))
+            XCTAssertNotNil(view.textStorage?.attribute(.backgroundColor, at: NSMaxRange(chosenText) - 1, effectiveRange: nil))
+            XCTAssertEqual(view.selectedRange(), chosenText)
+            view.copy(nil)
+            XCTAssertEqual(NSPasteboard.general.string(forType: .string), "Реплика 😀")
+
+            playback.followsTranscript = false
+            playback.seek(to: 2.75)
+            XCTAssertNil(view.textStorage?.attribute(.backgroundColor, at: first.location, effectiveRange: nil))
+            XCTAssertNotNil(view.textStorage?.attribute(.backgroundColor, at: second.location, effectiveRange: nil))
+            XCTAssertEqual(view.selectedRange(), chosenText)
+
+            playback.seek(to: 2)
+            XCTAssertNil(view.textStorage?.attribute(.backgroundColor, at: second.location, effectiveRange: nil))
+            XCTAssertEqual(index.segment(atTextOffset: chosenText.location)?.segmentID, "first")
+            XCTAssertNil(index.segment(atTextOffset: NSMaxRange(first)))
+            playback.select(nil)
+        }
+    }
+
+    func testPlaybackIndexHandlesOverlapAndEqualStartTimes() {
+        let index = TranscriptPlaybackIndex(render([
+            Segment(id: "later", startMs: 1800, endMs: 2600, text: "Later", language: "en"),
+            Segment(id: "long", startMs: 1000, endMs: 2200, text: "Long", language: "en"),
+            Segment(id: "sameStart", startMs: 1000, endMs: 1300, text: "Short", language: "en"),
+        ]))
+        XCTAssertNil(index.segment(at: 999))
+        XCTAssertEqual(index.segment(at: 1000)?.segmentID, "long")
+        XCTAssertEqual(index.segment(at: 2050)?.segmentID, "long")
+        XCTAssertEqual(index.segment(at: 2200)?.segmentID, "later")
+        XCTAssertNil(index.segment(at: 2600))
+    }
+
+    func testPlainClickInUtteranceUsesItsSegmentID() throws {
+        let rendered = render([Segment(id: "phrase", startMs: 1000, endMs: 2000, text: "Реплика для перемотки", language: "ru")])
+        var clicked: [String] = []
+        let result = ResultTextView(result: rendered, jumpRequest: nil,
+                                    playbackIndex: TranscriptPlaybackIndex(rendered), onJump: { clicked.append($0) })
+        try withResult(result) { _, view in
+            let window = try XCTUnwrap(view.window)
+            let word = (rendered.text as NSString).range(of: "перемотки")
+            let rect = view.firstRect(forCharacterRange: word, actualRange: nil)
+            XCTAssertGreaterThan(rect.height, 0)
+            let point = window.convertPoint(fromScreen: NSPoint(x: rect.midX, y: rect.midY))
+            let events = try [NSEvent.EventType.leftMouseDown, .leftMouseUp].map { type in
+                try XCTUnwrap(NSEvent.mouseEvent(with: type, location: point, modifierFlags: [],
+                                                timestamp: ProcessInfo.processInfo.systemUptime, windowNumber: window.windowNumber,
+                                                context: nil, eventNumber: 0, clickCount: 1, pressure: 0))
+            }
+            NSApp.postEvent(events[1], atStart: false)
+            view.mouseDown(with: events[0])
+            XCTAssertEqual(clicked, ["phrase"])
+            XCTAssertEqual(view.selectedRange().length, 0)
+        }
+    }
 }

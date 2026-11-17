@@ -6,7 +6,7 @@ LocalScribe — локальная запись, расшифровка и ит�
 Продукты: GUI-приложение `LocalScribe`, helper анализа `LocalScribeWorker` и XPC-сервис загрузки моделей `LocalScribeModelService`.
 Приложение на SwiftUI/AppKit собирается и тестируется напрямую через SwiftPM.
 ASR использует WhisperKit, MLX или GigaAM на CPU. Диаризация использует SpeakerKit, итоги и схемы — MLX.
-[README](README.md) описывает настройку Xcode 27.0, Swift 6.4 и Metal Toolchain. На 16.11.2026 подтверждены Xcode 27.0 (27A266a), SDK macOS 27.0, Swift 6.4 для arm64 и путь к Metal Toolchain (`xcrun --find metal`).
+[README](README.md) описывает настройку Xcode 27.0, Swift 6.4 и Metal Toolchain. На 17.11.2026 подтверждены Xcode 27.0 (27A266a), SDK macOS 27.0, Swift 6.4 для arm64 и путь к Metal Toolchain (`xcrun --find metal`).
 [Package.swift](Package.swift) задаёт tools-version 6.1 и минимум macOS 26.0. Три executable targets используют Swift 5 language mode, библиотеки и тесты — Swift 6.
 Три пользовательских архива — записи, схемы и тексты — живут в общем окне с отдельным выделением, группами и поиском каждого раздела.
 Поддержка Linux не заявлена. Для локального SpeakerKit включены `InferIsolatedConformances` и `NonisolatedNonsendingByDefault`.
@@ -24,21 +24,21 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 
 | Задача | Точная команда | Статус |
 | --- | --- | --- |
-| Release executable targets | `swift build -c release -j 4 --force-resolved-versions` | проверено 16.11.2026 в составе упаковки со статическим runtime GigaAM |
-| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 16.11.2026 — 887 XCTest (331 Core, 301 UI/service, 255 worker/диаризация), 0 ошибок, 17 опциональных пропусков |
-| Один тест | `swift test -c release -j 4 --force-resolved-versions --filter ContentLayoutTests/testLiveCaptionsFollowOnlyAtTheBottom` | проверено 16.11.2026 — 1 тест, 0 ошибок. Формат фильтра — `Suite/test` без имени target |
-| Python-проверки скриптов | `python3 -m unittest discover -s scripts/tests -v` | проверено 16.11.2026 в составе статической проверки — 66 тестов, 0 ошибок, локальные фикстуры без весов и сети |
-| Статические проверки CI | `bash scripts/verify.sh --static` | проверено 16.11.2026 — оба plist валидны, 66 Python-тестов, включая согласованность версии |
+| Release executable targets | `swift build -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 в составе упаковки 2.18.0 со статическим runtime GigaAM |
+| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 — 927 XCTest (339 Core, 323 UI/service, 265 worker/диаризация), 0 ошибок, 17 опциональных пропусков |
+| Один тест | `swift test -c release -j 4 --force-resolved-versions --filter RecordingPlaybackTests/testSummaryStartsPlaybackAndTranscriptClickPreservesPause` | проверено 17.11.2026 — 1 тест, 0 ошибок. Формат фильтра — `Suite/test` без имени target |
+| Python-проверки скриптов | `python3 -m unittest discover -s scripts/tests -v` | проверено 17.11.2026 в составе статической проверки — 66 тестов, 0 ошибок, локальные фикстуры без весов и сети |
+| Статические проверки CI | `bash scripts/verify.sh --static` | проверено 17.11.2026 — оба plist валидны, 66 Python-тестов, включая согласованность версии |
 | Проверка аудиокодеков | `python3 scripts/format_checks.py` | (не проверено) — отсутствует `Assets/probe/mixed.wav`. В прогоне 26.10.2026 прошло 8/8 вариантов, включая AAC ADTS, см. [ASRModels](docs/ASRModels.md) |
 | Путь к executable | `swift build -c release --show-bin-path` | проверено — `.build/out/Products/Release` в этой среде |
 | FFmpeg/ffprobe | `bash scripts/build_ffmpeg.sh` | (не проверено) — пересборка C-инструментов и возможная загрузка исходников не выполнялись |
-| Упаковка .app | `bash scripts/build_app.sh` | проверено 16.11.2026 для 2.16.0: пакет собран со статическим runtime GigaAM, строгая проверка подписи прошла |
+| Упаковка .app | `bash scripts/build_app.sh` | проверено 17.11.2026 для 2.18.0 (сборка 36): пакет собран со статическим runtime GigaAM, строгая проверка подписи прошла |
 
 Обычная SwiftPM-сборка использует заглушку GigaAM для контрактных тестов. Для рабочего backend см. [сборку со статическим runtime](docs/ASRModels.md#gigaam-v3-rnnt).
 
 Для чистой сборки Metal нужен установленный Metal Toolchain. Перед сборкой проверяй текущий путь через `xcrun --find metal`. Если XCBuild вызывает прежнюю точку монтирования, перемести только устаревшее описание `*.xcbuilddata` из `.build/out/Intermediates.noindex/XCBuildData` и повтори сборку. Для проверки кодеков нужны `Assets/tools`, `Assets/probe/mixed.wav` и локальные фикстуры. AAC через Core Audio ранее потребовал разрешённого доступа. Не запускай `swift build --build-tests` после обычного `swift build`: Products может остаться с нетестовой вариацией `LocalScribeCore`, и `@testable import` упадёт с «unable to resolve Swift module dependency»; тесты запускай сразу через `swift test`, он сам пересобирает тестовые вариации.
 Источник проверки аудиокодеков — [README](README.md) и [Architecture](docs/Architecture.md); отчёт сохраняется в игнорируемый `TestResults/format-checks.json`.
-Источник SwiftPM-сборки — [build_app.sh](scripts/build_app.sh), XCTest — [README](README.md) и [ModelManagement](docs/ModelManagement.md); Python-проверок — [README](README.md); фильтр взят из [ContentLayoutTests](Tests/LocalScribeUITests/ContentLayoutTests.swift).
+Источник SwiftPM-сборки — [build_app.sh](scripts/build_app.sh), XCTest — [README](README.md) и [ModelManagement](docs/ModelManagement.md); Python-проверок — [README](README.md); фильтр взят из [RecordingPlaybackTests](Tests/LocalScribeUITests/RecordingPlaybackTests.swift).
 В репозитории не найдены команды линта/форматирования Swift и генерации Xcode-проекта. [format_checks.py](scripts/format_checks.py) проверяет аудиокодеки, а не стиль кода.
 Генерация каталога моделей описана в [ModelManagement](docs/ModelManagement.md) и [ASRModels](docs/ASRModels.md). Генераторы [lock_models.py](scripts/lock_models.py), [lock_qwen_models.py](scripts/lock_qwen_models.py) и [lock_vibevoice_models.py](scripts/lock_vibevoice_models.py) обращаются к сети и по умолчанию обновляют [models.lock.json](Resources/models.lock.json). Обычная сборка использует готовый каталог. Генераторы в этом прогоне не запускались.
 
@@ -96,7 +96,8 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 - Сохранять разделение `activeRunId` и `pendingRunId`: неудачный повтор не уничтожает прошлый результат. Изменение поведения pipeline/prompt требует обновить `RunInfo.pipelineVersion` и fingerprint контрольных точек в [SummaryEngine](Sources/LocalScribeWorker/SummaryEngine.swift). [Pipeline](Sources/LocalScribeWorker/Pipeline.swift) отвергает run с несовпадающей `pipelineVersion` на любой стадии, а не только transcribing; `resumeRun` — первый рубеж до постановки задания.
 - «Продолжить» вызывает `RecordingRepository.resumeRun`: сохраняет pending run, проверяет его версию, исходник и закреплённый каталог через `ModelCatalog.pinned(to:)` с полными SHA файлов. Несовместимость не создаёт новое задание; для выбранных сейчас моделей предназначено «Обработать заново».
 - Выбранные профили фиксируются в `RunInfo.modelIDs`, ForcedAligner Qwen — в `auxiliaryModelIDs`. Старые задания без `modelIDs` используют исходные имена ролей. Сохранять legacy fingerprint и учитывать backend, политику и зависимости новых профилей.
-- Глобальный словарь распознавания (один общий список в настройках, только WhisperKit/Qwen3-ASR) закрепляется нормализованным снимком в `RunInfo.recognitionTerms` при создании ASR-задания; непустой снимок входит в fingerprint, run без словаря сохраняет прежнюю формулу. Whisper передаёт его через `promptTokens` (бюджет 111 токенов проверяется токенизатором модели, превышение — ошибка этапа без тихой обрезки), Qwen — через `context` с вырезанными `<|…|>`-маркерами. Содержимое словаря не попадает в логи, метрики и события worker; «Пересоздать итоги» снимок не закрепляет.
+- Глобальный словарь распознавания (один общий список в настройках, только WhisperKit/Qwen3-ASR) закрепляется нормализованным снимком в `RunInfo.recognitionTerms` при создании ASR-задания; непустой снимок входит в fingerprint, run без словаря сохраняет прежнюю формулу. Содержимое словаря не попадает в логи, метрики и события worker. «Пересоздать итоги» снимок не закрепляет.
+- Whisper передаёт его через `promptTokens`. Лимит 111 токенов проверяет общий [WhisperDictionary](Sources/LocalScribeWhisperHints/WhisperDictionary.swift) при сохранении настроек с установленным токенизатором и при запуске ASR. Условия повтора без подсказки описаны в [Architecture](docs/Architecture.md). Qwen передаёт словарь через `context` с вырезанными служебными маркерами.
 - Изменение выбора моделей не должно запускать ожидающие записи или менять manifests.
 - Перед изменением фонового ASR читать [LiveCapture](docs/LiveCapture.md): `recording` относится к микрофону, `captureProcessing` — к обработке; ошибка модели не останавливает микрофон.
 - Новая запись сохраняет FIFO и не прерывает текущий worker. Явное «Поднять на верх очереди» меняет только порядок ожидающих заданий.
@@ -109,6 +110,7 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 - В live ASR читать только закрытые CAF; связывать checkpoints с оригиналом через seal, SHA/PCM и непрерывное покрытие окон. Не удалять фрагменты до проверенного присоединения ASR и выхода worker.
 - [ResultEditing](Sources/LocalScribeCore/ResultEditing.swift) сохраняет черновик полным новым run и только затем переключает activeRunId. Сохранять ID, таймкоды, участников и порядок оставшихся реплик; при изменении текста удалять старые word timings.
 - Ручные итоги без evidence разрешены только для проверенной ручной версии; автоматические требуют основания.
+- При изменении плеера и переходов по репликам сверять [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей). Частые обновления позиции наблюдают плеер и текст расшифровки напрямую через [RecordingPlayback](Sources/LocalScribe/RecordingPlayback.swift).
 
 ## Локальные конвенции и ловушки
 
@@ -126,8 +128,8 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 1. Обновить версию и номер сборки в [Info.plist](Resources/Info.plist), [plist XPC-сервиса](Resources/ModelService-Info.plist) и [AppInfo](Sources/LocalScribe/AppInfo.swift). Версию в [README](README.md) тоже обновить. Согласованность проверяет `bash scripts/verify.sh --static`.
 2. Полный прогон перед выпуском: `swift test -c release -j 4 --force-resolved-versions`.
 3. Собрать и упаковать `.app`: `bash scripts/build_app.sh` статически линкует runtime GigaAM в worker и добавляет XPC, FFmpeg, bundles и Metal-ресурсы; подпись задаёт `LOCALSCRIBE_SIGN_IDENTITY`, по умолчанию ad-hoc.
-4. Иконка генерируется командой `bash scripts/build_icon.sh` из [AppIcon.png](Resources/AppIcon.png) в [AppIcon.icns](Resources/AppIcon.icns); команда проверена в составе упаковки 14.11.2026.
-5. Коммит выпуска — `feat:`/`fix:` с необязательной областью и номером версии, как `feat: add sidebar arrow navigation and release LocalScribe 2.15.0`.
+4. Иконка генерируется командой `bash scripts/build_icon.sh` из [AppIcon.png](Resources/AppIcon.png) в [AppIcon.icns](Resources/AppIcon.icns); команда проверена в составе упаковки 17.11.2026.
+5. Коммит выпуска — `feat:`/`fix:` с необязательной областью и номером версии, как `feat: add recording playback and release LocalScribe 2.18.0`.
 
 ## Зависимости и границы изменений
 

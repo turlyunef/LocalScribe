@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import UniformTypeIdentifiers
 import LocalScribeCore
 
@@ -229,40 +230,126 @@ struct RecordingStatusText: View {
 }
 
 struct ResultTextView: NSViewRepresentable {
-    var result: RenderedExport; var jumpRequest: ResultJumpRequest?; var onJump: (String) -> Void
+    var result: RenderedExport
+    var jumpRequest: ResultJumpRequest?
+    var playback: RecordingPlayback? = nil
+    var playbackIndex: TranscriptPlaybackIndex? = nil
+    var onJump: (String) -> Void
+
     func makeCoordinator() -> Coordinator { Coordinator() }
+
     func makeNSView(context: Context) -> NSScrollView {
-        let scroll = NSTextView.scrollableTextView(); let view = scroll.documentView as! NSTextView
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        let view = SelectableResultTextView(frame: NSRect(origin: .zero, size: scroll.contentSize))
+        view.isVerticallyResizable = true
+        view.isHorizontallyResizable = false
+        view.autoresizingMask = [.width]
+        view.textContainer?.widthTracksTextView = true
         view.isEditable = false; view.isSelectable = true; view.allowsUndo = false
         view.textContainerInset = NSSize(width: 20, height: 20); view.font = .systemFont(ofSize: 14); view.delegate = context.coordinator
-        view.isAutomaticLinkDetectionEnabled = false; return scroll
+        view.isAutomaticLinkDetectionEnabled = false
+        view.seekOnClick = { [weak coordinator = context.coordinator] offset in
+            guard let coordinator, let segment = coordinator.index?.segment(atTextOffset: offset) else { return }
+            coordinator.onJump?(segment.segmentID)
+        }
+        scroll.documentView = view
+        return scroll
     }
+
     func updateNSView(_ scroll: NSScrollView, context: Context) {
-        let view = scroll.documentView as! NSTextView; context.coordinator.onJump = onJump
-        if context.coordinator.current != result {
-            context.coordinator.current = result
-            context.coordinator.timestampRanges = [:]
+        let view = scroll.documentView as! NSTextView
+        let coordinator = context.coordinator
+        coordinator.onJump = onJump
+        coordinator.index = playbackIndex
+        if coordinator.current != result {
+            coordinator.current = result
+            coordinator.timestampRanges.removeAll()
             let value = NSMutableAttributedString(string: result.text, attributes: [.font:NSFont.systemFont(ofSize:14),.foregroundColor:NSColor.labelColor])
             for timestamp in result.timestamps {
                 value.addAttribute(.link, value: "localscribe://segment/\(timestamp.segmentID)", range: timestamp.range)
-                if timestamp.isTranscript { context.coordinator.timestampRanges[timestamp.segmentID] = timestamp.range }
+                if timestamp.isTranscript { coordinator.timestampRanges[timestamp.segmentID] = timestamp.range }
             }
             view.textStorage?.setAttributedString(value)
-            context.coordinator.target = nil
+            coordinator.target = nil
+            coordinator.highlightedRange = nil
         }
-        if let jumpRequest, context.coordinator.target != jumpRequest,
-           let range = context.coordinator.timestampRanges[jumpRequest.segmentID] {
-            view.scrollRangeToVisible(range); view.setSelectedRange(range); context.coordinator.target = jumpRequest
+        coordinator.observe(playback, in: view)
+        if let jumpRequest, coordinator.target != jumpRequest,
+           let range = coordinator.timestampRanges[jumpRequest.segmentID] {
+            view.scrollRangeToVisible(range); view.setSelectedRange(range); coordinator.target = jumpRequest
         }
     }
-    final class Coordinator: NSObject, NSTextViewDelegate {
+
+    @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var current = RenderedExport(); var target: ResultJumpRequest?; var onJump: ((String)->Void)?
         var timestampRanges: [String: NSRange] = [:]
+        var index: TranscriptPlaybackIndex?
+        var highlightedRange: NSRange?
+        private weak var playback: RecordingPlayback?
+        private var observation: AnyCancellable?
+        private var wasFollowing = false
+
+        func observe(_ next: RecordingPlayback?, in view: NSTextView) {
+            if playback !== next {
+                observation = nil
+                playback = next
+                if let next {
+                    observation = next.$position.combineLatest(next.$followsTranscript).sink { [weak self, weak view] position, follows in
+                        guard let view else { return }
+                        self?.highlight(at: position, follows: follows, in: view)
+                    }
+                }
+            }
+            highlight(at: next?.position, follows: next?.followsTranscript == true, in: view)
+        }
+
+        private func highlight(at seconds: Double?, follows: Bool, in view: NSTextView) {
+            let next = seconds.flatMap { index?.segment(at: ($0 * 1000).rounded())?.segmentRange }
+            let changed = next != highlightedRange
+            if changed, let storage = view.textStorage {
+                storage.beginEditing()
+                if let highlightedRange {
+                    storage.removeAttribute(.backgroundColor, range: highlightedRange)
+                }
+                if let next {
+                    storage.addAttribute(.backgroundColor, value: NSColor.controlAccentColor.withAlphaComponent(0.18), range: next)
+                }
+                storage.endEditing()
+                highlightedRange = next
+            }
+            if follows, changed || !wasFollowing, let next,
+               (view as? SelectableResultTextView)?.isHandlingMouse != true {
+                // Scroll to the start of a long utterance without moving the selection.
+                view.scrollRangeToVisible(NSRange(location: next.location, length: 0))
+            }
+            wasFollowing = follows
+        }
+
         func textView(_ textView: NSTextView, clickedOnLink link: Any, at charIndex: Int) -> Bool {
             let url = (link as? URL) ?? (link as? String).flatMap { URL(string:$0) }
             if let url, url.scheme == "localscribe", url.host == "segment" { onJump?(url.lastPathComponent) }
             return true
         }
+    }
+}
+
+private final class SelectableResultTextView: NSTextView {
+    var seekOnClick: ((Int) -> Void)?
+    private(set) var isHandlingMouse = false
+
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        let offset = characterIndexForInsertion(at: point)
+        let isPlainClick = event.clickCount == 1 && event.modifierFlags.intersection([.command, .option, .shift, .control]).isEmpty
+        let isText = offset < (textStorage?.length ?? 0)
+        let isLink = isText && textStorage?.attribute(.link, at: offset, effectiveRange: nil) != nil
+        isHandlingMouse = true
+        super.mouseDown(with: event)
+        isHandlingMouse = false
+        guard isPlainClick, isText, !isLink, selectedRange().length == 0 else { return }
+        seekOnClick?(offset)
     }
 }
 

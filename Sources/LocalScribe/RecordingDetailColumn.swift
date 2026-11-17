@@ -23,6 +23,7 @@ enum RecordingResultTab: CaseIterable {
 struct RecordingDetailColumn: View {
     @ObservedObject var model: AppModel
     @Binding var recordingSheet: Bool
+    @State private var playbackCardID = UUID()
 
     private var canStartFromSheet: Bool { model.canStartRecording && model.recordingSources.hasEnabledSource }
 
@@ -40,6 +41,9 @@ struct RecordingDetailColumn: View {
             }
             if let selected = model.selected {
                 resultHeader(selected)
+                Divider()
+                RecordingPlayerView(playback: model.playback, sourceAvailable: model.playbackSource != nil,
+                                    saving: model.isSavingAudio(for: selected.id))
                 Divider()
                 if let message = model.resourcePauseMessage {
                     Label(L10n.message(message), systemImage: "pause.circle")
@@ -68,7 +72,12 @@ struct RecordingDetailColumn: View {
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
                         .accessibilityIdentifier("result.automaticSummariesDisabled")
                 } else {
-                    PresentedResultView(presentation: model.resultPresentation, jumpRequest: model.tab == .transcript ? model.jumpTo : nil, onJump: { id in model.jumpTo = ResultJumpRequest(segmentID: id); model.tab = .transcript })
+                    PresentedResultView(
+                        presentation: model.resultPresentation,
+                        jumpRequest: model.tab == .transcript ? model.jumpTo : nil,
+                        playback: model.tab == .transcript ? model.playback : nil,
+                        onJump: { [tab = model.tab] id in model.activateResultSegment(id, recordingID: selected.id, from: tab) }
+                    )
                 }
             } else {
                 ContentUnavailableView {
@@ -84,6 +93,9 @@ struct RecordingDetailColumn: View {
             }
             ActivityStatusView(indicators: model.indicators)
         }.background(Color(nsColor: .textBackgroundColor))
+            .onAppear { model.playback.cardAppeared(playbackCardID, source: model.playbackSource) }
+            .onChange(of: model.playbackSource) { _, source in model.playback.select(source) }
+            .onDisappear { model.playback.cardDisappeared(playbackCardID) }
             .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
                 model.importProviders(providers)
             }
@@ -360,11 +372,13 @@ private struct ActivityStatusView: View {
 private struct PresentedResultView: View {
     @ObservedObject var presentation: ResultPresentation
     var jumpRequest: ResultJumpRequest?
+    var playback: RecordingPlayback?
     var onJump: (String) -> Void
 
     var body: some View {
         ZStack {
-            ResultTextView(result: presentation.result, jumpRequest: jumpRequest, onJump: onJump)
+            ResultTextView(result: presentation.result, jumpRequest: jumpRequest, playback: playback,
+                           playbackIndex: presentation.playbackIndex, onJump: onJump)
             if presentation.isRendering { ProgressView(L10n.text("Подготавливаем результат…")) }
         }
     }
