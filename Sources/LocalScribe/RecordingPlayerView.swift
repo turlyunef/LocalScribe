@@ -56,6 +56,7 @@ struct RecordingPlayerView: View {
                 transport
                 options
                 Spacer(minLength: 4)
+                skipPauses
                 follow
             }
             VStack(alignment: .leading, spacing: 8) {
@@ -63,7 +64,16 @@ struct RecordingPlayerView: View {
                     transport
                     options
                 }
-                follow
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) {
+                        skipPauses
+                        follow
+                    }
+                    VStack(alignment: .leading, spacing: 8) {
+                        skipPauses
+                        follow
+                    }
+                }
             }
         }
         .controlSize(.small)
@@ -115,6 +125,14 @@ struct RecordingPlayerView: View {
             .fixedSize()
             .accessibilityIdentifier("playback.speed")
         }
+    }
+
+    private var skipPauses: some View {
+        Toggle(L10n.text("Пропускать паузы"), isOn: $playback.skipsPauses)
+            .toggleStyle(.checkbox)
+            .font(.caption)
+            .fixedSize()
+            .accessibilityIdentifier("playback.skipPauses")
     }
 
     private var follow: some View {

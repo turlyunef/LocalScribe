@@ -63,6 +63,30 @@ final class ContentLayoutTests: XCTestCase {
         view.layoutSubtreeIfNeeded()
     }
 
+    func testPlayerSkipPausesCheckboxPrecedesFollowAndFitsNarrowLayout() async throws {
+        let playback = RecordingPlayback()
+        for width in [1100.0, 650.0] {
+            let (hosting, window) = host(RecordingPlayerView(playback: playback, sourceAvailable: true),
+                                         width: width, height: 180)
+            defer { window.close() }
+            try await settle(hosting)
+            let checkbox = try element("playback.skipPauses", in: hosting)
+            let follow = try element("playback.follow", in: hosting)
+            let checkboxFrame = try XCTUnwrap(checkbox.accessibilityFrame?())
+            let followFrame = try XCTUnwrap(follow.accessibilityFrame?())
+            XCTAssertGreaterThan(checkboxFrame.width, 0)
+            XCTAssertGreaterThan(followFrame.width, 0)
+            XCTAssertFalse(checkboxFrame.intersects(followFrame))
+            XCTAssertLessThanOrEqual(checkboxFrame.maxX, followFrame.minX)
+            XCTAssertFalse(playback.skipsPauses)
+            XCTAssertTrue(checkbox.accessibilityPerformPress?() ?? false)
+            try await settle(hosting)
+            XCTAssertTrue(playback.skipsPauses)
+            XCTAssertTrue(playback.followsTranscript)
+            playback.skipsPauses = false
+        }
+    }
+
     func testLiveCaptionsFollowOnlyAtTheBottom() async throws {
         var text = LiveCaptionText()
         let (hosting, window) = host(LiveCaptionTextView(text: text), width: 520, height: 300)

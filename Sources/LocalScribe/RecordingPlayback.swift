@@ -34,6 +34,12 @@ import LocalScribeCore
     }
     @Published var skipSeconds = 10
     @Published var followsTranscript = true
+    @Published var skipsPauses = false {
+        didSet { skipCurrentPause() }
+    }
+
+    private var pauseIndex = PlaybackPauseIndex()
+    private(set) var transcriptTask: Task<Void, Never>?
 
     private var source: Source?
     private var player: AVPlayer?
@@ -47,13 +53,15 @@ import LocalScribeCore
     private var visibleCards: Set<UUID> = []
 
     isolated deinit {
+        transcriptTask?.cancel()
         if let openID { fileTasks[openID]?.cancel() }
         releasePlayer()
     }
 
-    func cardAppeared(_ id: UUID, source: Source?) {
+    func cardAppeared(_ id: UUID, source: Source?, transcript: Transcript? = nil) {
         visibleCards.insert(id)
         select(source)
+        updateTranscript(transcript)
     }
 
     func cardDisappeared(_ id: UUID) {
@@ -67,10 +75,27 @@ import LocalScribeCore
         openID = nil
         releasePlayer()
         source = next
+        updateTranscript(nil)
         isPlaying = false
         position = nil
         duration = max(0, Double(next?.durationMs ?? 0) / 1000)
         state = .idle
+    }
+
+    func updateTranscript(_ transcript: Transcript?) {
+        transcriptTask?.cancel()
+        transcriptTask = nil
+        pauseIndex = PlaybackPauseIndex()
+        guard source != nil, let transcript else { return }
+        transcriptTask = Task { [weak self] in
+            let index = await Task.detached(priority: .userInitiated) {
+                PlaybackPauseIndex(transcript.segments)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.pauseIndex = index
+            self.transcriptTask = nil
+            self.skipCurrentPause()
+        }
     }
 
     func toggle() {
@@ -89,7 +114,10 @@ import LocalScribeCore
 
     func seek(to seconds: Double, play: Bool = false) {
         guard source != nil, seconds.isFinite else { return }
-        let target = min(max(0, seconds), duration)
+        var target = min(max(0, seconds), duration)
+        if play || isPlaying, skipsPauses, let next = pauseIndex.nextSpeech(at: target), next < duration {
+            target = next
+        }
         position = target
         isPlaying = (play || isPlaying) && (duration == 0 || target < duration)
         switch state {
@@ -172,6 +200,7 @@ import LocalScribeCore
                 guard time.isFinite else { return }
                 let position = min(max(0, time), self.duration)
                 if self.position != position { self.position = position }
+                self.skipCurrentPause()
             }
         }
     }
@@ -193,9 +222,17 @@ import LocalScribeCore
                     self.recover()
                     return
                 }
-                if self.isPlaying { player.rate = self.speed }
+                if !self.skipCurrentPause(), self.isPlaying { player.rate = self.speed }
             }
         }
+    }
+
+    @discardableResult
+    private func skipCurrentPause() -> Bool {
+        guard skipsPauses, isPlaying, state == .ready, seekID == nil,
+              let position, let next = pauseIndex.nextSpeech(at: position), next < duration else { return false }
+        seek(to: next)
+        return true
     }
 
     private func recover() {

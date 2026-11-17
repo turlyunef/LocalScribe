@@ -102,7 +102,13 @@ struct QueueJobID: Hashable, Sendable {
             loadResult()
         }
     }
-    @Published var transcript: Transcript? { didSet { resultRevision &+= 1; refreshPresentation() } }
+    @Published var transcript: Transcript? {
+        didSet {
+            playback.updateTranscript(transcript)
+            resultRevision &+= 1
+            refreshPresentation()
+        }
+    }
     @Published var summary: Summary? { didSet { resultRevision &+= 1; refreshPresentation() } }
     @Published var resultEdit: ResultEditDraft?
     @Published private(set) var savingResult = false
@@ -2980,6 +2986,7 @@ struct QueueJobID: Hashable, Sendable {
         }
         guard let source = playbackSource else { return }
         playback.select(source)
+        playback.updateTranscript(transcript)
         playback.seek(to: Double(segment.startMs) / 1000, play: startsPlayback)
     }
     func rendered(_ part: ExportPart, markdown: Bool = false) async throws -> String {

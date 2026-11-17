@@ -97,8 +97,11 @@ struct RecordingDetailColumn: View {
             }
             ActivityStatusView(indicators: model.indicators)
         }.background(Color(nsColor: .textBackgroundColor))
-            .onAppear { model.playback.cardAppeared(playbackCardID, source: model.playbackSource) }
-            .onChange(of: model.playbackSource) { _, source in model.playback.select(source) }
+            .onAppear { model.playback.cardAppeared(playbackCardID, source: model.playbackSource, transcript: model.transcript) }
+            .onChange(of: model.playbackSource) { _, source in
+                model.playback.select(source)
+                model.playback.updateTranscript(model.transcript)
+            }
             .onDisappear { model.playback.cardDisappeared(playbackCardID) }
             .onDrop(of: [UTType.fileURL], isTargeted: nil) { providers in
                 model.importProviders(providers)

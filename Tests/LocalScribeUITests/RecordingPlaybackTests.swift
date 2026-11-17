@@ -43,7 +43,164 @@ final class RecordingPlaybackTests: XCTestCase {
         model.activateResultSegment("first", recordingID: manifest.id, from: .transcript)
         XCTAssertEqual(model.playback.position, 1.231)
         XCTAssertFalse(model.playback.isPlaying)
+        // Timing is attached to the recording, independently of the visible tab.
+        model.tab = .summary
+        await model.playback.transcriptTask?.value
+        model.playback.skipsPauses = true
+        model.playback.seek(to: 3, play: true)
+        XCTAssertEqual(model.playback.position, 5.781)
         await model.playback.shutdown()
+    }
+
+    func testPauseIndexUsesWholeParagraphsAndOneSecondThreshold() {
+        let segments = [
+            paragraph("first", 1000, 2000),
+            paragraph("shortGap", 2999, 3500),
+            paragraph("exactGap", 4500, 5000),
+            paragraph("longGap", 8000, 9000),
+        ]
+        let index = PlaybackPauseIndex(segments)
+        for time in [0.0, 0.999, 1, 1.999, 2, 2.5, 2.999, 3.499, 4.5, 4.999, 8, 9, 20] {
+            XCTAssertNil(index.nextSpeech(at: time), "At \(time)")
+        }
+        XCTAssertEqual(index.nextSpeech(at: 3.5), 4.5)
+        XCTAssertEqual(index.nextSpeech(at: 4.499), 4.5)
+        XCTAssertEqual(index.nextSpeech(at: 5), 8)
+        XCTAssertEqual(index.nextSpeech(at: 7.99), 8)
+        XCTAssertNil(index.nextSpeech(at: .nan))
+        XCTAssertNil(index.nextSpeech(at: .infinity))
+        XCTAssertNil(PlaybackPauseIndex().nextSpeech(at: 2))
+        XCTAssertNil(PlaybackPauseIndex([segments[0]]).nextSpeech(at: 3))
+    }
+
+    func testPauseIndexMergesNestedAndEqualStartOverlapsInUnsortedInput() {
+        let index = PlaybackPauseIndex([
+            paragraph("last", 7000, 8000),
+            paragraph("nested", 2000, 2500),
+            paragraph("long", 1000, 5000),
+            paragraph("sameStart", 1000, 1500),
+            paragraph("overlap", 4000, 6000),
+        ])
+        for time in [1.0, 1.5, 2.5, 3, 5, 5.999, 7, 8] {
+            XCTAssertNil(index.nextSpeech(at: time), "At \(time)")
+        }
+        XCTAssertEqual(index.nextSpeech(at: 6), 7)
+        XCTAssertEqual(index.nextSpeech(at: 6.999), 7)
+    }
+
+    func testSkipPausesIsOffByDefaultAndPausedSeekRemainsExact() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        select(manifest, in: repository, playback)
+        playback.updateTranscript(transcript([paragraph("first", 1000, 2000), paragraph("next", 6000, 7000)]))
+        await playback.transcriptTask?.value
+        XCTAssertFalse(playback.skipsPauses)
+        playback.seek(to: 3, play: true)
+        XCTAssertEqual(playback.position, 3)
+        playback.toggle()
+        await waitUntil { playback.state == .ready }
+        playback.skipsPauses = true
+        playback.seek(to: 4)
+        XCTAssertEqual(playback.position, 4)
+        XCTAssertFalse(playback.isPlaying)
+        playback.toggle()
+        XCTAssertEqual(playback.position, 6)
+        XCTAssertTrue(playback.isPlaying)
+        playback.skipsPauses = false
+        playback.seek(to: 3)
+        XCTAssertEqual(playback.position, 3)
+        await playback.shutdown()
+    }
+
+    func testPlaybackClockAutomaticallySkipsGapAndKeepsSpeed() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        select(manifest, in: repository, playback)
+        playback.updateTranscript(transcript([paragraph("first", 500, 1000), paragraph("next", 6000, 7000)]))
+        await playback.transcriptTask?.value
+        playback.skipsPauses = true
+        playback.speed = 1.5
+        playback.seek(to: 0.6, play: true)
+        await waitUntil { (playback.position ?? 0) >= 6 }
+        XCTAssertTrue(playback.isPlaying)
+        XCTAssertEqual(playback.speed, 1.5)
+        await waitUntil { (playback.position ?? 0) >= 6.2 }
+        playback.toggle()
+        XCTAssertFalse(playback.isPlaying)
+        await playback.shutdown()
+    }
+
+    func testEnablingSkipDuringPlaybackJumpsButMissingTranscriptDoesNot() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        select(manifest, in: repository, playback)
+        playback.updateTranscript(transcript([paragraph("first", 0, 1000), paragraph("next", 6000, 7000)]))
+        await playback.transcriptTask?.value
+        playback.seek(to: 2, play: true)
+        await waitUntil { (playback.position ?? 0) > 2.1 }
+        playback.skipsPauses = true
+        XCTAssertEqual(playback.position, 6)
+        playback.updateTranscript(nil)
+        playback.seek(to: 3)
+        XCTAssertEqual(playback.position, 3)
+        await playback.shutdown()
+    }
+
+    func testSourceSwitchAndTranscriptReplacementDiscardOldPauses() async throws {
+        let repository = try temporaryRepository()
+        let first = try saveWAV(in: repository, seconds: 10)
+        let second = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        select(first, in: repository, playback)
+        playback.skipsPauses = true
+        let old = transcript([paragraph("first", 0, 1000), paragraph("next", 6000, 7000)])
+        playback.updateTranscript(old)
+        await playback.transcriptTask?.value
+        playback.seek(to: 2, play: true)
+        XCTAssertEqual(playback.position, 6)
+        // Also invalidate a build that has not published yet.
+        playback.updateTranscript(old)
+        let obsolete = playback.transcriptTask
+        select(second, in: repository, playback)
+        await obsolete?.value
+        playback.seek(to: 2, play: true)
+        XCTAssertEqual(playback.position, 2)
+        playback.updateTranscript(transcript([paragraph("new", 0, 3000), paragraph("next", 8000, 9000)]))
+        await playback.transcriptTask?.value
+        playback.seek(to: 2)
+        XCTAssertEqual(playback.position, 2)
+        playback.seek(to: 4)
+        XCTAssertEqual(playback.position, 8)
+        await playback.shutdown()
+    }
+
+    func testClosingAndReopeningCardRestoresParagraphTiming() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        let source = RecordingPlayback.Source(manifest, folder: repository.folder(manifest.id), tools: projectTools())
+        let cardID = UUID()
+        let text = transcript([paragraph("first", 0, 1000), paragraph("next", 6000, 7000)])
+        playback.cardAppeared(cardID, source: source, transcript: text)
+        playback.skipsPauses = true
+        await playback.transcriptTask?.value
+        playback.cardDisappeared(cardID)
+        playback.cardAppeared(cardID, source: source, transcript: text)
+        await playback.transcriptTask?.value
+        playback.seek(to: 2, play: true)
+        XCTAssertEqual(playback.position, 6)
+        await playback.shutdown()
+    }
+
+    private func paragraph(_ id: String, _ start: Int, _ end: Int) -> Segment {
+        Segment(id: id, startMs: start, endMs: end, text: "Реплика \(id)", language: "ru")
+    }
+
+    private func transcript(_ segments: [Segment]) -> Transcript {
+        Transcript(fingerprint: "test", diarized: true, segments: segments)
     }
 
     func testSeekClampsAndLatestCommandSurvivesSourceSwitch() async throws {
