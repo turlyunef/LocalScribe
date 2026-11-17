@@ -3,6 +3,7 @@ import AVFoundation
 import CoreAudio
 import CoreMedia
 import Foundation
+import Speech
 import XCTest
 @testable import LocalScribe
 import LocalScribeCore
@@ -23,6 +24,7 @@ import LocalScribeCore
         var systemAudio = false
         var startCalls = 0
         var stopCalls = 0
+        var captionAudio: LiveCaptionAudio?
 
         func start(folder: URL, microphone: MicrophoneCaptureRequest?, systemAudio: Bool) async throws {
             startCalls += 1
@@ -42,6 +44,7 @@ import LocalScribeCore
         }
 
         func enableFallbackMicrophone() { fallbackCalls += 1 }
+        func setLiveCaptionAudio(_ input: LiveCaptionAudio?) { captionAudio = input }
 
         func stop() async throws -> Int64 {
             stopCalls += 1
@@ -54,6 +57,7 @@ import LocalScribeCore
         captures: [Capture], authorize: @escaping @MainActor () async -> Bool,
         inputs: (() -> MicrophoneDevicesSnapshot)? = nil,
         recognize: @escaping LiveCaptionRecognition.Recognizer = LiveCaptionRecognition.recognize,
+        recognizeMixed: @escaping LiveCaptionRecognition.Session = LiveCaptionRecognition.recognizeMixed,
         run: (AppModel, RecordingRepository, MicrophoneDevices) async throws -> Void
     ) async throws {
         let name = "RecordingStartTests.\(UUID())"
@@ -77,7 +81,7 @@ import LocalScribeCore
                              requestMicrophoneAccess: authorize, makeRecordingCapture: { _ in
             XCTAssertFalse(remaining.isEmpty)
             return remaining.isEmpty ? Capture() : remaining.removeFirst()
-        }, recognizeLiveCaptions: recognize)
+        }, recognizeLiveCaptions: recognize, recognizeMixedLiveCaptions: recognizeMixed)
         model.backgroundRecognition = false
         await model.reload()
         do { try await run(model, repo, devices) }
@@ -131,6 +135,98 @@ import LocalScribeCore
             await reopened.deleteSidebarRecordings([id])
             XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(id).path))
             await reopened.shutdown()
+        }
+    }
+
+    func testChangingLiveCaptionLanguageRestartsWithTheSelectedSystemLocale() async throws {
+        try await withModel(captures: [Capture()], authorize: { true }, recognize: { locale, stream, ready, receive in
+            await ready()
+            let range = CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1))
+            await receive(.init(range: range, finalizedThrough: .zero, text: locale.identifier))
+            for await _ in stream {}
+        }, recognizeMixed: { stream, ready, receive in
+            await ready()
+            let range = CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1))
+            await receive(.init(range: range, finalizedThrough: range.end, text: "Давай review"))
+            for await _ in stream {}
+        }) { model, repo, _ in
+            await model.startRecording()
+            let id = try XCTUnwrap(model.recordingID)
+            model.setLiveCaptionLanguage(.russian, for: id)
+            model.startLiveCaptions(id)
+            let captions = try XCTUnwrap(model.selectedCaptions)
+            try await waitForStart { captions.text.tentative.first?.text == "ru-RU" }
+            model.setLiveCaptionLanguage(.english, for: id)
+            try await waitForStart { captions.text.tentative.first?.text == "en-US" }
+            XCTAssertEqual(captions.text.phrases, ["ru-RU"])
+            XCTAssertEqual(model.liveCaptionLanguage, .english)
+            model.setLiveCaptionLanguage(.mixed, for: id)
+            try await waitForStart { captions.text.phrases.last == "Давай review" }
+            XCTAssertEqual(model.recordingID, id)
+            await model.stopRecording()
+            XCTAssertEqual(try repo.liveCaptions(id), ["ru-RU", "en-US", "Давай review"])
+        }
+    }
+
+    func testLiveCaptionsRecoverFromInternalSpeechErrorWithNewAudio() async throws {
+        let capture = Capture()
+        let sequence = CaptionSequence()
+        try await withModel(captures: [capture], authorize: { true }, recognizeMixed: { stream, ready, receive in
+            let attempt = await sequence.next()
+            await ready()
+            var input = stream.makeAsyncIterator()
+            guard await input.next() != nil else { return }
+            let range = CMTimeRange(start: .zero, duration: CMTime(value: 1, timescale: 1))
+            await receive(.init(range: range, finalizedThrough: attempt == 1 ? .zero : range.end,
+                                text: "Реплика \(attempt)"))
+            if attempt == 1 {
+                throw NSError(domain: SFSpeechErrorDomain, code: SFSpeechError.Code.internalServiceError.rawValue)
+            }
+            while await input.next() != nil {}
+        }) { model, repo, _ in
+            await model.startRecording()
+            let id = try XCTUnwrap(model.recordingID)
+            model.setLiveCaptionLanguage(.mixed, for: id)
+            model.startLiveCaptions(id)
+            let captions = try XCTUnwrap(model.selectedCaptions)
+            let original = try XCTUnwrap(capture.captionAudio)
+            let format = try XCTUnwrap(CapturePCM16Sink.format)
+            let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 16))
+            buffer.frameLength = 16
+            buffer.int16ChannelData?[0].initialize(repeating: 0, count: 16)
+            original.append(buffer, startingAt: 0, originHostTime: AudioGetCurrentHostTime())
+
+            try await waitForStart { capture.captionAudio !== original && captions.phase == .listening }
+            XCTAssertEqual(captions.text.phrases, ["Реплика 1"])
+            XCTAssertEqual(captions.language, .mixed)
+            XCTAssertEqual(capture.stopCalls, 0)
+            XCTAssertEqual(model.recordingID, id)
+
+            let replacement = try XCTUnwrap(capture.captionAudio)
+            replacement.append(buffer, startingAt: 0, originHostTime: AudioGetCurrentHostTime())
+            try await waitForStart { captions.text.phrases.count == 2 }
+            await model.stopRecording()
+            XCTAssertEqual(try repo.liveCaptions(id), ["Реплика 1", "Реплика 2"])
+        }
+    }
+
+    func testLiveCaptionsStopRetryingAfterRepeatedInternalSpeechError() async throws {
+        let sequence = CaptionSequence()
+        try await withModel(captures: [Capture()], authorize: { true }, recognizeMixed: { _, _, _ in
+            _ = await sequence.next()
+            throw NSError(domain: SFSpeechErrorDomain, code: SFSpeechError.Code.internalServiceError.rawValue)
+        }) { model, _, _ in
+            await model.startRecording()
+            let id = try XCTUnwrap(model.recordingID)
+            model.setLiveCaptionLanguage(.mixed, for: id)
+            model.startLiveCaptions(id)
+            let captions = try XCTUnwrap(model.selectedCaptions)
+            try await waitForStart { captions.phase == .recognitionFailed }
+            let attempts = await sequence.value
+            XCTAssertEqual(attempts, 2)
+            XCTAssertFalse(captions.isRunning)
+            XCTAssertEqual(model.recordingID, id)
+            await model.stopRecording()
         }
     }
 

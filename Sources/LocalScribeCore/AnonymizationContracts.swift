@@ -224,6 +224,8 @@ public struct AnonymizationAttemptFailure: Codable, Equatable, Sendable {
 /// input is fixed when the attempt enters `RUNNING` and is preserved until the
 /// attempt ends.
 public struct AnonymizationAttempt: Codable, Equatable, Sendable {
+    public static let pipelineVersion = "anonymization1"
+    public var isRetry: Bool?
     public var schemaVersion = 1
     public var id: String
     public var state: AnonymizationAttemptState
@@ -239,7 +241,8 @@ public struct AnonymizationAttempt: Codable, Equatable, Sendable {
     public var failure: AnonymizationAttemptFailure?
     public init(id: String = UUID().uuidString, state: AnonymizationAttemptState,
                 requestedSource: TextRevision? = nil, expectedResultRevisionID: String? = nil,
-                input: RunInput? = nil, failure: AnonymizationAttemptFailure? = nil) {
+                input: RunInput? = nil, failure: AnonymizationAttemptFailure? = nil, isRetry: Bool? = nil) {
+        self.isRetry = isRetry
         self.id = id; self.state = state; self.requestedSource = requestedSource
         self.expectedResultRevisionID = expectedResultRevisionID
         self.input = input; self.failure = failure

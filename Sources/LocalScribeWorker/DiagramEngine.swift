@@ -30,10 +30,12 @@ actor MLXDiagramRecognizer: DiagramRecognizing {
     private let folder: URL
     /// Launch arguments of this worker process; injectable for tests.
     private let launchArguments: [String]
+    private let diagnosticPhase: WorkerDiagnostics.PhaseReporter?
     private var container: ModelContainer?
-    init(folder: URL, launchArguments: [String] = CommandLine.arguments) {
+    init(folder: URL, launchArguments: [String] = CommandLine.arguments, diagnosticPhase: WorkerDiagnostics.PhaseReporter? = nil) {
         self.folder = folder
         self.launchArguments = launchArguments
+        self.diagnosticPhase = diagnosticPhase
     }
     func generate(prompt: String, image: DiagramRecognitionImage, maxTokens: Int) async throws -> (output: String, finished: Bool) {
         Memory.cacheLimit = 256 * 1024 * 1024
@@ -45,7 +47,9 @@ actor MLXDiagramRecognizer: DiagramRecognizing {
             if let cached = self.container { container = cached } else {
                 // Directory configurations never touch the network; missing
                 // weights fail this load instead of downloading anything.
-                container = try await VLMModelFactory.shared.loadContainer(configuration: .init(directory: folder))
+                container = try await WorkerDiagnostics.loadModel(report: diagnosticPhase) {
+                    try await VLMModelFactory.shared.loadContainer(configuration: .init(directory: folder))
+                }
                 self.container = container
             }
             let attachment: UserInput.Image
@@ -68,6 +72,8 @@ actor MLXDiagramRecognizer: DiagramRecognizing {
             return (output, info?.stopReason == .stop)
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as ClassifiedDiagnosticError {
+            throw error
         } catch {
             // SDK failures stay neutral: their text may otherwise leak model
             // internals or user content. Diagram manifests carry no
@@ -121,8 +127,8 @@ actor DiagramEngine {
     private let recognizer: DiagramRecognizing
     private let emit: @Sendable (String, String, String?) -> Void
 
-    init(command: WorkerCommand, diagramPath: String, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
-        try self.init(command: command, diagramPath: diagramPath, makeRecognizer: { MLXDiagramRecognizer(folder: $0) }, emit: emit)
+    init(command: WorkerCommand, diagramPath: String, diagnosticPhase: WorkerDiagnostics.PhaseReporter? = nil, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
+        try self.init(command: command, diagramPath: diagramPath, makeRecognizer: { MLXDiagramRecognizer(folder: $0, diagnosticPhase: diagnosticPhase) }, emit: emit)
     }
     /// Diagnostic factory: the recognizer is injected, every constructor check
     /// still applies.

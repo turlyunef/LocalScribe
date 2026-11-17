@@ -292,6 +292,8 @@ public struct WorkerEvent: Codable, Sendable {
     /// absent for the historical kindless audio events.
     public var kind: String?
     public var type: String; public var message: String; public var artifact: String?
+    public var diagnosticFailure: DiagnosticFailure?
+    public var diagnosticPhase: DiagnosticPhase?
     public init(command: WorkerCommand, type: String, message: String = "", artifact: String? = nil) { jobId = command.jobId; runId = command.runId; kind = command.kind; self.type = type; self.message = message; self.artifact = artifact }
     public var isDiagram: Bool { kind == "diagram" }
     public var isAnonymization: Bool { kind == "anonymization" }

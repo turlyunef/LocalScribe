@@ -55,10 +55,12 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
     /// with this flag. The production protocol path keeps the default and can
     /// never unlock SDK error text, whatever process flags it carries.
     private let technicalProbe: Bool
+    private let diagnosticPhase: WorkerDiagnostics.PhaseReporter?
     private var container: ModelContainer?
-    init(folder: URL, technicalProbe: Bool = false) {
+    init(folder: URL, technicalProbe: Bool = false, diagnosticPhase: WorkerDiagnostics.PhaseReporter? = nil) {
         self.folder = folder
         self.technicalProbe = technicalProbe
+        self.diagnosticPhase = diagnosticPhase
     }
 
     func detect(text: String, dataType: String) async throws -> AnonymizationWindowAnswer {
@@ -72,13 +74,14 @@ actor MLXAnonymizationRecognizer: AnonymizationRecognizing {
         Memory.memoryLimit = Int(budget)
         let container: ModelContainer
         if let cached = self.container { container = cached } else {
-            let config = try JSONDecoder.json5().decode(BaseConfiguration.self,
-                from: Data(contentsOf: folder.appendingPathComponent("config.json")))
-            let configuration = ModelConfiguration(directory: folder)
-            if config.modelType == "qwen3_vl" {
-                container = try await VLMModelFactory.shared.loadContainer(configuration: configuration)
-            } else {
-                container = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
+            container = try await WorkerDiagnostics.loadModel(report: diagnosticPhase) {
+                let config = try JSONDecoder.json5().decode(BaseConfiguration.self,
+                    from: Data(contentsOf: folder.appendingPathComponent("config.json")))
+                let configuration = ModelConfiguration(directory: folder)
+                if config.modelType == "qwen3_vl" {
+                    return try await VLMModelFactory.shared.loadContainer(configuration: configuration)
+                }
+                return try await LLMModelFactory.shared.loadContainer(configuration: configuration)
             }
             self.container = container
         }

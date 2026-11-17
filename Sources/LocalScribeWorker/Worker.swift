@@ -68,6 +68,24 @@ import LocalScribeSpeakerKit
         return outcome.code
     }
 
+    private static func failed(_ error: Error, command: WorkerCommand, phase: DiagnosticPhase) -> Outcome {
+        let classified = error as? ClassifiedDiagnosticError
+        let safe = classified?.message ?? (error as? ScribeError)?.localizedDescription
+            ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
+        var event = WorkerEvent(command: command, type: "failed", message: safe)
+        let code: DiagnosticFailure.Code = phase == .inputValidation ? .invalidInput : .processingFailed
+        event.diagnosticFailure = classified?.diagnostic ?? DiagnosticFailure(code, phase: phase, error: error)
+        return Outcome(code: 1, event: event)
+    }
+
+    private static func phaseReporter(_ command: WorkerCommand, output: FileHandle) -> @Sendable (DiagnosticPhase) -> Void {
+        { phase in
+            var event = WorkerEvent(command: command, type: "diagnostic")
+            event.diagnosticPhase = phase
+            write(event, to: output)
+        }
+    }
+
     private static func runCommand(output: FileHandle, control: WorkerControl) async -> Outcome {
         guard let command = readCommand() else { return Outcome(code: 64) }
         // The audio wire format stays kindless; diagram and anonymization
@@ -81,10 +99,13 @@ import LocalScribeSpeakerKit
             write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
         }
         await control.watchInput { emit("cancelled", "Обработка отменена", nil); terminateGroup(72) }
+        var phase = DiagnosticPhase.inputValidation
         do {
             emit("started", "", nil)
             let started = Date()
-            let pipeline = try Pipeline(command: command, emit: emit)
+            let pipeline = try Pipeline(command: command, diagnosticPhase: phaseReporter(command, output: output), emit: emit)
+            phase = .processing
+            phaseReporter(command, output: output)(phase)
             let artifact = try await pipeline.perform()
             var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
             let metrics: [String: Double] = ["seconds": Date().timeIntervalSince(started), "maxResidentBytes": Double(usage.ru_maxrss)]
@@ -92,8 +113,7 @@ import LocalScribeSpeakerKit
             try? Disk.write(metrics, to: pipeline.run.appendingPathComponent("metrics-\(pipeline.stage.rawValue).json"))
             return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: artifact))
         } catch {
-            let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
-            return Outcome(code: 1, event: WorkerEvent(command: command, type: "failed", message: safe))
+            return failed(error, command: command, phase: phase)
         }
     }
 
@@ -106,10 +126,12 @@ import LocalScribeSpeakerKit
             write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
         }
         await control.watchInput { emit("cancelled", "Обработка отменена", nil); terminateGroup(72) }
+        var phase = DiagnosticPhase.inputValidation
         do {
             emit("started", "", nil)
             let started = Date()
-            let engine = try DiagramEngine(command: command, diagramPath: diagramPath, emit: emit)
+            let engine = try DiagramEngine(command: command, diagramPath: diagramPath, diagnosticPhase: phaseReporter(command, output: output), emit: emit)
+            phase = .processing
             let artifact = try await engine.recognize()
             var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
             let metrics: [String: Double] = ["seconds": Date().timeIntervalSince(started), "maxResidentBytes": Double(usage.ru_maxrss)]
@@ -117,8 +139,7 @@ import LocalScribeSpeakerKit
             try? Disk.write(metrics, to: engine.run.appendingPathComponent("metrics-diagram.json"))
             return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: artifact))
         } catch {
-            let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
-            return Outcome(code: 1, event: WorkerEvent(command: command, type: "failed", message: safe))
+            return failed(error, command: command, phase: phase)
         }
     }
 
@@ -133,6 +154,7 @@ import LocalScribeSpeakerKit
             write(WorkerEvent(command: command, type: type, message: message, artifact: artifact), to: output)
         }
         await control.watchInput { emit("cancelled", "Обработка отменена", nil); terminateGroup(72) }
+        var phase = DiagnosticPhase.inputValidation
         do {
             emit("started", "", nil)
             // Input validation happens before any progress: a missing or
@@ -141,7 +163,8 @@ import LocalScribeSpeakerKit
             try Task.checkCancellation()
             emit("progress", "Проверяем задание обезличивания…", nil)
             let started = Date()
-            let engine = try AnonymizationEngine(command: command, input: input, emit: emit)
+            let engine = try AnonymizationEngine(command: command, input: input, diagnosticPhase: phaseReporter(command, output: output), emit: emit)
+            phase = .processing
             let outcome = try await engine.run()
             var usage = rusage(); getrusage(RUSAGE_SELF, &usage)
             var metrics = outcome.metrics
@@ -151,8 +174,7 @@ import LocalScribeSpeakerKit
             try? Disk.write(metrics, to: engine.attemptURL.appendingPathComponent("metrics-anonymization.json"))
             return Outcome(code: 0, event: WorkerEvent(command: command, type: "completed", artifact: AnonymizationRunArtifact.filename))
         } catch {
-            let safe = (error as? ScribeError)?.localizedDescription ?? "Локальный этап завершился ошибкой. Результаты предыдущих этапов сохранены."
-            return Outcome(code: 1, event: WorkerEvent(command: command, type: "failed", message: safe))
+            return failed(error, command: command, phase: phase)
         }
     }
 

@@ -249,7 +249,7 @@ import LocalScribeCore
             }
         } catch {
             onDiscard()
-            model.errorHandler.report(error)
+            model.errorHandler.report(error, operation: .importText)
         }
     }
 
@@ -262,6 +262,7 @@ import LocalScribeCore
                 throw ScribeError.message("Не удалось получить файл для импорта")
             }
             try Task.checkCancellation()
+            model.errorHandler.note(.importStarted, operation: .importText)
             guard let format = AnonymizationSourceFormat.importFormat(pathExtension: url.pathExtension) else {
                 throw ScribeError.message("Неподдерживаемый формат файла. Допустимы TXT и Markdown.")
             }
@@ -310,7 +311,7 @@ import LocalScribeCore
                 await model.reloadTexts()
             }
         } catch is CancellationError { }
-        catch { model.errorHandler.report(error) }
+        catch { model.errorHandler.report(error, operation: .importText) }
     }
 
     private static func readImportBytes(_ url: URL, forRestoration: Bool = false) async throws -> Data {

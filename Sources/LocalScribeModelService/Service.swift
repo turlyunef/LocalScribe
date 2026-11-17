@@ -20,9 +20,9 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
         try FileManager.default.removeItem(at: url); temporary = nil
         return file
     }
-    func download(_ profileID: String, fileIndex: Int, requestID: String, withReply reply: @escaping (FileHandle?, String?) -> Void) {
+    func download(_ profileID: String, fileIndex: Int, requestID: String, withReply reply: @escaping (FileHandle?, String?, Data?) -> Void) {
         DispatchQueue.main.async {
-            guard self.task == nil else { reply(nil,"Другая загрузка ещё работает"); return }
+            guard self.task == nil else { reply(nil,"Другая загрузка ещё работает",nil); return }
             self.task = Task { @MainActor in
                 defer { self.task = nil }
                 do {
@@ -38,9 +38,18 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
                     let (temporary,response) = try await transfer.download(from:url)
                     self.temporary = temporary
                     try Task.checkCancellation()
-                    guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw ScribeError.message("Источник модели недоступен") }
-                    reply(try self.openTemporary(temporary),nil)
-                } catch { self.clean(); reply(nil,error is CancellationError ? "Загрузка отменена" : error.localizedDescription) }
+                    let status = (response as? HTTPURLResponse)?.statusCode
+                    guard status == 200 else {
+                        let system = status.map { DiagnosticSystemCode(domain: .http, code: $0) }
+                        let failure = DiagnosticFailure(.operationFailed, system: system)
+                        throw ClassifiedDiagnosticError(message: "Источник модели недоступен", diagnostic: failure)
+                    }
+                    reply(try self.openTemporary(temporary),nil,nil)
+                } catch {
+                    self.clean()
+                    let failure = (error as? ClassifiedDiagnosticError)?.diagnostic ?? DiagnosticFailure(.operationFailed, error: error)
+                    reply(nil, error is CancellationError ? "Загрузка отменена" : error.localizedDescription, try? JSONEncoder().encode(failure))
+                }
             }
         }
     }

@@ -526,7 +526,7 @@ struct ModelSettings: View {
                     .toggleStyle(.checkbox)
                     .disabled(model.recordingID != nil || model.startingRecording || model.finalizingRecording)
                     .accessibilityIdentifier("settings.automaticLiveCaptions")
-                    .help(L10n.text("Открывает вкладку «В эфире» при начале записи. Язык речи совпадает с языком интерфейса."))
+                    .help(L10n.text("Открывает вкладку «В эфире» при начале записи с выбранным языком предрасшифровки."))
                 Toggle(L10n.text("Создавать автоматически итоги встречи"), isOn: $draft.automaticSummaries)
                     .toggleStyle(.checkbox)
                     .accessibilityIdentifier("settings.automaticSummaries")

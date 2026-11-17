@@ -13,11 +13,14 @@ struct LiveTranscriber {
     var metrics: ASRMetricsRecorder? = nil
 
     var engineFactory = ASREngineFactory()
+    var diagnosticPhase: WorkerDiagnostics.PhaseReporter? = nil
 
     func perform() async throws -> String {
         emit("progress", "Загружаем модель фонового распознавания…", nil)
         let catalog = try Disk.read(ModelCatalog.self, at: tools.deletingLastPathComponent().appendingPathComponent("models.lock.json"))
-        let recognizer = try await engineFactory.make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
+        let recognizer = try await WorkerDiagnostics.loadModel(report: diagnosticPhase) {
+            try await engineFactory.make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
+        }
         let folder = recording.appendingPathComponent("capture")
         let work = run.appendingPathComponent("work/live")
         try Disk.directory(work)

@@ -42,9 +42,9 @@ actor AnonymizationEngine {
     /// Production path with an already-validated input: the protocol route
     /// loads the attempt input before any progress event, so validation
     /// failures keep the point-1 event contract (started → failed).
-    init(command: WorkerCommand, input: AnonymizationAttemptInput, emit: @escaping Emit) throws {
+    init(command: WorkerCommand, input: AnonymizationAttemptInput, diagnosticPhase: WorkerDiagnostics.PhaseReporter? = nil, emit: @escaping Emit) throws {
         try self.init(command: command, input: input,
-            makeRecognizer: { MLXAnonymizationRecognizer(folder: $0) },
+            makeRecognizer: { MLXAnonymizationRecognizer(folder: $0, diagnosticPhase: diagnosticPhase) },
             makeValueSource: { SeededAnonymizationValueSource(seed: Self.substitutionSeed(input: $0)) },
             emit: emit)
     }

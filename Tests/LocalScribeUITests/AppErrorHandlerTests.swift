@@ -72,8 +72,7 @@ final class AppErrorHandlerTests: XCTestCase {
         let panel = try XCTUnwrap(handler.window)
         XCTAssertTrue(panel.isVisible)
         let text = try XCTUnwrap(handler.copyCurrent())
-        for needle in ["LocalScribe", AppInfo.version, AppInfo.build, "macOS", "Время ошибки:",
-                       "Не удалось сохранить правки"] {
+        for needle in ["LocalScribe", AppInfo.version, AppInfo.build, "macOS", "Время ошибки:", "operationFailed"] {
             XCTAssertTrue(text.contains(needle), "Копия ошибки должна содержать: \(needle)")
         }
         XCTAssertNotNil(text.range(of: #"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}"#, options: .regularExpression),
@@ -85,28 +84,77 @@ final class AppErrorHandlerTests: XCTestCase {
         XCTAssertEqual(handler.reports.count, 1)
     }
 
-    func testCopyIncludesTechnicalContextAndGUIStack() throws {
-        let pasteboard = NSPasteboard.withUniqueName()
-        defer { pasteboard.releaseGlobally() }
-        let handler = AppErrorHandler(pasteboard: pasteboard)
-        handler.report(message: "Процесс обработки прерван (код 5). Контрольные точки сохранены.",
-                       context: [("этап", "transcribing"),
-                                 ("процесс worker", "завершён по сигналу SIGTRAP — аварийное прерывание в коде worker"),
-                                 ("последнее событие протокола", "progress «Распознаём речь — часть 1 из 2»")])
-        let text = try XCTUnwrap(handler.copyCurrent())
-        XCTAssertTrue(text.contains("Технические сведения:"))
-        XCTAssertTrue(text.contains("этап: transcribing"))
-        XCTAssertTrue(text.contains("SIGTRAP"))
-        XCTAssertTrue(text.contains("«Распознаём речь — часть 1 из 2»"))
-        XCTAssertTrue(text.contains("Стек вызовов (GUI):"))
-        XCTAssertFalse(handler.reports[0].stack.isEmpty, "Стек GUI должен попадать в снимок ошибки")
-        XCTAssertTrue(handler.reports[0].stack.allSatisfy { $0.contains("LocalScribe") })
-        // Отчёт без контекста не печатает пустую секцию технических сведений.
-        handler.dismissCurrent()
-        handler.report(message: "Простая ошибка")
-        let plain = try XCTUnwrap(handler.copyCurrent())
-        XCTAssertFalse(plain.contains("Технические сведения:"))
-        XCTAssertTrue(plain.contains("Простая ошибка"))
+    func testCopyIncludesSystemCodeAndOmitsRawMessageAndPath() throws {
+        let handler = AppErrorHandler()
+        let error = NSError(domain: NSCocoaErrorDomain, code: 260, userInfo: [
+            NSLocalizedDescriptionKey: "missing SecretMeeting.m4a",
+            NSFilePathErrorKey: "/Users/Private/SecretMeeting.m4a"
+        ])
+        handler.report(error, operation: .importAudio,
+                       failure: DiagnosticFailure(.invalidInput, phase: .sourceOpen, error: error))
+        let text = try XCTUnwrap(handler.reports.first?.clipboardText)
+        XCTAssertTrue(text.contains("NSCocoaErrorDomain"))
+        XCTAssertTrue(text.contains("260"))
+        XCTAssertTrue(text.contains("sourceOpen"))
+        XCTAssertFalse(text.contains("SecretMeeting"))
+        XCTAssertFalse(text.contains("/Users/Private"))
+    }
+
+    func testSavedReportIsIdenticalAfterReopeningJournal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let original = AppErrorHandler()
+        original.startJournal(at: root)
+        let item = UUID().uuidString, run = UUID().uuidString
+        let reference = try XCTUnwrap(DiagnosticJobReference(.recording, item: item, run: run))
+        let job = DiagnosticJob(reference: reference, mode: .resume, stage: .transcribing, phase: .modelLoad)
+        original.note(.jobStarted, job: job)
+        original.note(.memoryWarning)
+        original.report(message: "Private original name", operation: .recording, job: job,
+                        failure: DiagnosticFailure(.workerSignal, phase: .modelLoad),
+                        worker: DiagnosticWorkerExit(reason: .signal, status: SIGTRAP, lastEvent: .progress, elapsedMs: 923))
+        let first = try XCTUnwrap(original.reports.first?.clipboardText)
+        _ = await original.journal.snapshot()
+        original.dismissCurrent()
+
+        let restarted = AppErrorHandler()
+        restarted.startJournal(at: root)
+        await restarted.presentStored(reference, message: "Worker interrupted")
+        XCTAssertEqual(restarted.reports.first?.clipboardText, first)
+        XCTAssertTrue(first.contains("SIGTRAP"))
+        XCTAssertTrue(first.contains("memoryWarning"))
+        XCTAssertTrue(first.contains("resume"))
+        XCTAssertFalse(first.contains("Private original name"))
+        let history = await restarted.journal.snapshot()
+        XCTAssertEqual(history.reports.count, 1)
+        XCTAssertEqual(history.events.map(\.kind), [.appStarted, .jobStarted, .memoryWarning, .error, .appStarted])
+
+        restarted.dismissCurrent()
+        await restarted.presentStored(DiagnosticJobReference(.diagram, item: item, run: run), message: "Other archive")
+        XCTAssertNil(restarted.copyCurrent())
+    }
+
+    func testCrashAttachmentExportsOnlyImageOffsetsAndSafeFields() throws {
+        let uuid = UUID()
+        let fixture = """
+        {"bug_type":"309","slice_uuid":"\(uuid.uuidString)","incident_id":"SECRET"}
+        {"procName":"LocalScribeWorker","procPath":"/Users/Private/App","faultingThread":0,
+         "exception":{"signal":"SIGTRAP","message":"SECRET"},
+         "termination":{"namespace":"SIGNAL","code":5,"indicator":"SECRET"},
+         "usedImages":[{"uuid":"\(uuid.uuidString)","name":"LocalScribeWorker","size":100,"path":"SECRET"}],
+         "threads":[{"queue":"SECRET","frames":[{"imageIndex":0,"imageOffset":42,"symbol":"SECRET"},
+         {"imageIndex":100,"imageOffset":4},{"imageIndex":0,"imageOffset":500}]}]}
+        """
+        let attachment = try NativeCrashAttachment.parse(Data(fixture.utf8))
+        XCTAssertEqual(attachment.executable, .worker)
+        XCTAssertEqual(attachment.executableUUID, uuid)
+        XCTAssertEqual(attachment.frames.map(\.imageOffset), [42])
+        XCTAssertEqual(attachment.signal, .trap)
+        let export = DiagnosticJSON.text(attachment)
+        XCTAssertFalse(export.contains("SECRET"))
+        XCTAssertFalse(export.contains("/Users/Private"))
+        XCTAssertThrowsError(try NativeCrashAttachment.parse(Data(fixture.replacingOccurrences(of: "LocalScribeWorker", with: "UnrelatedApp").utf8)))
+        XCTAssertThrowsError(try NativeCrashAttachment.parse(Data(fixture.replacingOccurrences(of: uuid.uuidString, with: "/private/path").utf8)))
     }
 
     func testCopyButtonCopiesShownMessageWithoutDismissingWindow() throws {
@@ -131,7 +179,7 @@ final class AppErrorHandlerTests: XCTestCase {
         XCTAssertEqual(button.accessibilityLabel?(), "Копировать ошибку")
         XCTAssertTrue(button.accessibilityPerformPress?() ?? false)
         XCTAssertEqual(pasteboard.string(forType: .string), handler.reports.first?.clipboardText)
-        XCTAssertTrue(pasteboard.string(forType: .string)?.contains("Ошибка архива") == true)
+        XCTAssertTrue(pasteboard.string(forType: .string)?.contains("operationFailed") == true)
         // Копирование не подтверждает сообщение: окно и очередь без изменений.
         XCTAssertEqual(handler.messages, ["Ошибка архива", "Вторая"])
         XCTAssertTrue(panel.isVisible)

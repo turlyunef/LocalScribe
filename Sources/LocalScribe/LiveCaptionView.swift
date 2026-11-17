@@ -2,6 +2,30 @@ import SwiftUI
 import AppKit
 import LocalScribeCore
 
+struct LiveCaptionLanguageMenu: View {
+    var language: LiveCaptionLanguage
+    var select: (LiveCaptionLanguage) -> Void
+
+    var body: some View {
+        let title = L10n.text("Язык предрасшифровки")
+        Menu {
+            Picker(title, selection: Binding(get: { language }, set: select)) {
+                ForEach(LiveCaptionLanguage.allCases, id: \.self) { choice in
+                    Text(choice.title).tag(choice)
+                }
+            }
+            .labelsHidden()
+        } label: {
+            Label(language.title, systemImage: "globe")
+        }
+        .menuIndicator(.hidden)
+        .help(title)
+        .accessibilityLabel(title)
+        .accessibilityValue(language.title)
+        .accessibilityIdentifier("recording.liveCaptions.language")
+    }
+}
+
 struct LiveCaptionControl: View {
     var captions: RecordingLiveCaptions?
     var disabled: Bool
@@ -56,7 +80,8 @@ struct LiveCaptionView: View {
 
     private var status: String? {
         switch captions.phase {
-        case .preparing: return L10n.text("Подготавливаем языковой пакет macOS…")
+        case .preparing:
+            return L10n.text(captions.language == .mixed ? "Подготавливаем русский и английский пакеты macOS…" : "Подготавливаем языковой пакет macOS…")
         case .listening where captions.text.phrases.isEmpty && captions.text.tentative.isEmpty:
             return L10n.text("Ожидаем речь…")
         case .stopped where captions.text.phrases.isEmpty: return L10n.text("Здесь пока нет реплик.")

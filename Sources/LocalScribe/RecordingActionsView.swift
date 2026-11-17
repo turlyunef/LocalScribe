@@ -7,6 +7,7 @@ struct RecordingActionsView: View {
     var canRecreateSummary: Bool
     var canDelete: Bool
     var showAudio: () -> Void
+    var liveCaptionLanguageMenu: LiveCaptionLanguageMenu? = nil
     var liveCaptionControl: LiveCaptionControl? = nil
     var editResult: () -> Void
     var repeatAnalysis: () -> Void
@@ -34,6 +35,7 @@ struct RecordingActionsView: View {
             Button(L10n.text("Показать аудио в Finder"), systemImage: "folder", action: showAudio)
                 .help(L10n.text("Показать исходный аудиофайл записи в Finder"))
                 .accessibilityIdentifier("recording.showAudio")
+            liveCaptionLanguageMenu
             liveCaptionControl
             Button(L10n.text("Редактировать"), systemImage: "pencil", action: editResult)
                 .disabled(!canEdit)

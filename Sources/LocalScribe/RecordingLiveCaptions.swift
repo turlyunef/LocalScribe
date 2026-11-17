@@ -1,4 +1,6 @@
 import CoreMedia
+import os
+import Speech
 import SwiftUI
 import LocalScribeCore
 
@@ -45,6 +47,7 @@ struct LiveCaptionText {
     let recordingID: String
     @Published private(set) var text: LiveCaptionText
     @Published private(set) var phase: Phase = .stopped
+    private(set) var language: LiveCaptionLanguage?
     var isRunning: Bool { input != nil }
 
     private let archive: RecordingCoordinator
@@ -54,6 +57,7 @@ struct LiveCaptionText {
     private var lastSavedCount: Int?
     private var finishWaiter: CheckedContinuation<Void, Never>?
     private var finishDeadline: Task<Void, Never>?
+    private static let logger = Logger(subsystem: "local.localscribe.mac", category: "LiveCaptions")
 
     init(recordingID: String, archive: RecordingCoordinator, phrases: [String]? = nil) {
         self.recordingID = recordingID
@@ -62,28 +66,52 @@ struct LiveCaptionText {
         lastSavedCount = phrases?.count
     }
 
-    func start(locale: Locale, recognize: @escaping LiveCaptionRecognition.Recognizer) -> LiveCaptionAudio {
+    func start(language: LiveCaptionLanguage, recognize: @escaping LiveCaptionRecognition.Session,
+               attachAudio: @escaping @MainActor (LiveCaptionAudio) -> Void) {
         let audio = LiveCaptionAudio()
         input = audio
+        self.language = language
         phase = .preparing
         save()
+        attachAudio(audio)
         recognitionTask = Task { [weak self] in
-            do {
-                try await recognize(locale, audio.stream, { [weak self] in
-                    await self?.beginListening(on: audio)
-                }, { [weak self] update in
-                    await self?.receive(update, on: audio)
-                })
-                self?.end(audio, phase: .stopped)
-            } catch LiveCaptionRecognition.Failure.languageUnavailable {
-                self?.end(audio, phase: .languageUnavailable)
-            } catch is CancellationError where self?.finishWaiter != nil {
-                self?.end(audio, phase: .stopped)
-            } catch {
-                self?.end(audio, phase: .recognitionFailed)
+            for canRetry in [true, false] {
+                guard let audio = self?.input, !Task.isCancelled else { return }
+                do {
+                    try await recognize(audio.stream, { [weak self] in
+                        await self?.beginListening(on: audio)
+                    }, { [weak self] update in
+                        await self?.receive(update, on: audio)
+                    })
+                    self?.end(audio, phase: .stopped)
+                    return
+                } catch LiveCaptionRecognition.Failure.languageUnavailable {
+                    self?.end(audio, phase: .languageUnavailable)
+                    return
+                } catch is CancellationError where self?.finishWaiter != nil {
+                    self?.end(audio, phase: .stopped)
+                    return
+                } catch {
+                    guard let self, self.input === audio, !Task.isCancelled else { return }
+                    let failure = error as NSError
+                    if canRetry, self.finishWaiter == nil, failure.domain == SFSpeechErrorDomain,
+                       failure.code == SFSpeechError.Code.internalServiceError.rawValue {
+                        Self.logger.notice("Restarting live captions after internal Speech error (\(language.rawValue, privacy: .public), code \(failure.code)).")
+                        audio.finish()
+                        self.text.freeze()
+                        self.save()
+                        let replacement = LiveCaptionAudio()
+                        self.input = replacement
+                        if self.phase != .saveFailed { self.phase = .preparing }
+                        attachAudio(replacement)
+                    } else {
+                        Self.logger.error("Live captions failed (\(language.rawValue, privacy: .public), domain \(failure.domain, privacy: .private), code \(failure.code)).")
+                        self.end(audio, phase: .recognitionFailed)
+                        return
+                    }
+                }
             }
         }
-        return audio
     }
 
     private func beginListening(on audio: LiveCaptionAudio) {

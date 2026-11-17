@@ -77,6 +77,7 @@ codesign --verify --deep --strict --verbose=2 "$APP"
 # Finder and Launch Services use that date to detect changed app metadata/icons.
 touch "$APP"
 mkdir -p build
+bash scripts/archive_symbols.sh "$APP" "$BIN" "$ROOT/build/symbols"
 cp Package.resolved build/Package.resolved
 { xcodebuild -version; swift --version; sw_vers; shasum -a 256 Package.resolved Resources/models.lock.json; } > build/build-environment.txt
 if [ -e "$DESTINATION" ]; then mv "$DESTINATION" "$PREVIOUS"; fi

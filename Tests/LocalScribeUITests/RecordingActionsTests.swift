@@ -12,6 +12,7 @@ final class RecordingActionsTests: XCTestCase {
 
     private func withActions(
         width: CGFloat = 650,
+        liveCaptionLanguageMenu: LiveCaptionLanguageMenu? = nil,
         liveCaptionControl: LiveCaptionControl? = nil,
         canEdit: Bool = true,
         canRepeatAnalysis: Bool = true,
@@ -32,6 +33,7 @@ final class RecordingActionsTests: XCTestCase {
             canRecreateSummary: canRecreateSummary,
             canDelete: canDelete,
             showAudio: showAudio,
+            liveCaptionLanguageMenu: liveCaptionLanguageMenu,
             liveCaptionControl: liveCaptionControl,
             editResult: editResult,
             repeatAnalysis: repeatAnalysis,
@@ -117,9 +119,10 @@ final class RecordingActionsTests: XCTestCase {
     func testNarrowActionsKeepLiveCaptionsInTheSameRow() throws {
         var startCount = 0
         let liveCaptions = LiveCaptionControl(disabled: false, start: { startCount += 1 }, stop: {})
-        try withActions(width: 280, liveCaptionControl: liveCaptions) { hosting in
+        let languageMenu = LiveCaptionLanguageMenu(language: .mixed, select: { _ in })
+        try withActions(width: 280, liveCaptionLanguageMenu: languageMenu, liveCaptionControl: liveCaptions) { hosting in
             var ids = identifiers
-            ids.insert("recording.liveCaptions.start", at: 1)
+            ids.insert(contentsOf: ["recording.liveCaptions.language", "recording.liveCaptions.start"], at: 1)
             let actions = try ids.map { try action($0, in: hosting) }
             let frames = try actions.map { try XCTUnwrap($0.accessibilityFrame?()) }
             let windowFrame = try XCTUnwrap(hosting.window).frame
@@ -130,7 +133,8 @@ final class RecordingActionsTests: XCTestCase {
             for (left, right) in zip(frames, frames.dropFirst()) {
                 XCTAssertLessThanOrEqual(left.maxX, right.minX)
             }
-            XCTAssertTrue(actions[1].accessibilityPerformPress?() ?? false)
+            XCTAssertEqual(accessibleName(of: actions[1]), "Язык предрасшифровки")
+            XCTAssertTrue(actions[2].accessibilityPerformPress?() ?? false)
             XCTAssertEqual(startCount, 1)
         }
     }

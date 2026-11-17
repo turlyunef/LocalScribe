@@ -15,6 +15,13 @@ struct QueueJobID: Hashable, Sendable {
     static func text(_ id: String) -> QueueJobID { QueueJobID(kind: .text, id: id) }
     var isRecording: Bool { kind == .recording }
     var isText: Bool { kind == .text }
+    var diagnosticOperation: DiagnosticOperation {
+        switch kind {
+        case .recording: return .recording
+        case .diagram: return .diagram
+        case .text: return .anonymization
+        }
+    }
 }
 
 @MainActor final class AppModel: ObservableObject {
@@ -99,7 +106,10 @@ struct QueueJobID: Hashable, Sendable {
     @Published var summary: Summary? { didSet { resultRevision &+= 1; refreshPresentation() } }
     @Published var resultEdit: ResultEditDraft?
     @Published private(set) var savingResult = false
-    let errorHandler = AppErrorHandler()
+    let errorHandler: AppErrorHandler
+    private var processingDiagnostic = DiagnosticJob()
+    private var diagnosticModes: [QueueJobID: DiagnosticMode] = [:]
+    lazy var diagnosticsWindow = DiagnosticsWindow(handler: errorHandler)
     let indicators = ActivityIndicators()
     let resultPresentation = ResultPresentation()
     let playback = RecordingPlayback()
@@ -251,11 +261,13 @@ struct QueueJobID: Hashable, Sendable {
     private var pendingCaptureWarnings: [String] = []
     private var liveCaptureStart: Task<Void, Never>?
     @Published private(set) var captureCaptions: RecordingLiveCaptions?
+    @Published private(set) var liveCaptionLanguage: LiveCaptionLanguage
     @Published private var archivedCaptions: RecordingLiveCaptions?
     private var captionsLoadTask: Task<Void, Never>?
     private var captionsSwitchTask: Task<Void, Never>?
     private var captionsOverrideID: String?
     private let recognizeLiveCaptions: LiveCaptionRecognition.Recognizer
+    private let recognizeMixedLiveCaptions: LiveCaptionRecognition.Session
     private let requestMicrophoneAccess: @MainActor () async -> Bool
     private let makeRecordingCapture: @MainActor (MicrophoneDevices) -> any RecordingCapture
     @Published private var queued: [QueueJobID] = []
@@ -314,14 +326,19 @@ struct QueueJobID: Hashable, Sendable {
          requestMicrophoneAccess: @escaping @MainActor () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) },
          makeRecordingCapture: @escaping @MainActor (MicrophoneDevices) -> any RecordingCapture = { MicrophoneRecorder(devices: $0) },
          recognizeLiveCaptions: @escaping LiveCaptionRecognition.Recognizer = LiveCaptionRecognition.recognize,
+         recognizeMixedLiveCaptions: @escaping LiveCaptionRecognition.Session = LiveCaptionRecognition.recognizeMixed,
          importProbe: @escaping @Sendable (URL, URL) throws -> AudioInfo = { try Media.probe($0, tools: $1, cancellable: true) }) {
         self.userDefaults = userDefaults
         self.requestMicrophoneAccess = requestMicrophoneAccess
         self.makeRecordingCapture = makeRecordingCapture
         self.recognizeLiveCaptions = recognizeLiveCaptions
+        self.recognizeMixedLiveCaptions = recognizeMixedLiveCaptions
         self.hardware = hardware
+        errorHandler = AppErrorHandler(hardware: hardware)
         let automaticLiveCaptions = userDefaults.bool(forKey: "automaticLiveCaptions")
         self.automaticLiveCaptions = automaticLiveCaptions
+        liveCaptionLanguage = userDefaults.string(forKey: "liveCaptionLanguage")
+            .flatMap(LiveCaptionLanguage.init(rawValue:)) ?? .interfaceLanguage
         backgroundRecognition = !automaticLiveCaptions && (userDefaults.object(forKey: "backgroundRecognition") as? Bool ?? true)
         automaticSummaries = userDefaults.object(forKey: "automaticSummaries") as? Bool ?? true
         recognitionDictionary = (userDefaults.stringArray(forKey: "recognitionDictionary") ?? []).filter {
@@ -333,8 +350,15 @@ struct QueueJobID: Hashable, Sendable {
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
         catalog = providedCatalog ?? (try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json")))
+        let diagnosticRoot = providedRepository?.root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?.appendingPathComponent("LocalScribe", isDirectory: true)
+        errorHandler.startJournal(at: diagnosticRoot)
         do { let repo = try providedRepository ?? RecordingRepository(); repository = repo; archive = RecordingCoordinator(repository: repo, importProbe: importProbe) }
-        catch { repository = nil; archive = nil; errorHandler.report(message: L10n.text("Не удалось открыть локальное хранилище: %1$@", L10n.message(error.localizedDescription))) }
+        catch {
+            repository = nil; archive = nil
+            errorHandler.report(error, operation: .archive,
+                                failure: DiagnosticFailure(.storageUnavailable, phase: .sourceOpen, error: error))
+        }
         // The diagram archive is a sibling branch of the same Application Support
         // root; its failure never blocks the recording workspace.
         if let repository {
@@ -366,8 +390,10 @@ struct QueueJobID: Hashable, Sendable {
             Task { @MainActor in
                 guard let self else { return }
                 if self.memorySource?.data.intersection([.warning, .critical]).isEmpty == true {
+                    self.errorHandler.note(.memoryNormal)
                     self.resumeAfterMemoryPressure()
                 } else {
+                    self.errorHandler.note(self.memorySource?.data.contains(.critical) == true ? .memoryCritical : .memoryWarning)
                     self.pauseForCaptureResources(memoryPressure: true)
                 }
             }
@@ -537,7 +563,8 @@ struct QueueJobID: Hashable, Sendable {
         } catch {
             modelsReady = false
             modelsStatus = L10n.text("Не удалось проверить модели")
-            errorHandler.report(error)
+            errorHandler.report(error, operation: .modelVerification,
+                                failure: DiagnosticFailure(.modelValidation, phase: .modelValidation, error: error))
         }
     }
 
@@ -627,6 +654,7 @@ struct QueueJobID: Hashable, Sendable {
                 downloadingModels = false; installing = false; installTask = nil; downloadProgress = nil; downloadBatch = ""; downloader.close()
                 Task { await processQueue() }
             }
+            errorHandler.note(.downloadStarted, operation: .modelDownload)
             do {
                 for (index, profile) in profiles.enumerated() {
                     try Task.checkCancellation()
@@ -648,7 +676,7 @@ struct QueueJobID: Hashable, Sendable {
             } catch {
                 updateModelsStatus()
                 if Task.isCancelled { modelsStatus += L10n.text(" · загрузка отменена") }
-                else { errorHandler.report(error); modelsStatus += L10n.text(" · загрузка не завершена") }
+                else { errorHandler.report(error, operation: .modelDownload); modelsStatus += L10n.text(" · загрузка не завершена") }
             }
         }
     }
@@ -697,7 +725,7 @@ struct QueueJobID: Hashable, Sendable {
                 updateModelsStatus()
             } catch {
                 updateModelsStatus()
-                if !Task.isCancelled { errorHandler.report(error) }
+                if !Task.isCancelled { errorHandler.report(error, operation: .modelImport) }
                 else { modelsStatus += L10n.text(" · импорт отменён") }
             }
         }
@@ -937,6 +965,7 @@ struct QueueJobID: Hashable, Sendable {
                 do {
                     guard let url = try await loadURL() else { return }
                     try Task.checkCancellation()
+                    errorHandler.note(.importStarted, operation: .importAudio)
                     let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
                     let tools = self.tools
                     do {
@@ -954,11 +983,13 @@ struct QueueJobID: Hashable, Sendable {
                         case .cancel: break
                         }
                     }
-                } catch { errorHandler.report(error) }
+                } catch { errorHandler.report(error, operation: .importAudio,
+                                        failure: DiagnosticFailure(.operationFailed, phase: .sourceOpen, error: error)) }
             }
         } catch {
             onDiscard()
-            errorHandler.report(error)
+            errorHandler.report(error, operation: .importAudio,
+                                        failure: DiagnosticFailure(.operationFailed, phase: .sourceOpen, error: error))
         }
     }
     func completeImport(_ manifest: Manifest) async {
@@ -1032,6 +1063,7 @@ struct QueueJobID: Hashable, Sendable {
     }
 
     func prepareForSleep() async {
+        errorHandler.note(.sleep)
         guard !suspendingCaptureForSleep else { return }
         suspendingCaptureForSleep = true
         let warning = "Сон системы прервал запись."
@@ -1055,7 +1087,8 @@ struct QueueJobID: Hashable, Sendable {
             let granted = await requestMicrophoneAccess()
             guard startingRecordingID == id, !Task.isCancelled else { return }
             guard granted else {
-                errorHandler.report(message: "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS.")
+                errorHandler.report(message: "Доступ к микрофону запрещён. Разрешите LocalScribe доступ в настройках конфиденциальности macOS.",
+                                    operation: .capture, failure: DiagnosticFailure(.permissionDenied, phase: .captureStart))
                 return
             }
         }
@@ -1133,6 +1166,7 @@ struct QueueJobID: Hashable, Sendable {
             indicators.captureWarnings = []
             supervisor.recordingActive = true
             recordingID = id
+            errorHandler.note(.captureStarted)
             for warning in pendingCaptureWarnings { recordCaptureWarning(warning, id: id) }
 
             let interruption = startInterruption ?? startupStopReason
@@ -1169,7 +1203,11 @@ struct QueueJobID: Hashable, Sendable {
                 }
                 await reload()
             }
-            if !Task.isCancelled { errorHandler.report(error) }
+            if !Task.isCancelled {
+                errorHandler.report(error, operation: .capture,
+                                    job: DiagnosticJob(reference: DiagnosticJobReference(.recording, item: id)),
+                                    failure: DiagnosticFailure(.operationFailed, phase: .captureStart, error: error))
+            }
         }
     }
 
@@ -1225,15 +1263,34 @@ struct QueueJobID: Hashable, Sendable {
     }
 
     func startLiveCaptions(_ id: String) {
-        guard recordingID == id, !stopping, !resourcesPaused, let recorder, let archive else { return }
+        guard recordingID == id, !stopping, !resourcesPaused, !shuttingDown, let recorder, let archive else { return }
         if captureCaptions?.recordingID != id {
             captureCaptions = RecordingLiveCaptions(recordingID: id, archive: archive)
         }
         guard let captureCaptions, !captureCaptions.isRunning else { return }
         deferBackgroundRecognitionForCaptions(id, archive: archive)
-        let locale = Locale(identifier: L10n.locale.identifier == "en" ? "en-US" : "ru-RU")
-        recorder.setLiveCaptionAudio(captureCaptions.start(locale: locale, recognize: recognizeLiveCaptions))
+        let language = liveCaptionLanguage
+        let recognize: LiveCaptionRecognition.Session
+        if let locale = language.locale {
+            let recognizeSystem = recognizeLiveCaptions
+            recognize = { input, ready, receive in try await recognizeSystem(locale, input, ready, receive) }
+        } else {
+            recognize = recognizeMixedLiveCaptions
+        }
+        captureCaptions.start(language: language, recognize: recognize) { [weak recorder] audio in
+            recorder?.setLiveCaptionAudio(audio)
+        }
         if selection == id { tab = .live }
+    }
+
+    func setLiveCaptionLanguage(_ language: LiveCaptionLanguage, for id: String) {
+        guard recordingID == id, !stopping, !shuttingDown, language != liveCaptionLanguage else { return }
+        liveCaptionLanguage = language
+        userDefaults.set(language.rawValue, forKey: "liveCaptionLanguage")
+        if captureCaptions?.isRunning == true {
+            freezeLiveCaptions(id)
+            startLiveCaptions(id)
+        }
     }
 
     func freezeLiveCaptions(_ id: String) {
@@ -1305,7 +1362,11 @@ struct QueueJobID: Hashable, Sendable {
                 recordingID = nil
                 queued.removeAll { $0 == .recording(id) }
                 if activeJob == .recording(id) { activeJob = nil; await supervisor.cancel() }
-                errorHandler.report(message: m.lastError); await reload(); return
+                errorHandler.report(message: m.lastError, operation: .capture,
+                                    job: DiagnosticJob(reference: DiagnosticJobReference(.recording, item: id, run: m.pendingRunId)),
+                                    failure: DiagnosticFailure(.invalidInput, phase: .captureStop))
+                errorHandler.note(.captureStopped)
+                await reload(); return
             }
             if let warning { errorHandler.report(message: warning) }
             try await finalizeCapture(id, expectedFrames: frames, warnings: warnings); recordingID = nil; await enqueue(id)
@@ -1315,7 +1376,10 @@ struct QueueJobID: Hashable, Sendable {
             await liveCaptureStart?.value
             for task in Array(warningTasks.values) { await task.value }
             let warnings = indicators.captureWarnings
-            recordingID = nil; recorder = nil; errorHandler.report(error)
+            recordingID = nil; recorder = nil
+            errorHandler.report(error, operation: .capture,
+                                job: DiagnosticJob(reference: DiagnosticJobReference(.recording, item: id, run: recordingsByID[id]?.pendingRunId)),
+                                failure: DiagnosticFailure(.operationFailed, phase: .captureStop, error: error))
             queued.removeAll { $0 == .recording(id) }
             if activeJob == .recording(id) { activeJob = nil; await supervisor.cancel() }
             let recoverable = await archive.perform { repository in
@@ -1333,6 +1397,7 @@ struct QueueJobID: Hashable, Sendable {
                 errorHandler.report(message: L10n.text("Не удалось сохранить статус остановленной записи: %1$@", L10n.message(error.localizedDescription)))
             }
         }
+        errorHandler.note(.captureStopped)
         await reload()
     }
     func finalizeCapture(_ id: String, expectedFrames: Int64? = nil, warnings: [String] = []) async throws {
@@ -1403,7 +1468,7 @@ struct QueueJobID: Hashable, Sendable {
                     }
                 }
                 guard generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0], !deletingJobIDs.contains(.recording(id)), !shuttingDown else { return }
-                await enqueue(id, allowCancelled: true)
+                await enqueue(id, allowCancelled: true, mode: .resume)
             } catch { errorHandler.report(error) }
         }
     }
@@ -1415,7 +1480,7 @@ struct QueueJobID: Hashable, Sendable {
         // Summary-only recreation reuses the saved transcript; the dictionary
         // hint belongs to ASR runs only.
         let terms = summaryOnly ? nil : recognitionTerms(for: catalog)
-        do { m = try await archive.beginRun(m.id, catalog: catalog, summaryLanguage: summaryLanguage, summaryOnly: summaryOnly, recognitionTerms: terms); await reload(); await enqueue(m.id) }
+        do { m = try await archive.beginRun(m.id, catalog: catalog, summaryLanguage: summaryLanguage, summaryOnly: summaryOnly, recognitionTerms: terms); await reload(); await enqueue(m.id, mode: .retry) }
         catch { errorHandler.report(error) }
     }
     func queuePosition(for id: String) -> Int? {
@@ -1461,7 +1526,7 @@ struct QueueJobID: Hashable, Sendable {
         }
         await reload()
     }
-    func enqueue(_ id: String, allowCancelled: Bool = false) async {
+    func enqueue(_ id: String, allowCancelled: Bool = false, mode: DiagnosticMode? = nil) async {
         guard let archive, !deletingJobIDs.contains(.recording(id)), enqueuing[.recording(id)] == nil else { return }
         let request = UUID(), generation = queueGeneration
         let pauseReason = queuePauses.values.first
@@ -1495,7 +1560,10 @@ struct QueueJobID: Hashable, Sendable {
         }
         let canQueue = m.pendingRunId != nil || modelsReady
         // Reserve FIFO position before suspending for persistence.
-        if canQueue, !queued.contains(.recording(id)) { queued.append(.recording(id)) }
+        if canQueue, !queued.contains(.recording(id)) {
+            queued.append(.recording(id))
+            if let mode { setDiagnosticMode(mode, for: .recording(id)) }
+        }
         do {
             try await archive.update(id) { m in
                 m.state = canQueue ? .queued : .waitingForModels; m.lastError = nil
@@ -1528,6 +1596,8 @@ struct QueueJobID: Hashable, Sendable {
                 try? await Task.sleep(for: .seconds(2)); continue
             }
             let job = queued.removeFirst(); activeJob = job; processingJob = job
+            processingDiagnostic = DiagnosticJob(reference: DiagnosticJobReference(job.diagnosticOperation, item: job.id),
+                                                 mode: diagnosticModes.removeValue(forKey: job) ?? .new, phase: .admission)
             do {
                 switch job.kind {
                 case .recording: try await processRecordingJob(job.id)
@@ -1541,11 +1611,20 @@ struct QueueJobID: Hashable, Sendable {
                     ?? (job.isText ? "Обезличивание прервано. Прежний результат сохранён."
                                    : "Обработка прервана. Готовые результаты и контрольные точки сохранены.")
                 if activeJob == job, !(error is CancellationError) {
-                    if let failure {
-                        errorHandler.report(message: failure.userMessage, context: failure.context)
-                    } else {
-                        errorHandler.report(message: message)
+                    if processingDiagnostic.live == true, recordingID == job.id, elapsed.isFinite {
+                        processingDiagnostic.durationMs = Int(elapsed * 1_000)
                     }
+                    let code: DiagnosticFailure.Code
+                    switch processingDiagnostic.phase {
+                    case .resultValidation: code = .invalidResult
+                    case .resultWrite: code = .resultWrite
+                    case .inputValidation: code = .invalidInput
+                    case .modelValidation: code = .modelValidation
+                    default: code = .operationFailed
+                    }
+                    errorHandler.report(error, operation: job.diagnosticOperation, job: processingDiagnostic,
+                                        failure: DiagnosticFailure(code, phase: processingDiagnostic.phase, error: error),
+                                        message: message)
                 }
                 // A cancellation that still owns the active job (a supervisor
                 // kill without a UI cancel) never records a failure: the
@@ -1597,18 +1676,28 @@ struct QueueJobID: Hashable, Sendable {
         let job = QueueJobID.recording(id)
         guard let repository, let archive, let catalog else { throw CancellationError() }
         var m = try await archive.load(id)
+        processingDiagnostic.reference?.runID = m.pendingRunId.flatMap(UUID.init(uuidString:))
+        processingDiagnostic.inputFormat = DiagnosticField.audioFormat((m.originalRelativePath as NSString).pathExtension.lowercased())
+        processingDiagnostic.durationMs = m.durationMs
+        processingDiagnostic.sampleRate = m.sampleRate.isFinite ? m.sampleRate : nil
+        processingDiagnostic.channels = m.channels
         if m.pendingRunId == nil {
             guard modelsReady, let selectedCatalog = activeCatalog else {
                 try await archive.update(id) { $0.state = .waitingForModels }; return
             }
             m = try await archive.beginRun(m.id, catalog: selectedCatalog, recognitionTerms: recognitionTerms(for: selectedCatalog))
         }
+        processingDiagnostic.reference?.runID = m.pendingRunId.flatMap(UUID.init(uuidString:))
+        processingDiagnostic.phase = .inputValidation
         var info = try await archive.perform { try $0.resumeRun(id, catalog: catalog) }
+        processingDiagnostic.pipeline = info.pipelineVersion
+        errorHandler.note(.jobStarted, job: processingDiagnostic)
         guard activeJob == job else { throw CancellationError() }
                 m = try await archive.load(id)
                 let livePending = info.liveCapture == true && info.sourceHash == "capture:" + info.id
                 let run = repository.run(id,info.id)
                 if livePending {
+                    configureRecordingStage(.transcribing, info: info, catalog: catalog, live: true)
                     try requireHardware(for: .asr, info: info, catalog: catalog)
                     m = try await archive.update(id) { m in
                         // A saved capture can start its live ASR after waiting in
@@ -1638,9 +1727,12 @@ struct QueueJobID: Hashable, Sendable {
                     // Read the preference at the stage boundary, including after live ASR.
                     if stage == .summarizing, !automaticSummaries, info.summaryLanguage == nil, info.transcriptSourceRunID == nil { continue }
                     m = try await archive.load(id)
+                    configureRecordingStage(stage, info: info, catalog: catalog)
+                    processingDiagnostic.phase = .resultValidation
                     if try await archive.perform({ [m, info] _ in try Self.stageComplete(stage, run: run, manifest: m, info: info) }) { continue }
                     guard m.sourceComplete else { throw ScribeError.message("Исходник ещё записывается") }
                     let role: ModelRole? = stage == .transcribing ? .asr : stage == .diarizing ? .diarization : stage == .summarizing ? .summary : nil
+                    processingDiagnostic.phase = .modelValidation
                     if let role { try requireHardware(for: role, info: info, catalog: catalog) }
                     guard activeJob == job else { throw CancellationError() }
                     guard let state = JobState(rawValue: stage.rawValue) else {
@@ -1655,10 +1747,12 @@ struct QueueJobID: Hashable, Sendable {
                     let command = WorkerCommand(jobId: id, runId: info.id, stage: stage, recordingPath: repository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
                     try await runWorker(command)
                     guard activeJob == job else { throw CancellationError() }
+                    processingDiagnostic.phase = .resultValidation
                     guard try await archive.perform({ [m, info] _ in try Self.stageComplete(stage, run: run, manifest: m, info: info) }) else { throw ScribeError.message("Worker не создал проверяемый результат этапа") }
                     await reload()
                 }
                 guard activeJob == job else { throw CancellationError() }
+                processingDiagnostic.phase = .resultValidation
                 let completedRunID = info.id
                 // A transcript-only result is valid, but any existing final JSON
                 // must still pass validation before replacing the previous result.
@@ -1667,6 +1761,7 @@ struct QueueJobID: Hashable, Sendable {
                     _ = try repository.results(completed)
                 }
                 guard activeJob == job else { throw CancellationError() }
+                processingDiagnostic.phase = .resultWrite
                 try await archive.update(id) { m in
                     m.activeRunId = completedRunID; m.pendingRunId = nil; m.captureProcessing = nil
                     m.state = m.warnings.isEmpty ? .completed : .completedWithWarnings; m.lastError = nil
@@ -1686,7 +1781,19 @@ struct QueueJobID: Hashable, Sendable {
             try await diagramArchive.update(id) { $0.state = .waitingForModels }
             return
         }
+        processingDiagnostic.reference?.runID = m.pendingRunId.flatMap(UUID.init(uuidString:))
+        processingDiagnostic.width = m.pixelWidth
+        processingDiagnostic.height = m.pixelHeight
+        if m.byteSize >= 0 { processingDiagnostic.bytes = UInt(m.byteSize) }
+        processingDiagnostic.phase = .inputValidation
         let info = try await diagramArchive.resumeRun(id)
+        processingDiagnostic.pipeline = info.pipelineVersion
+        processingDiagnostic.prompt = info.promptVersion
+        processingDiagnostic.preprocessing = info.preprocessingVersion
+        if let profile = catalog?.models.first(where: { $0.id == info.modelID }) {
+            processingDiagnostic.models = [DiagnosticJob.Model(profile, backend: .mlx)]
+        }
+        errorHandler.note(.jobStarted, job: processingDiagnostic)
         guard activeJob == job else { throw CancellationError() }
         m = try await diagramArchive.update(id) {
             $0.state = .recognizing; $0.lastError = nil
@@ -1696,18 +1803,76 @@ struct QueueJobID: Hashable, Sendable {
         let command = WorkerCommand(diagramJobId: id, runId: info.id, diagramPath: diagramRepository.folder(id).path, modelsPath: repository.models.path, toolsPath: tools.path)
         // The manifest still describes the previous validated result during a retry.
         var warnings: [String] = []
-        try await supervisor.run(command, executable: worker) { event in
+        try await superviseJob(command) { event in
             if event.type == "progress" { self.showQueueStatus(event.message) }
             if event.type == "warning", !warnings.contains(event.message) { warnings.append(event.message) }
         }
         guard activeJob == job else { throw CancellationError() }
         m = try await diagramArchive.load(id)
         guard activeJob == job, m.state != .cancelled else { throw CancellationError() }
+        processingDiagnostic.phase = .resultValidation
         _ = try await diagramArchive.completeRun(id, runId: info.id, warnings: warnings)
         await reloadDiagrams()
     }
+    private func setDiagnosticMode(_ mode: DiagnosticMode, for job: QueueJobID) {
+        if diagnosticModes.count >= 256, let key = diagnosticModes.keys.first {
+            diagnosticModes.removeValue(forKey: key)
+        }
+        diagnosticModes[job] = mode
+    }
+
+    private func configureRecordingStage(_ stage: Stage, info: RunInfo, catalog: ModelCatalog, live: Bool = false) {
+        processingDiagnostic.stage = stage
+        processingDiagnostic.live = live
+        processingDiagnostic.phase = .modelValidation
+        let roles: [ModelRole]
+        switch stage {
+        case .preparingAudio: roles = []
+        case .transcribing: roles = [.asr, .tokenizer]
+        case .diarizing: roles = [.diarization]
+        case .summarizing: roles = [.summary]
+        }
+        processingDiagnostic.models = roles.compactMap { role in
+            guard let id = try? info.modelID(for: role),
+                  let profile = catalog.models.first(where: { $0.id == id }) else { return nil }
+            let backend: DiagnosticJob.Model.Backend
+            if role == .diarization { backend = .speakerKit }
+            else if role == .summary { backend = .mlx }
+            else if profile.resolvedASRBackend == "vibevoice-asr" { backend = .vibevoice }
+            else { backend = .init(rawValue: profile.resolvedASRBackend) ?? .unknown }
+            return DiagnosticJob.Model(profile, backend: backend)
+        }
+        if stage == .transcribing, let aligner = info.auxiliaryModelIDs?.values.first,
+           let profile = catalog.models.first(where: { $0.id == aligner }) {
+            processingDiagnostic.models.append(DiagnosticJob.Model(profile, backend: .qwen3))
+        }
+    }
+
+    private func superviseJob(_ command: WorkerCommand, onEvent: @escaping @MainActor (WorkerEvent) async -> Void) async throws {
+        processingDiagnostic.phase = .launch
+        errorHandler.note(.stageStarted, job: processingDiagnostic)
+        do {
+            try await supervisor.run(command, executable: worker) { event in
+                if event.type == "started" {
+                    self.processingDiagnostic.phase = .inputValidation
+                    self.errorHandler.note(.workerStarted, job: self.processingDiagnostic)
+                } else if let phase = event.diagnosticPhase {
+                    self.processingDiagnostic.phase = phase
+                    self.errorHandler.note(.workerPhase, job: self.processingDiagnostic)
+                } else if event.type == "progress", self.processingDiagnostic.phase == .inputValidation {
+                    self.processingDiagnostic.phase = .processing
+                }
+                await onEvent(event)
+            }
+            errorHandler.note(.workerFinished, job: processingDiagnostic)
+        } catch {
+            errorHandler.note(.workerFinished, job: processingDiagnostic, worker: (error as? WorkerFailureError)?.exit)
+            throw error
+        }
+    }
+
     private func runWorker(_ command: WorkerCommand) async throws {
-        try await supervisor.run(command, executable: worker) { event in
+        try await superviseJob(command) { event in
             if event.type == "progress" { self.showQueueStatus(event.message) }
             if event.type == "checkpoint" {
                 self.resultSignature = ""; self.loadResult()
@@ -1724,7 +1889,7 @@ struct QueueJobID: Hashable, Sendable {
         return Task { await resourcePauseTask?.value; await processQueue() }
     }
     func pauseForCaptureResources(memoryPressure: Bool = false) {
-        if memoryPressure { memoryLimited = true } else { captureLimited = true }
+        if memoryPressure { memoryLimited = true } else { captureLimited = true; errorHandler.note(.capturePressure) }
         resourcesPaused = true
         if let recordingID { freezeLiveCaptions(recordingID) }
         updateResourcePausePresentation()
@@ -1733,7 +1898,10 @@ struct QueueJobID: Hashable, Sendable {
         resourcePauseTask = Task {
             if let job = activeJob {
                 activeJob = nil
-                if !queued.contains(job) { queued.insert(job, at: 0) }
+                if !queued.contains(job) {
+                    queued.insert(job, at: 0)
+                    setDiagnosticMode(.resume, for: job)
+                }
                 if job.isRecording, let archive {
                     _ = try? await archive.update(job.id) { m in
                         if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .queued }
@@ -2100,7 +2268,11 @@ struct QueueJobID: Hashable, Sendable {
         }
         let admission = jobAdmission[job, default: 0]
         do {
+            let previous = try await diagramArchive.load(id)
             _ = try await diagramArchive.beginRun(id, profile: profile)
+            if previous.pendingRunId != nil || previous.activeRunId != nil || previous.state == .failed {
+                setDiagnosticMode(.retry, for: job)
+            }
             await reloadDiagrams()
             guard admission == jobAdmission[job, default: 0] else { return }
             await enqueueDiagram(id, allowCancelled: true)
@@ -2430,6 +2602,13 @@ struct QueueJobID: Hashable, Sendable {
         guard let repository, let textArchive, let catalog else { throw ScribeError.message("Хранилище текстов недоступно") }
         let card = try await textArchive.loadCard(id)
         let attemptID = card.latestAttempt.id
+        processingDiagnostic.reference?.runID = UUID(uuidString: attemptID)
+        if processingDiagnostic.mode != .resume,
+           card.latestAttempt.isRetry == true || card.latestAttempt.requestedSource != nil || card.latestAttempt.expectedResultRevisionID != nil {
+            processingDiagnostic.mode = .retry
+        }
+        processingDiagnostic.pipeline = AnonymizationAttempt.pipelineVersion
+        processingDiagnostic.inputFormat = card.sourceFormat.rawValue
         guard card.latestAttempt.state == .queued else { return }
         // Top-of-queue readiness re-check: a lost assignment returns the
         // attempt to «Ожидает модель» and frees the slot for the next job.
@@ -2459,6 +2638,10 @@ struct QueueJobID: Hashable, Sendable {
         } ?? card.source
         let limit = inputLimits.limitBytes(profile: profile, hardware: hardware)
         let actualBytes = UInt(Data(source.text.utf8).count)
+        processingDiagnostic.bytes = actualBytes
+        processingDiagnostic.limitBytes = limit
+        processingDiagnostic.models = [DiagnosticJob.Model(profile, backend: .mlx)]
+        errorHandler.note(.jobStarted, job: processingDiagnostic)
         if actualBytes > limit {
             await packageRegistry.release(lease)
             _ = try? await textArchive.updateCard(id) { card in
@@ -2466,6 +2649,8 @@ struct QueueJobID: Hashable, Sendable {
                 card.latestAttempt.state = .failed
                 card.latestAttempt.failure = .sizeLimit(actualBytes: actualBytes, limitBytes: limit)
             }
+            errorHandler.report(message: "Размер текста превышает предел модели.", operation: .anonymization,
+                                job: processingDiagnostic, failure: DiagnosticFailure(.sizeLimit, phase: .admission), show: false)
             await reloadTexts()
             return
         }
@@ -2490,6 +2675,11 @@ struct QueueJobID: Hashable, Sendable {
                 guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
                 card.latestAttempt.state = .failed
                 card.latestAttempt.failure = .processing("Не удалось подготовить задание обезличивания")
+            }
+            if activeJob == job {
+                errorHandler.report(error, operation: .anonymization, job: processingDiagnostic,
+                                    failure: DiagnosticFailure(.resultWrite, phase: .resultWrite, error: error),
+                                    message: "Не удалось подготовить задание обезличивания", show: false)
             }
             await reloadTexts()
             return
@@ -2522,7 +2712,7 @@ struct QueueJobID: Hashable, Sendable {
                                     modelsPath: repository.models.path, toolsPath: tools.path)
         var workerError: Error?
         do {
-            try await supervisor.run(command, executable: worker) { event in
+            try await superviseJob(command) { event in
                 // Events are already filtered by kind + jobId + runId by the
                 // supervisor; foreign or late attempts cannot reach here.
                 if event.type == "progress" { self.showQueueStatus(event.message) }
@@ -2533,6 +2723,7 @@ struct QueueJobID: Hashable, Sendable {
         await packageRegistry.release(lease)
         if let workerError { throw workerError }
         guard activeJob == job else { throw CancellationError() }
+        processingDiagnostic.phase = .resultValidation
         try await publishAnonymizationResult(cardID: id, attemptID: attemptID,
                                               attemptURL: attemptURL, runInput: runInput)
         await reloadTexts()
@@ -2559,6 +2750,11 @@ struct QueueJobID: Hashable, Sendable {
                 card.latestAttempt.state = .failed
                 card.latestAttempt.failure = .processing("Правая версия результата изменилась. Повторите обезличивание заново.")
             }
+            if activeJob == .text(cardID) {
+                errorHandler.report(message: "Правая версия результата изменилась. Повторите обезличивание заново.",
+                                    operation: .anonymization, job: processingDiagnostic,
+                                    failure: DiagnosticFailure(.invalidResult, phase: .resultValidation), show: false)
+            }
             return
         }
         let artifact: AnonymizationRunArtifact
@@ -2572,8 +2768,11 @@ struct QueueJobID: Hashable, Sendable {
             guard artifact.result.input == runInput else {
                 throw ScribeError.message("Результат обезличивания не соответствует входу попытки")
             }
-        } catch let error as ScribeError { throw error }
-        catch { throw ScribeError.message("Не удалось прочитать результат обезличивания") }
+        } catch {
+            throw ClassifiedDiagnosticError(error, code: .invalidResult, phase: .resultValidation,
+                                             fallback: "Не удалось прочитать результат обезличивания")
+        }
+        processingDiagnostic.phase = .resultWrite
         _ = try await textArchive.updateCard(cardID) { card in
             guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .running else { return }
             card.latestAttempt.state = .succeeded
@@ -2750,7 +2949,7 @@ struct QueueJobID: Hashable, Sendable {
                     state: .waitingModel,
                     // The snapshot survives only in a retry that never waits.
                     requestedSource: readiness.isReady ? snapshot : nil,
-                    expectedResultRevisionID: expected)
+                    expectedResultRevisionID: expected, isRetry: true)
             }
             await reloadTexts()
             await enqueueText(cardID)
@@ -2832,7 +3031,10 @@ struct QueueJobID: Hashable, Sendable {
                 try text.write(to: url, atomically: true, encoding: .utf8)
             }.value
         } catch is CancellationError { }
-        catch { errorHandler.report(message: L10n.text("Не удалось экспортировать: %1$@", L10n.message(error.localizedDescription))) }
+        catch {
+            errorHandler.report(error, operation: .export, failure: DiagnosticFailure(.resultWrite, phase: .resultWrite, error: error),
+                                message: L10n.text("Не удалось экспортировать: %1$@", L10n.message(error.localizedDescription)))
+        }
     }
     func shutdown() async {
         shuttingDown = true
@@ -2855,6 +3057,8 @@ struct QueueJobID: Hashable, Sendable {
         await importQueue.waitUntilIdle()
         for task in Array(warningTasks.values) { await task.value }
         await archive?.flushIndex()
+        errorHandler.note(.appStopped)
+        _ = await errorHandler.journal.snapshot()
     }
     /// Explicit developer mode: short real input test, no models/archive, audio deleted.
     private func microphoneSelfCheck() async {

@@ -9,13 +9,15 @@ actor Pipeline {
     let recording: URL; let run: URL; let models: URL; let tools: URL
     let manifest: Manifest; let info: RunInfo
     let stage: Stage
+    let diagnosticPhase: WorkerDiagnostics.PhaseReporter?
     let engineFactory: ASREngineFactory
     let hardware: ModelHardware
     var wave: URL { run.appendingPathComponent("work/audio.wav") }
     private func modelFolder(_ role: ModelRole) throws -> URL { models.appendingPathComponent(try info.modelID(for: role)) }
-    init(command: WorkerCommand, hardware: ModelHardware = .current, engineFactory: ASREngineFactory = .init(), emit: @escaping @Sendable (String, String, String?) -> Void) throws {
+    init(command: WorkerCommand, hardware: ModelHardware = .current, engineFactory: ASREngineFactory = .init(), diagnosticPhase: WorkerDiagnostics.PhaseReporter? = nil, emit: @escaping @Sendable (String, String, String?) -> Void) throws {
         guard UUID(uuidString: command.jobId) != nil, UUID(uuidString: command.runId) != nil,
               let stage = command.stage, let recordingPath = command.recordingPath, let toolsPath = command.toolsPath else { throw ScribeError.message("Некорректный идентификатор задания") }
+        self.diagnosticPhase = diagnosticPhase
         self.engineFactory = engineFactory; self.command = command; self.emit = emit; self.hardware = hardware; self.stage = stage
         recording = URL(fileURLWithPath: recordingPath); run = recording.appendingPathComponent("runs/\(command.runId)")
         models = URL(fileURLWithPath: command.modelsPath); tools = URL(fileURLWithPath: toolsPath)
@@ -76,7 +78,7 @@ actor Pipeline {
             guard pinned.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {
                 throw ScribeError.message("Выбранная модель поддерживает только обработку готовой записи")
             }
-            return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit, metrics: asrMetrics, engineFactory: engineFactory).perform()
+            return try await LiveTranscriber(recording: recording, run: run, info: info, models: models, tools: tools, emit: emit, metrics: asrMetrics, engineFactory: engineFactory, diagnosticPhase: diagnosticPhase).perform()
         }
         switch stage {
         case .preparingAudio:
@@ -93,7 +95,7 @@ actor Pipeline {
             if transcript.segments.isEmpty {
                 try Disk.write(Summary(language: info.summaryLanguage ?? "ru"), to: run.appendingPathComponent("summary.json")); return "summary.json"
             }
-            try await SummaryEngine(modelFolder: summaryFolder, run: run, emit: emit).summarize(transcript, language: info.summaryLanguage ?? transcript.primaryLanguage)
+            try await SummaryEngine(modelFolder: summaryFolder, run: run, diagnosticPhase: diagnosticPhase, emit: emit).summarize(transcript, language: info.summaryLanguage ?? transcript.primaryLanguage)
             return "summary.json"
         }
     }
@@ -107,7 +109,9 @@ actor Pipeline {
     }
     private func transcribe(catalog: ModelCatalog, metrics: ASRMetricsRecorder?) async throws -> String {
         let availableEndMs = try preparedAudioEndMs()
-        let recognizer = try await engineFactory.make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
+        let recognizer = try await WorkerDiagnostics.loadModel(report: diagnosticPhase) {
+            try await engineFactory.make(info: info, catalog: catalog, models: models, metrics: metrics, warning: { [emit] in emit("warning", $0, nil) })
+        }
         let partMs = ASRCheckpointLayout.offlinePartMs
         let count = (manifest.durationMs - 1) / partMs + 1
         var parts: [ASRPart] = []
@@ -156,9 +160,7 @@ actor Pipeline {
         return min(manifest.durationMs, Int((frames + 15) / 16))
     }
     func diarize(
-        infer: @Sendable (URL, URL, Int) async throws -> [VoiceInterval] = { folder, wave, duration in
-            try await Pipeline.inferSpeakers(modelFolder: folder, wave: wave, durationMs: duration)
-        }
+        infer: (@Sendable (URL, URL, Int) async throws -> [VoiceInterval])? = nil
     ) async throws -> String {
         let transcript = try Disk.read(Transcript.self, at: run.appendingPathComponent("asr-transcript.json"))
         guard transcript.fingerprint == info.fingerprint, !transcript.diarized else {
@@ -171,9 +173,17 @@ actor Pipeline {
         }
         let intervals: [VoiceInterval]
         do {
-            intervals = try await infer(modelFolder(.diarization), wave, manifest.durationMs)
+            let folder = try modelFolder(.diarization)
+            if let infer {
+                intervals = try await infer(folder, wave, manifest.durationMs)
+            } else {
+                intervals = try await Self.inferSpeakers(modelFolder: folder, wave: wave, durationMs: manifest.durationMs,
+                                                        diagnosticPhase: diagnosticPhase)
+            }
         } catch is CancellationError {
             throw CancellationError()
+        } catch let error as ClassifiedDiagnosticError {
+            throw error
         } catch {
             throw ScribeError.message("Диаризация завершилась ошибкой. Расшифровка сохранена; можно повторить диаризацию.")
         }
@@ -186,9 +196,10 @@ actor Pipeline {
         return "transcript.json"
     }
 
-    nonisolated private static func inferSpeakers(modelFolder: URL, wave: URL, durationMs: Int) async throws -> [VoiceInterval] {
+    nonisolated private static func inferSpeakers(modelFolder: URL, wave: URL, durationMs: Int,
+                                                    diagnosticPhase: WorkerDiagnostics.PhaseReporter?) async throws -> [VoiceInterval] {
         let config = PyannoteConfig(modelFolder: modelFolder.path, download: false, load: true, verbose: false, logLevel: .none, concurrentSegmenterWorkers: 1, concurrentEmbedderWorkers: 1)
-        let kit = try await SpeakerKit(config)
+        let kit = try await WorkerDiagnostics.loadModel(report: diagnosticPhase) { try await SpeakerKit(config) }
         let pcm = try Media.PCMFrameReader(wave)
         let result = try await kit.diarize(frameCount: pcm.frameCount) { try pcm.read($0) }
         return result.segments.compactMap { s -> VoiceInterval? in

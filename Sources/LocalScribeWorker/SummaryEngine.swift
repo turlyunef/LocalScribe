@@ -17,10 +17,15 @@ private struct QuestionCheckpoint: Codable { var fingerprint: String; var result
 actor SummaryEngine {
     let modelFolder: URL; let run: URL
     let emit: @Sendable (String, String, String?) -> Void
+    private let diagnosticPhase: WorkerDiagnostics.PhaseReporter?
     private var reportedOptionalGrounding = false
     private var metrics: SummaryMetrics?
     private var metricsStarted = 0.0
-    init(modelFolder: URL, run: URL, emit: @escaping @Sendable (String, String, String?) -> Void) { self.modelFolder = modelFolder; self.run = run; self.emit = emit }
+    init(modelFolder: URL, run: URL, diagnosticPhase: WorkerDiagnostics.PhaseReporter? = nil,
+         emit: @escaping @Sendable (String, String, String?) -> Void) {
+        self.modelFolder = modelFolder; self.run = run; self.emit = emit
+        self.diagnosticPhase = diagnosticPhase
+    }
 
     func summarize(_ transcript: Transcript, language: String) async throws {
         metricsStarted = ProcessInfo.processInfo.systemUptime
@@ -48,7 +53,9 @@ actor SummaryEngine {
                 metrics?.modelLoadSeconds = ProcessInfo.processInfo.systemUptime - loadStarted
                 saveMetrics()
             }
-            container = try await LLMModelFactory.shared.loadContainer(configuration: .init(directory: modelFolder))
+            container = try await WorkerDiagnostics.loadModel(report: diagnosticPhase) {
+                try await LLMModelFactory.shared.loadContainer(configuration: .init(directory: modelFolder))
+            }
         }
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let sourceHash = Disk.fingerprint(String(decoding: try encoder.encode(transcript), as: UTF8.self) + language + "prompt-v17-amendment-fallback")

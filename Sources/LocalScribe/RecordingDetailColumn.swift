@@ -42,9 +42,10 @@ struct RecordingDetailColumn: View {
             if let selected = model.selected {
                 resultHeader(selected)
                 Divider()
-                RecordingPlayerView(playback: model.playback, sourceAvailable: model.playbackSource != nil,
-                                    saving: model.isSavingAudio(for: selected.id))
-                Divider()
+                if model.playbackSource != nil || !model.isSavingAudio(for: selected.id) {
+                    RecordingPlayerView(playback: model.playback, sourceAvailable: model.playbackSource != nil)
+                    Divider()
+                }
                 if let message = model.resourcePauseMessage {
                     Label(L10n.message(message), systemImage: "pause.circle")
                         .foregroundStyle(.secondary)
@@ -54,7 +55,10 @@ struct RecordingDetailColumn: View {
                 }
                 if let message = selected.lastError {
                     Button(L10n.text("Показать сообщение об обработке"), systemImage: "exclamationmark.bubble") {
-                        model.errorHandler.report(message: message)
+                        Task {
+                            await model.errorHandler.presentStored(
+                                DiagnosticJobReference(.recording, item: selected.id, run: selected.pendingRunId), message: message)
+                        }
                     }
                     .help(L10n.text("Открыть подробности последней ошибки или прерывания в отдельном окне"))
                     .frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 20).padding(.vertical, 6)
@@ -134,7 +138,7 @@ struct RecordingDetailColumn: View {
             }
             .sheet(item: $model.resultEdit) { draft in
                 ResultEditorView(initial: draft, initialPart: model.tab.exportPart ?? .transcript, save: model.saveResultEdits,
-                                 cancel: { model.resultEdit = nil }, reportError: model.errorHandler.report)
+                                 cancel: { model.resultEdit = nil }, reportError: { model.errorHandler.report($0, operation: .archive) })
             }
     }
 
@@ -193,13 +197,17 @@ struct RecordingDetailColumn: View {
     }
 
     private func recordingActions(_ selected: Manifest) -> some View {
-        RecordingActionsView(
+        let canControlCaptions = model.recordingID == selected.id && !model.finalizingRecording
+        return RecordingActionsView(
             canEdit: model.canEditResult,
             canRepeatAnalysis: !model.busy && model.recordingID == nil && selected.sourceComplete && model.modelsReady && !model.installing,
             canRecreateSummary: model.transcript?.diarized == true && !model.busy && model.recordingID == nil && model.modelsReady && !model.installing,
             canDelete: model.deletingGroupID == nil && !model.finalizingRecording && model.recordingID != selected.id,
             showAudio: model.showAudio,
-            liveCaptionControl: model.recordingID == selected.id && !model.finalizingRecording
+            liveCaptionLanguageMenu: canControlCaptions
+                ? LiveCaptionLanguageMenu(language: model.liveCaptionLanguage, select: { model.setLiveCaptionLanguage($0, for: selected.id) })
+                : nil,
+            liveCaptionControl: canControlCaptions
                 ? LiveCaptionControl(captions: model.selectedCaptions, disabled: model.resourcePauseMessage != nil,
                                      start: { model.startLiveCaptions(selected.id) }, stop: { model.freezeLiveCaptions(selected.id) })
                 : nil,

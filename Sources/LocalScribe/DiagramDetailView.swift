@@ -87,6 +87,13 @@ struct DiagramDetailColumn: View {
             if let message = diagram.lastError {
                 Label(L10n.message(message), systemImage: "exclamationmark.bubble").font(.caption).foregroundStyle(.secondary)
                     .accessibilityIdentifier("diagrams.lastError.\(diagram.id)")
+                Button(L10n.text("Показать сообщение об обработке")) {
+                    Task {
+                        await model.errorHandler.presentStored(
+                            DiagnosticJobReference(.diagram, item: diagram.id, run: diagram.pendingRunId), message: message)
+                    }
+                }
+                .controlSize(.small)
             }
             HStack(alignment: .top, spacing: 16) {
                 previewSection(diagram)

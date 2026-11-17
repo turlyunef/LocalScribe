@@ -4,7 +4,6 @@ import LocalScribeCore
 struct RecordingPlayerView: View {
     @ObservedObject var playback: RecordingPlayback
     let sourceAvailable: Bool
-    let saving: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -18,7 +17,7 @@ struct RecordingPlayerView: View {
                     EmptyView()
                 }
             } else {
-                Label(L10n.text(saving ? "Аудио ещё сохраняется." : "Аудио недоступно."), systemImage: "waveform")
+                Label(L10n.text("Аудио недоступно."), systemImage: "waveform")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .accessibilityIdentifier("playback.unavailable")

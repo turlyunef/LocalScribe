@@ -39,12 +39,21 @@ import LocalScribeCore
                 guard let service = connection.remoteObjectProxyWithErrorHandler({ error in Task { @MainActor in
                     if self.requestID == requestID { self.finish(error:error) }
                 } }) as? ModelDownloadServiceProtocol else { finish(error:ScribeError.message("Недоступен встроенный загрузчик моделей")); return }
-                let reply: (FileHandle?,String?) -> Void = { file,error in Task { @MainActor in
+                let reply: (FileHandle?, String?, Data?) -> Void = { file, message, diagnostic in Task { @MainActor in
                     guard self.requestID == requestID else { try? file?.close(); return }
-                    self.finish(file,error:error.map { ScribeError.message($0) })
+                    let error: Error? = message.map { message in
+                        if let diagnostic, let failure = try? JSONDecoder().decode(DiagnosticFailure.self, from: diagnostic) {
+                            return ClassifiedDiagnosticError(message: message, diagnostic: failure)
+                        }
+                        return ScribeError.message(message)
+                    }
+                    self.finish(file, error: error)
                 } }
-                if let profileID { service.download(profileID,fileIndex:index,requestID:requestID,withReply:reply) }
-                else { service.check(withReply:reply) }
+                if let profileID {
+                    service.download(profileID, fileIndex: index, requestID: requestID, withReply: reply)
+                } else {
+                    service.check { file, message in reply(file, message, nil) }
+                }
             }
         } onCancel: {
             Task { @MainActor in if self.requestID == requestID { self.cancel() } }

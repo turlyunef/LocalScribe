@@ -111,6 +111,7 @@ struct LocalScribeApp: App {
                 }
             }
             CommandGroup(after: .help) {
+                Button(L10n.text("Диагностика…")) { model.diagnosticsWindow.show() }
                 Button(L10n.text("Горячие клавиши")) { delegate.keyboardShortcuts.show() }
             }
         }

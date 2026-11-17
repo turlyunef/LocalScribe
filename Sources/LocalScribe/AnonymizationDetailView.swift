@@ -145,6 +145,15 @@ struct AnonymizationDetailColumn: View {
                     Label(failure, systemImage: "exclamationmark.triangle.fill")
                         .font(.caption).foregroundStyle(.orange)
                         .accessibilityIdentifier("texts.detail.failure")
+                    if let attempt = editor.document?.latestAttempt {
+                        Button(L10n.text("Показать сообщение об обработке")) {
+                            Task {
+                                await model.errorHandler.presentStored(
+                                    DiagnosticJobReference(.anonymization, item: card.id, run: attempt.id), message: failure)
+                            }
+                        }
+                        .controlSize(.small)
+                    }
                     if editor.failureIsSizeLimit {
                         // AC-42: the sizes are shown with the failure, the model
                         // settings and the left editor (still editable) resolve it.

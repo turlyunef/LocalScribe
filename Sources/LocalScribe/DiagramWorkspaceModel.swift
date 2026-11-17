@@ -204,6 +204,7 @@ struct DiagramExportRequest: Sendable {
                         throw ScribeError.message("Не удалось получить файл изображения")
                     }
                     try Task.checkCancellation()
+                    model.errorHandler.note(.importStarted, operation: .importDiagram)
                     let accessed = url.startAccessingSecurityScopedResource()
                     defer { if accessed { url.stopAccessingSecurityScopedResource() } }
                     do {
@@ -222,11 +223,11 @@ struct DiagramExportRequest: Sendable {
                             break
                         }
                     }
-                } catch { model.errorHandler.report(error) }
+                } catch { model.errorHandler.report(error, operation: .importDiagram) }
             }
         } catch {
             onDiscard()
-            model.errorHandler.report(error)
+            model.errorHandler.report(error, operation: .importDiagram)
         }
     }
 

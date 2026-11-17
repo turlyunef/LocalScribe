@@ -91,6 +91,9 @@ final class ProcessingQueueTests: XCTestCase {
                              recognizeLiveCaptions: { _, stream, ready, _ in
             await ready()
             for await _ in stream {}
+        }, recognizeMixedLiveCaptions: { stream, ready, _ in
+            await ready()
+            for await _ in stream {}
         })
         for profile in profiles { model.modelLibrary.installed(profile, catalog: catalog) }
         try model.modelLibrary.select(profiles[0], catalog: catalog)
@@ -855,6 +858,38 @@ final class ProcessingQueueTests: XCTestCase {
         XCTAssertEqual(try repo.load(id).activeRunId, run)
         await model.shutdown()
     }
+
+    func testMixedLiveCaptionsStartWhileAnUnrelatedWorkerIsBusy() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, model, release) = try fixture(root, capture: CaptionSwitchCapture())
+        let settings = SettingsDraft(model: model)
+        settings.backgroundRecognition = false
+        settings.recordingSources.microphoneEnabled = false
+        settings.recordingSources.systemAudioEnabled = true
+        try model.applySettings(settings)
+        let first = try completed(repo, title: "First")
+        let next = try completed(repo, title: "Next")
+        await model.enqueue(first.id)
+        try await waitUntil { model.status == "fixture-ready-" + first.id }
+        await model.enqueue(next.id)
+        await model.startRecording()
+        let id = try XCTUnwrap(model.recordingID)
+        model.setLiveCaptionLanguage(.mixed, for: id)
+        model.startLiveCaptions(id)
+        try await waitUntil { model.captureCaptions?.phase == .listening }
+        XCTAssertTrue(model.supervisor.running)
+        XCTAssertEqual(try events(root).map(\.jobId), [first.id])
+
+        try Data().write(to: release)
+        try await waitUntil { (try? repo.load(next.id).state) == .completed }
+        XCTAssertEqual(try repo.load(first.id).state, .completed)
+        XCTAssertEqual(model.captureCaptions?.phase, .listening)
+        XCTAssertEqual(model.recordingID, id)
+        await model.stopRecording()
+        await model.shutdown()
+    }
+
     func testSavingQueuedCaptureKeepsFIFOAndStartsAutomatically() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -935,17 +970,23 @@ final class ProcessingQueueTests: XCTestCase {
         let message = "Процесс обработки прерван (код 5). Контрольные точки сохранены."
         XCTAssertEqual(model.errorHandler.messages, [message])
         XCTAssertEqual(try repo.load(m.id).lastError, message)
-        let context = try XCTUnwrap(model.errorHandler.reports.first?.context)
-        let workerLine = try XCTUnwrap(context.first { $0.0 == "процесс worker" }?.1)
-        XCTAssertTrue(workerLine.contains("SIGTRAP"))
-        XCTAssertEqual(context.first { $0.0 == "этап" }?.1, "preparingAudio")
-        XCTAssertTrue(context.first { $0.0 == "последнее событие протокола" }?.1.contains("progress") == true)
+        let snapshot = try XCTUnwrap(model.errorHandler.reports.first?.snapshot)
+        XCTAssertEqual(snapshot.worker?.signalName, "SIGTRAP")
+        XCTAssertEqual(snapshot.job?.stage, .preparingAudio)
+        XCTAssertEqual(snapshot.worker?.lastEvent, .progress)
+        XCTAssertEqual(snapshot.failure.code, .workerSignal)
         let text = try XCTUnwrap(model.errorHandler.copyCurrent())
-        XCTAssertTrue(text.contains("Технические сведения:"))
         XCTAssertTrue(text.contains("SIGTRAP"))
-        XCTAssertTrue(text.contains("Стек вызовов (GUI):"))
-        XCTAssertFalse(model.errorHandler.reports[0].stack.isEmpty)
+        XCTAssertFalse(text.contains("Распознаём речь"))
         await model.shutdown()
+
+        let saved = try repo.load(m.id)
+        let reopened = AppErrorHandler()
+        reopened.startJournal(at: root)
+        await reopened.presentStored(DiagnosticJobReference(.recording, item: saved.id, run: saved.pendingRunId),
+                                     message: try XCTUnwrap(saved.lastError))
+        XCTAssertEqual(reopened.reports.first?.clipboardText, text)
+        _ = await reopened.journal.snapshot()
     }
 
     func testFailedSavedCaptureCanActuallyResumeItsExistingRun() async throws {

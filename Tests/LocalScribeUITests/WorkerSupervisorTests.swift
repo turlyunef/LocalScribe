@@ -144,6 +144,21 @@ final class WorkerSupervisorTests: XCTestCase {
         XCTAssertFalse(supervisor.running)
     }
 
+    func testMissingExecutableHasLaunchDiagnostic() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let command = WorkerCommand(jobId: UUID().uuidString, runId: UUID().uuidString, stage: .preparingAudio,
+                                    recordingPath: root.path, modelsPath: root.path, toolsPath: root.path)
+        do {
+            try await WorkerSupervisor().run(command, executable: root.appendingPathComponent("missing-worker")) { _ in }
+            XCTFail("Missing executable launched")
+        } catch let failure as WorkerFailureError {
+            XCTAssertEqual(failure.diagnostic.code, .workerLaunch)
+            XCTAssertEqual(failure.diagnostic.phase, .launch)
+            XCTAssertNotNil(failure.diagnostic.system)
+            XCTAssertNil(failure.exit)
+        }
+    }
+
     func testProtocolFailureDrainsPipesAndDoesNotRetainSupervisor() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -151,7 +166,11 @@ final class WorkerSupervisorTests: XCTestCase {
         var supervisor: WorkerSupervisor? = WorkerSupervisor()
         weak var released = supervisor
         do { try await supervisor!.run(command, executable: executable) { _ in }; XCTFail("Invalid protocol succeeded") }
-        catch { XCTAssertTrue(error.localizedDescription.contains("протокол")) }
+        catch {
+            XCTAssertTrue(error.localizedDescription.contains("протокол"))
+            XCTAssertEqual((error as? WorkerFailureError)?.diagnostic.code, .workerProtocol)
+            XCTAssertEqual((error as? WorkerFailureError)?.diagnostic.phase, .protocolRead)
+        }
         XCTAssertFalse(supervisor!.running)
         supervisor = nil
         XCTAssertNil(released)
