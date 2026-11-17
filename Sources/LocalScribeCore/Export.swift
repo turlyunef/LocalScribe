@@ -37,7 +37,7 @@ public enum ExportService {
 
     /// Ranges use UTF-16 offsets for AppKit. Record links while rendering so
     /// identical visible timestamps still refer to their own source segments.
-    public static func renderResult(manifest m: Manifest, transcript t: Transcript?, summary s: Summary?, part: ExportPart = .all, markdown: Bool) -> RenderedExport {
+    public static func renderResult(manifest m: Manifest, transcript t: Transcript?, summary s: Summary?, part: ExportPart = .all, markdown: Bool, transcriptionModel: String? = nil) -> RenderedExport {
         var result = RenderedExport()
         var offset = 0
         func append(_ text: String) {
@@ -69,6 +69,9 @@ public enum ExportService {
         append(L10n.text("Длительность: %1$@", timecode(m.durationMs)) + "\n")
         let state: JobState = m.activeRunId == nil ? m.state : m.warnings.isEmpty ? .completed : .completedWithWarnings
         append(L10n.text("Статус: %1$@", state.title) + "\n")
+        if t != nil, part == .transcript || part == .all {
+            append(L10n.text("Модель: %1$@", clean(transcriptionModel ?? L10n.text("Не указано"))) + "\n")
+        }
         append(L10n.text("Автоматическая локальная обработка. Возможны ошибки.") + "\n")
         if m.activeRunId != nil && m.pendingRunId != nil {
             append(L10n.text("Показан предыдущий успешный результат; новая обработка ещё не завершена.") + "\n")

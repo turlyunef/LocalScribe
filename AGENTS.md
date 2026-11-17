@@ -24,15 +24,15 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 
 | Задача | Точная команда | Статус |
 | --- | --- | --- |
-| Release executable targets | `swift build -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 в составе упаковки 2.19.0 со статическим runtime GigaAM |
-| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 — 954 XCTest (339 Core, 350 UI/service, 265 worker/диаризация), 0 ошибок, 19 опциональных пропусков |
+| Release executable targets | `swift build -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 в составе упаковки 2.20.0 со статическим runtime GigaAM |
+| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 — 959 XCTest (341 Core, 353 UI/service, 265 worker/диаризация), 0 ошибок, 19 опциональных пропусков |
 | Один тест | `swift test -c release -j 4 --force-resolved-versions --filter RecordingPlaybackTests/testSummaryStartsPlaybackAndTranscriptClickPreservesPause` | проверено 17.11.2026 — 1 тест, 0 ошибок. Формат фильтра — `Suite/test` без имени target |
 | Python-проверки скриптов | `python3 -m unittest discover -s scripts/tests -v` | проверено 17.11.2026 в составе статической проверки — 78 тестов, 0 ошибок, локальные фикстуры без весов и сети |
 | Статические проверки CI | `bash scripts/verify.sh --static` | проверено 17.11.2026 — оба plist валидны, 78 Python-тестов, включая согласованность версии |
 | Проверка аудиокодеков | `python3 scripts/format_checks.py` | (не проверено) — отсутствует `Assets/probe/mixed.wav`. В прогоне 26.10.2026 прошло 8/8 вариантов, включая AAC ADTS, см. [ASRModels](docs/ASRModels.md) |
 | Путь к executable | `swift build -c release --show-bin-path` | проверено — `.build/out/Products/Release` в этой среде |
 | FFmpeg/ffprobe | `bash scripts/build_ffmpeg.sh` | (не проверено) — пересборка C-инструментов и возможная загрузка исходников не выполнялись |
-| Упаковка .app | `bash scripts/build_app.sh` | проверено 17.11.2026 для 2.19.0 (сборка 37): пакет собран со статическим runtime GigaAM, строгая проверка подписи прошла |
+| Упаковка .app | `bash scripts/build_app.sh` | проверено 17.11.2026 для 2.20.0 (сборка 38): пакет собран со статическим runtime GigaAM, строгая проверка подписи прошла |
 
 Обычная SwiftPM-сборка использует заглушку GigaAM для контрактных тестов. Для рабочего backend см. [сборку со статическим runtime](docs/ASRModels.md#gigaam-v3-rnnt).
 
@@ -111,7 +111,8 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 - [ResultEditing](Sources/LocalScribeCore/ResultEditing.swift) сохраняет черновик полным новым run и только затем переключает activeRunId. Сохранять ID, таймкоды, участников и порядок оставшихся реплик; при изменении текста удалять старые word timings.
 - Ручные итоги без evidence разрешены только для проверенной ручной версии; автоматические требуют основания.
 - При изменении плеера и переходов по репликам сверять [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей). Частые обновления позиции наблюдают плеер и текст расшифровки напрямую через [RecordingPlayback](Sources/LocalScribe/RecordingPlayback.swift).
-- «Пропускать паузы» по умолчанию выключено: пропускать только промежутки ≥ 1000 мс между концом реплики-абзаца и следующим началом, объединяя перекрытия. В паузе воспроизведения позицию не менять; индекс обновлять при замене расшифровки и сбрасывать при смене источника. Подробности — [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей).
+- «Пропускать паузы» по умолчанию выключено: при воспроизведении пропускать начальную тишину до первой реплики и промежутки ≥ 1000 мс между концом реплики-абзаца и следующим началом, объединяя перекрытия. В паузе воспроизведения позицию не менять; индекс обновлять при замене расшифровки и сбрасывать при смене источника. Подробности — [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей).
+- Кнопки по краям шаговой перемотки переходят к началам реплик, сохраняя паузу/воспроизведение; шаги — 5, 10, 15, 30 и 60 секунд. Модель после статуса расшифровки брать из исходного ASR-run через `transcriptSourceRunID`, а не из текущего выбора моделей. См. [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей).
 
 ## Локальные конвенции и ловушки
 

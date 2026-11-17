@@ -1,6 +1,26 @@
 import Foundation
 
 extension RecordingRepository {
+    /// Follow copied transcripts through summary-only and manual revisions.
+    /// Missing provenance must not substitute the user's current ASR choice.
+    public func transcriptionModelID(_ manifest: Manifest) -> String? {
+        guard UUID(uuidString: manifest.id) != nil else { return nil }
+        var selected = manifest.activeRunId ?? manifest.pendingRunId
+        var visited: Set<String> = []
+        while let id = selected {
+            guard UUID(uuidString: id) != nil, visited.insert(id).inserted,
+                  let info = try? Disk.read(RunInfo.self, at: run(manifest.id, id).appendingPathComponent("run.json")),
+                  (try? validateResultRun(info, id: id)) != nil,
+                  info.sourceHash == manifest.sha256 || (info.liveCapture == true && info.sourceHash == "capture:" + id) else { return nil }
+            if let source = info.transcriptSourceRunID {
+                selected = source
+            } else {
+                return try? info.modelID(for: .asr)
+            }
+        }
+        return nil
+    }
+
     /// Read a run as one transaction: never expose half of a corrupt result or
     /// hide a damaged final artifact by silently falling back to a checkpoint.
     /// Files remain untouched so this run can be recovered independently.

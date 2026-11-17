@@ -6,6 +6,29 @@ final class ResultReadingTests: XCTestCase {
     private static let liveCatalog = ModelCatalog(models: [
         ModelProfile(id: "asr", repository: "fixture/whisper", revision: "fixed", license: "test", files: [], role: .asr)
     ])
+
+    func testTranscriptionModelFollowsSourceInsteadOfSummaryModelsAndPendingRun() throws {
+        try fixture { repo, original, info, _, _ in
+            var source = info
+            source.modelIDs = ["asr": "original-asr"]
+            try Disk.write(source, to: repo.run(original.id, source.id).appendingPathComponent("run.json"))
+            var copied = RunInfo(sourceHash: original.sha256, profileHash: "new-models")
+            copied.modelIDs = ["asr": "currently-selected-asr"]
+            copied.transcriptSourceRunID = source.id
+            try Disk.write(copied, to: repo.run(original.id, copied.id).appendingPathComponent("run.json"))
+            var manifest = original
+            manifest.activeRunId = copied.id
+            manifest.pendingRunId = UUID().uuidString
+            XCTAssertEqual(repo.transcriptionModelID(manifest), "original-asr")
+            copied.transcriptSourceRunID = copied.id
+            try Disk.write(copied, to: repo.run(original.id, copied.id).appendingPathComponent("run.json"))
+            XCTAssertNil(repo.transcriptionModelID(manifest))
+            copied.transcriptSourceRunID = "../invalid"
+            try Disk.write(copied, to: repo.run(original.id, copied.id).appendingPathComponent("run.json"))
+            XCTAssertNil(repo.transcriptionModelID(manifest))
+            XCTAssertEqual(repo.transcriptionModelID(original), "original-asr")
+        }
+    }
     private func fixture(_ check: (RecordingRepository, Manifest, RunInfo, Transcript, Summary) throws -> Void) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

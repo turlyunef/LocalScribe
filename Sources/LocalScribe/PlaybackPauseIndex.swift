@@ -7,11 +7,16 @@ struct PlaybackPauseIndex: Sendable {
         let endMs: Int
     }
     private var pauses: [Pause] = []
+    private var starts: [Int] = []
 
     init(_ segments: [Segment] = []) {
         let ordered = segments.filter { $0.startMs >= 0 && $0.endMs > $0.startMs }
             .sorted { $0.startMs < $1.startMs }
         guard let first = ordered.first else { return }
+        starts = Array(Set(ordered.map(\.startMs))).sorted()
+        if first.startMs > 0 {
+            pauses.append(Pause(startMs: 0, endMs: first.startMs))
+        }
         var end = first.endMs
         for segment in ordered.dropFirst() {
             if segment.startMs - end >= 1000 {
@@ -19,6 +24,23 @@ struct PlaybackPauseIndex: Sendable {
             }
             end = max(end, segment.endMs)
         }
+    }
+
+    func adjacentSpeech(at seconds: Double, direction: Int) -> Double? {
+        guard seconds.isFinite else { return nil }
+        // Ignore the small clock advance after a precise seek, so repeated
+        // presses can move backwards through paragraph starts.
+        let boundary = seconds * 1000 + (direction < 0 ? -50 : 50)
+        var lower = 0
+        var upper = starts.count
+        while lower < upper {
+            let middle = lower + (upper - lower) / 2
+            if Double(starts[middle]) <= boundary { lower = middle + 1 }
+            else { upper = middle }
+        }
+        let index = direction < 0 ? lower - 1 : lower
+        guard starts.indices.contains(index) else { return nil }
+        return Double(starts[index]) / 1000
     }
 
     func nextSpeech(at seconds: Double) -> Double? {

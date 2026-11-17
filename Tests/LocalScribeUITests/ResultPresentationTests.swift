@@ -56,11 +56,11 @@ final class ResultPresentationTests: XCTestCase {
     func testUncachedActionRenderingRunsOffMainAndRejectsStaleContent() async throws {
         let started = expectation(description: "Action renderer started")
         let release = DispatchSemaphore(value: 0)
-        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown in
+        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown, model in
             XCTAssertFalse(Thread.isMainThread)
             started.fulfill()
             _ = release.wait(timeout: .now() + 5)
-            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown, transcriptionModel: model)
         }
         let (manifest, transcript, summary) = fixture()
         let action = Task { try await presentation.render(manifest: manifest, transcript: transcript, summary: summary,
@@ -86,11 +86,11 @@ final class ResultPresentationTests: XCTestCase {
         model.copy(.all)
         await model.copyTask?.value
         XCTAssertEqual(NSPasteboard.general.string(forType: .string),
-            ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: .all, markdown: false).text)
+            ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: .all, markdown: false, transcriptionModel: model.transcriptionModel).text)
         let url = root.appendingPathComponent("export.md")
         await model.export(to: url, markdown: true, part: .all)
         XCTAssertEqual(try String(contentsOf: url, encoding: .utf8),
-            ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: .all, markdown: true).text)
+            ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: .all, markdown: true, transcriptionModel: model.transcriptionModel).text)
         await model.shutdown()
     }
 
@@ -258,11 +258,11 @@ final class ResultPresentationTests: XCTestCase {
     func testCancelledBackgroundRenderCannotRestoreOldTextOrLinks() async throws {
         let started = expectation(description: "Background renderer started")
         let release = DispatchSemaphore(value: 0)
-        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown in
+        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown, model in
             XCTAssertFalse(Thread.isMainThread)
             started.fulfill()
             _ = release.wait(timeout: .now() + 5)
-            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown, transcriptionModel: model)
         }
         let (manifest, transcript, summary) = fixture()
         presentation.update(manifest: manifest, transcript: transcript, summary: summary, revision: 1, part: .summary)
@@ -278,12 +278,12 @@ final class ResultPresentationTests: XCTestCase {
     func testDelayedWarningsRenderCannotOverwriteTranscriptAfterTabSwitch() async throws {
         let started = expectation(description: "Warnings renderer started")
         let release = DispatchSemaphore(value: 0)
-        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown in
+        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown, model in
             if part == .warnings {
                 started.fulfill()
                 _ = release.wait(timeout: .now() + 5)
             }
-            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown, transcriptionModel: model)
         }
         var (manifest, transcript, summary) = fixture()
         manifest.warnings = ["Проверить начало речи"]
@@ -305,12 +305,12 @@ final class ResultPresentationTests: XCTestCase {
     func testOlderRenderCannotOverwriteNewerTitleAndResult() async throws {
         let started = expectation(description: "Old result renderer started")
         let release = DispatchSemaphore(value: 0)
-        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown in
+        let presentation = ResultPresentation { manifest, transcript, summary, part, markdown, model in
             if manifest.displayTitle == "Старое имя" {
                 started.fulfill()
                 _ = release.wait(timeout: .now() + 5)
             }
-            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+            return ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown, transcriptionModel: model)
         }
         var (manifest, transcript, summary) = fixture()
         manifest.displayTitle = "Старое имя"

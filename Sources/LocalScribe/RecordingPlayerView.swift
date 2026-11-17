@@ -81,6 +81,7 @@ struct RecordingPlayerView: View {
 
     private var transport: some View {
         HStack(spacing: 5) {
+            segmentButton(-1)
             skipButton(-1, icon: "gobackward")
             let title = L10n.text(playback.isPlaying ? "Пауза" : "Воспроизвести")
             Button(action: playback.toggle) {
@@ -92,7 +93,20 @@ struct RecordingPlayerView: View {
             .accessibilityLabel(title)
             .accessibilityIdentifier("playback.toggle")
             skipButton(1, icon: "goforward")
+            segmentButton(1)
         }
+    }
+
+    private func segmentButton(_ direction: Int) -> some View {
+        let title = L10n.text(direction < 0 ? "Предыдущая реплика" : "Следующая реплика")
+        return Button { playback.moveToSegment(direction) } label: {
+            Image(systemName: direction < 0 ? "backward.end.fill" : "forward.end.fill")
+                .frame(width: 16)
+        }
+        .disabled(playback.duration <= 0)
+        .help(title)
+        .accessibilityLabel(title)
+        .accessibilityIdentifier(direction < 0 ? "playback.previousSegment" : "playback.nextSegment")
     }
 
     private func skipButton(_ direction: Int, icon: String) -> some View {
@@ -111,7 +125,7 @@ struct RecordingPlayerView: View {
     private var options: some View {
         HStack(spacing: 7) {
             Picker(L10n.text("Шаг"), selection: $playback.skipSeconds) {
-                ForEach([5, 10], id: \.self) { step in
+                ForEach([5, 10, 15, 30, 60], id: \.self) { step in
                     Text(L10n.text("%1$@ с", String(step))).tag(step)
                 }
             }

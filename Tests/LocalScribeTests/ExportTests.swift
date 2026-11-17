@@ -2,6 +2,19 @@ import XCTest
 @testable import LocalScribeCore
 
 final class ExportTests: XCTestCase {
+    func testTranscriptModelFollowsStatusAndPreservesTimestampRanges() {
+        let manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
+        let transcript = Transcript(fingerprint: "f", diarized: true, segments: [
+            Segment(id: "first", startMs: 1000, endMs: 2000, text: "Текст", language: "ru"),
+        ])
+        for markdown in [false, true] {
+            let result = ExportService.renderResult(manifest: manifest, transcript: transcript, summary: nil,
+                part: .transcript, markdown: markdown, transcriptionModel: "ASR [test]")
+            let name = markdown ? "ASR \\[test\\]" : "ASR [test]"
+            XCTAssertTrue(result.text.contains("Статус: \(manifest.state.title)\nМодель: \(name)\n"))
+            XCTAssertEqual((result.text as NSString).substring(with: result.timestamps[0].range), "[00:00:01]")
+        }
+    }
     func testIndexedEvidencePreservesTranscriptOrderDeduplicatesIDsAndUsesUTF16() {
         let manifest = Manifest(sourceType: "import", title: "План 🧑🏽‍💻 [тест]", filename: "meeting.wav")
         let transcript = Transcript(fingerprint: "f", diarized: true, segments: [

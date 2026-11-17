@@ -8,7 +8,8 @@ final class RecordingPlaybackTests: XCTestCase {
     func testSummaryStartsPlaybackAndTranscriptClickPreservesPause() async throws {
         let repository = try temporaryRepository()
         var manifest = try saveWAV(in: repository, seconds: 12)
-        let run = RunInfo(sourceHash: manifest.sha256, profileHash: "test")
+        var run = RunInfo(sourceHash: manifest.sha256, profileHash: "test")
+        run.modelIDs = ["asr": "saved-asr-profile"]
         manifest.activeRunId = run.id
         manifest.state = .completed
         try repository.save(manifest)
@@ -29,6 +30,7 @@ final class RecordingPlaybackTests: XCTestCase {
         model.selection = manifest.id
         model.tab = .summary
         await waitUntil { model.resultPresentation.result.timestamps.count == 1 }
+        XCTAssertEqual(model.transcriptionModel, "saved-asr-profile")
 
         model.activateResultSegment("second", recordingID: manifest.id, from: .summary)
         XCTAssertEqual(model.tab, .transcript)
@@ -39,6 +41,7 @@ final class RecordingPlaybackTests: XCTestCase {
         // Pausing during preparation also cancels the intention to start.
         model.playback.toggle()
         await waitUntil { model.playback.state != .loading && !model.resultPresentation.isRendering }
+        XCTAssertTrue(model.resultPresentation.result.text.contains("Модель: saved-asr-profile\n"))
         XCTAssertEqual(model.playback.state, .ready)
         model.activateResultSegment("first", recordingID: manifest.id, from: .transcript)
         XCTAssertEqual(model.playback.position, 1.231)
@@ -60,9 +63,11 @@ final class RecordingPlaybackTests: XCTestCase {
             paragraph("longGap", 8000, 9000),
         ]
         let index = PlaybackPauseIndex(segments)
-        for time in [0.0, 0.999, 1, 1.999, 2, 2.5, 2.999, 3.499, 4.5, 4.999, 8, 9, 20] {
+        for time in [1.0, 1.999, 2, 2.5, 2.999, 3.499, 4.5, 4.999, 8, 9, 20] {
             XCTAssertNil(index.nextSpeech(at: time), "At \(time)")
         }
+        XCTAssertEqual(index.nextSpeech(at: 0), 1)
+        XCTAssertEqual(index.nextSpeech(at: 0.999), 1)
         XCTAssertEqual(index.nextSpeech(at: 3.5), 4.5)
         XCTAssertEqual(index.nextSpeech(at: 4.499), 4.5)
         XCTAssertEqual(index.nextSpeech(at: 5), 8)
@@ -71,6 +76,84 @@ final class RecordingPlaybackTests: XCTestCase {
         XCTAssertNil(index.nextSpeech(at: .infinity))
         XCTAssertNil(PlaybackPauseIndex().nextSpeech(at: 2))
         XCTAssertNil(PlaybackPauseIndex([segments[0]]).nextSpeech(at: 3))
+    }
+
+    func testSegmentNavigationHandlesOverlapsBoundariesAndMissingTranscript() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        select(manifest, in: repository, playback)
+        playback.moveToSegment(1)
+        XCTAssertNil(playback.position)
+        playback.updateTranscript(transcript([
+            paragraph("last", 7000, 8000), paragraph("first", 1000, 5000),
+            paragraph("overlap", 3000, 6000), paragraph("same", 3000, 4000),
+        ]))
+        await playback.transcriptTask?.value
+        playback.moveToSegment(1)
+        XCTAssertEqual(playback.position, 1)
+        playback.moveToSegment(-1)
+        XCTAssertEqual(playback.position, 1)
+        playback.moveToSegment(1)
+        XCTAssertEqual(playback.position, 3)
+        playback.moveToSegment(1)
+        XCTAssertEqual(playback.position, 7)
+        playback.moveToSegment(1)
+        XCTAssertEqual(playback.position, 7)
+        playback.moveToSegment(-1)
+        XCTAssertEqual(playback.position, 3)
+        XCTAssertFalse(playback.isPlaying)
+        playback.seek(to: 4, play: true)
+        playback.moveToSegment(-1)
+        XCTAssertEqual(playback.position, 3)
+        XCTAssertTrue(playback.isPlaying)
+        playback.updateTranscript(nil)
+        playback.moveToSegment(1)
+        XCTAssertEqual(playback.position, 3)
+        await playback.shutdown()
+    }
+
+    func testStartAndReplaySkipLeadingSilenceOnlyWhenEnabled() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        select(manifest, in: repository, playback)
+        playback.updateTranscript(transcript([paragraph("first", 500, 1000)]))
+        await playback.transcriptTask?.value
+        playback.toggle()
+        XCTAssertEqual(playback.position, 0)
+        playback.toggle()
+        playback.skipsPauses = true
+        XCTAssertEqual(playback.position, 0)
+        playback.toggle()
+        XCTAssertEqual(playback.position, 0.5)
+        playback.toggle()
+        playback.seek(to: playback.duration)
+        playback.toggle()
+        XCTAssertEqual(playback.position, 0.5)
+        playback.seek(to: 8)
+        XCTAssertEqual(playback.position, 8) // Trailing silence stays playable.
+        await playback.shutdown()
+    }
+
+    func testExpandedSkipStepsClampToAudioBounds() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 90)
+        let playback = RecordingPlayback()
+        select(manifest, in: repository, playback)
+        for step in [5, 10, 15, 30, 60] {
+            playback.seek(to: 10)
+            playback.skipSeconds = step
+            playback.skip(1)
+            XCTAssertEqual(playback.position, Double(10 + step))
+            playback.seek(to: 1)
+            playback.skip(-1)
+            XCTAssertEqual(playback.position, 0)
+            playback.seek(to: 89)
+            playback.skip(1)
+            XCTAssertEqual(playback.position, 90)
+        }
+        await playback.shutdown()
     }
 
     func testPauseIndexMergesNestedAndEqualStartOverlapsInUnsortedInput() {

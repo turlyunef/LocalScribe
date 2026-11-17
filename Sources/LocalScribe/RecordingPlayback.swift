@@ -112,6 +112,12 @@ import LocalScribeCore
         seek(to: (position ?? 0) + Double(direction * skipSeconds))
     }
 
+    func moveToSegment(_ direction: Int) {
+        guard let target = pauseIndex.adjacentSpeech(at: position ?? 0, direction: direction),
+              target < duration else { return }
+        seek(to: target)
+    }
+
     func seek(to seconds: Double, play: Bool = false) {
         guard source != nil, seconds.isFinite else { return }
         var target = min(max(0, seconds), duration)

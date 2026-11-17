@@ -70,6 +70,13 @@ final class ContentLayoutTests: XCTestCase {
                                          width: width, height: 180)
             defer { window.close() }
             try await settle(hosting)
+            let transport = try ["playback.previousSegment", "playback.back", "playback.toggle",
+                                 "playback.forward", "playback.nextSegment"].map {
+                try XCTUnwrap(element($0, in: hosting).accessibilityFrame?())
+            }
+            for pair in zip(transport, transport.dropFirst()) {
+                XCTAssertLessThanOrEqual(pair.0.maxX, pair.1.minX)
+            }
             let checkbox = try element("playback.skipPauses", in: hosting)
             let follow = try element("playback.follow", in: hosting)
             let checkboxFrame = try XCTUnwrap(checkbox.accessibilityFrame?())

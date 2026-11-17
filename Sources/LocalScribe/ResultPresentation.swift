@@ -65,7 +65,7 @@ struct TranscriptPlaybackIndex: Sendable {
 /// A bounded cache for the selected result. Keys compare only small metadata and
 /// explicit content revisions, never the text/segment arrays on a view update.
 @MainActor final class ResultPresentation: ObservableObject {
-    typealias Renderer = @Sendable (Manifest, Transcript?, Summary?, ExportPart, Bool) -> RenderedExport
+    typealias Renderer = @Sendable (Manifest, Transcript?, Summary?, ExportPart, Bool, String?) -> RenderedExport
     private struct ContentKey: Hashable {
         let recordingID: String
         let revision: UInt64
@@ -77,8 +77,10 @@ struct TranscriptPlaybackIndex: Sendable {
         let previousResult: Bool
         let warnings: [String]
         let sourceComplete: Bool
+        let transcriptionModel: String?
 
-        init(_ m: Manifest, revision: UInt64) {
+        init(_ m: Manifest, revision: UInt64, transcriptionModel: String?) {
+            self.transcriptionModel = transcriptionModel
             recordingID = m.id; self.revision = revision; title = m.displayTitle
             createdAt = m.createdAt; recordedAt = m.recordedAt; durationMs = m.durationMs
             state = m.activeRunId == nil ? m.state : m.warnings.isEmpty ? .completed : .completedWithWarnings
@@ -112,25 +114,25 @@ struct TranscriptPlaybackIndex: Sendable {
     private(set) var task: Task<Void, Never>?
     private let renderer: Renderer
 
-    init(renderer: @escaping Renderer = { manifest, transcript, summary, part, markdown in
-        ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown)
+    init(renderer: @escaping Renderer = { manifest, transcript, summary, part, markdown, model in
+        ExportService.renderResult(manifest: manifest, transcript: transcript, summary: summary, part: part, markdown: markdown, transcriptionModel: model)
     }) {
         self.renderer = renderer
     }
 
-    private func key(_ manifest: Manifest, revision: UInt64, part: ExportPart, markdown: Bool) -> Key {
-        let next = ContentKey(manifest, revision: revision)
+    private func key(_ manifest: Manifest, revision: UInt64, part: ExportPart, markdown: Bool, transcriptionModel: String?) -> Key {
+        let next = ContentKey(manifest, revision: revision, transcriptionModel: transcriptionModel)
         if content != next { cache.removeAll(); content = next }
         return Key(content: next, part: part, markdown: markdown)
     }
 
-    func update(manifest: Manifest?, transcript: Transcript?, summary: Summary?, revision: UInt64, part: ExportPart) {
+    func update(manifest: Manifest?, transcript: Transcript?, summary: Summary?, revision: UInt64, part: ExportPart, transcriptionModel: String? = nil) {
         guard let manifest else {
             task?.cancel(); task = nil; requested = nil; content = nil; cache.removeAll()
             presented = Presentation(); isRendering = false
             return
         }
-        let key = key(manifest, revision: revision, part: part, markdown: false)
+        let key = key(manifest, revision: revision, part: part, markdown: false, transcriptionModel: transcriptionModel)
         guard requested != key else { return }
         requested = key; task?.cancel(); task = nil
         if let cached = cache[key] { presented = cached; isRendering = false; return }
@@ -144,7 +146,7 @@ struct TranscriptPlaybackIndex: Sendable {
             self.renderCount += 1
             let renderer = self.renderer
             let value = await Task.detached(priority: .userInitiated) {
-                Presentation(renderer(manifest, transcript, summary, part, false), part: part)
+                Presentation(renderer(manifest, transcript, summary, part, false, transcriptionModel), part: part)
             }.value
             guard !Task.isCancelled, self.requested == key else { return }
             self.cache[key] = value; self.presented = value; self.isRendering = false; self.task = nil
@@ -154,14 +156,14 @@ struct TranscriptPlaybackIndex: Sendable {
     /// Explicit copy/export uses the same cache and background renderer as the view.
     /// A changed selection/content must never publish an obsolete action result.
     func render(manifest: Manifest, transcript: Transcript?, summary: Summary?, revision: UInt64,
-                part: ExportPart, markdown: Bool) async throws -> RenderedExport {
-        let key = key(manifest, revision: revision, part: part, markdown: markdown)
+                part: ExportPart, markdown: Bool, transcriptionModel: String? = nil) async throws -> RenderedExport {
+        let key = key(manifest, revision: revision, part: part, markdown: markdown, transcriptionModel: transcriptionModel)
         try Task.checkCancellation()
         if let cached = cache[key] { return cached.result }
         renderCount += 1
         let renderer = self.renderer
         let value = await Task.detached(priority: .userInitiated) {
-            Presentation(renderer(manifest, transcript, summary, part, markdown), part: part, markdown: markdown)
+            Presentation(renderer(manifest, transcript, summary, part, markdown, transcriptionModel), part: part, markdown: markdown)
         }.value
         try Task.checkCancellation()
         guard content == key.content else { throw CancellationError() }

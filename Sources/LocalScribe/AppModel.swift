@@ -95,13 +95,14 @@ struct QueueJobID: Hashable, Sendable {
             retainSearchSelection()
             if oldValue != selection {
                 playback.select(playbackSource)
-                jumpTo = nil; transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil
+                jumpTo = nil; transcriptionModel = nil; transcript = nil; summary = nil; resultSignature = ""; resultEdit = nil
                 if tab == .live { tab = .transcript }
                 loadLiveCaptions()
             }
             loadResult()
         }
     }
+    private(set) var transcriptionModel: String?
     @Published var transcript: Transcript? {
         didSet {
             playback.updateTranscript(transcript)
@@ -479,7 +480,7 @@ struct QueueJobID: Hashable, Sendable {
     private func refreshPresentation() {
         if tab == .warnings && !resultTabs.contains(.warnings) { tab = .transcript; return }
         guard let part = tab.exportPart else { return }
-        resultPresentation.update(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part)
+        resultPresentation.update(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part, transcriptionModel: transcriptionModel)
     }
 
     private func loadLiveCaptions() {
@@ -510,17 +511,23 @@ struct QueueJobID: Hashable, Sendable {
         }
     }
     func loadResult() {
-        guard let selected, let archive else { transcript = nil; summary = nil; resultSignature = ""; return }
+        guard let selected, let archive else { transcriptionModel = nil; transcript = nil; summary = nil; resultSignature = ""; return }
         guard !deletingJobIDs.contains(.recording(selected.id)) else { return }
         let signature = selected.id + (selected.activeRunId ?? "") + (selected.pendingRunId ?? "") + selected.state.rawValue
         guard resultSignature != signature else { return }
         resultSignature = signature
-        transcript = nil; summary = nil
+        transcriptionModel = nil; transcript = nil; summary = nil
         let loadID = UUID(); resultLoadID = loadID
         Task {
             do {
-                let results = try await archive.perform { try $0.results(selected) }
+                let results = try await archive.perform { repository in
+                    let result = try repository.results(selected)
+                    return (result.0, result.1, repository.transcriptionModelID(selected))
+                }
                 guard self.selection == selected.id, self.resultSignature == signature, self.resultLoadID == loadID else { return }
+                self.transcriptionModel = results.2.map { id in
+                    self.catalog?.models.first(where: { $0.id == id && $0.purpose == .asr })?.displayName ?? id
+                }
                 self.transcript = results.0; self.summary = results.1
             } catch {
                 guard self.selection == selected.id, self.resultSignature == signature, self.resultLoadID == loadID else { return }
@@ -2994,7 +3001,7 @@ struct QueueJobID: Hashable, Sendable {
     }
     func renderedResult(_ part: ExportPart, markdown: Bool = false) async throws -> RenderedExport {
         guard let selected else { throw CancellationError() }
-        return try await resultPresentation.render(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part, markdown: markdown)
+        return try await resultPresentation.render(manifest: selected, transcript: transcript, summary: summary, revision: resultRevision, part: part, markdown: markdown, transcriptionModel: transcriptionModel)
     }
     func copy(_ part: ExportPart) {
         copyResult { try await self.rendered(part) }
