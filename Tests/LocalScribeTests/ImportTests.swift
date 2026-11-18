@@ -149,6 +149,28 @@ final class ImportTests: XCTestCase {
         XCTAssertFalse(fm.fileExists(atPath: partial.path))
     }
 
+    func testForeignDigestFailsStreamedVerificationAndRemovesPartialCopy() throws {
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? fm.removeItem(at: root) }
+        try Disk.directory(root)
+        let source = root.appendingPathComponent("meeting.wav")
+        // Cross the streaming chunk boundary so the streamed digest covers several writes.
+        try Data((0..<(4 * 1024 * 1024 + 31)).map { UInt8($0 % 251) }).write(to: source)
+        let input = try ImportSource(source)
+        let digest = try input.hash()
+        let partial = root.appendingPathComponent("original.wav.partial")
+        XCTAssertThrowsError(try input.copy(to: partial, verifying: String(digest.reversed()))) { error in
+            XCTAssertTrue(error is ScribeError)
+        }
+        XCTAssertFalse(fm.fileExists(atPath: partial.path))
+        // The same bytes with the matching digest still produce an identical file.
+        let copy = root.appendingPathComponent("verified.partial")
+        try input.copy(to: copy, verifying: digest)
+        XCTAssertEqual(try Data(contentsOf: copy), try Data(contentsOf: source))
+        XCTAssertEqual(try Disk.hash(copy), digest)
+    }
+
     func testInaccessibleSourceDoesNotPublishRecording() throws {
         guard geteuid() != 0 else { throw XCTSkip("Root bypasses file read permissions") }
         let fm = FileManager.default

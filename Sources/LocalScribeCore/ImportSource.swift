@@ -83,9 +83,18 @@ public final class ImportSource {
             try? output.close()
             if !verified { try? FileManager.default.removeItem(at: destination) }
         }
-        try readPinnedBytes { try output.write(contentsOf: $0) }
+        // Hash the bytes stream-wise while writing them: the written copy is exactly
+        // the pinned bytes just verified against `digest`, so re-reading the
+        // destination for a separate hash pass would walk the same bytes twice.
+        // An in-place modification of the pinned source still fails the comparison
+        // and the partial copy is removed.
+        var hash = SHA256()
+        try readPinnedBytes { bytes in
+            try output.write(contentsOf: bytes)
+            hash.update(data: bytes)
+        }
         try output.synchronize()
-        guard try Disk.hash(destination, checkCancellation: true) == digest else {
+        guard hash.finalize().map { String(format: "%02x", $0) }.joined() == digest else {
             throw ScribeError.message("Не удалось проверить сохранённый оригинал")
         }
         verified = true

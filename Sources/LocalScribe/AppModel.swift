@@ -1566,7 +1566,12 @@ struct QueueJobID: Hashable, Sendable {
                 let captureInfo = try Disk.read(RunInfo.self, at: run.appendingPathComponent("capture-run.json"))
                 let fragments = try CaptureIntegrity.fragments(at: folder.appendingPathComponent("capture"))
                 let seal = CaptureSeal(info: captureInfo, sourceHash: hash, fragments: fragments)
-                try CaptureIntegrity.verify(seal, info: captureInfo, folder: folder.appendingPathComponent("capture"), original: destination)
+                // `hash` was computed from this very destination above in the same
+                // process; the freshly assembled source and fragment digests are
+                // checked without re-reading them, and the persisted seal is fully
+                // re-hashed by every later cross-process reader.
+                try CaptureIntegrity.verify(seal, info: captureInfo, folder: folder.appendingPathComponent("capture"),
+                                             original: destination, freshlyComputedSourceDigest: hash)
                 try Disk.write(seal, to: run.appendingPathComponent("capture-seal.json"))
             } else {
                 try? FileManager.default.removeItem(at: folder.appendingPathComponent("capture"))

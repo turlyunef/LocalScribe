@@ -70,8 +70,26 @@ public enum CaptureIntegrity {
     /// Compare decoded PCM, not container headers. Both reads are bounded to 8192 frames.
     /// The final SHA is checked independently, including when resuming after a crash.
     public static func verify(_ seal: CaptureSeal, info: RunInfo, folder: URL, original: URL) throws {
+        try verify(seal, info: info, folder: folder, original: original,
+                   sourceDigest: try Disk.hash(original), revalidateFragmentHashes: true)
+    }
+
+    /// Live finalization variant: the caller has just assembled `original` and built the
+    /// seal from `sourceDigest` and fragment digests computed in the same process with no
+    /// writes to the audio in between. The pinned digests are compared without re-reading
+    /// the files; decoded PCM is still compared sample-for-sample, and every later
+    /// cross-process reader (worker, resume) re-verifies the persisted seal with full
+    /// re-hashing via the four-argument overload above.
+    public static func verify(_ seal: CaptureSeal, info: RunInfo, folder: URL, original: URL,
+                              freshlyComputedSourceDigest sourceDigest: String) throws {
+        try verify(seal, info: info, folder: folder, original: original,
+                   sourceDigest: sourceDigest, revalidateFragmentHashes: false)
+    }
+
+    private static func verify(_ seal: CaptureSeal, info: RunInfo, folder: URL, original: URL,
+                               sourceDigest: String, revalidateFragmentHashes: Bool) throws {
         try seal.validate(info: info)
-        guard try Disk.hash(original) == seal.sourceHash else { throw ScribeError.message("Изменился оригинал записи") }
+        guard sourceDigest == seal.sourceHash else { throw ScribeError.message("Изменился оригинал записи") }
         let source = try AVAudioFile(forReading: original)
         guard source.length == seal.fragments.reduce(0, { $0 + $1.frames }),
               source.processingFormat.channelCount == 1, source.processingFormat.sampleRate == seal.fragments[0].sampleRate else {
@@ -79,7 +97,9 @@ public enum CaptureIntegrity {
         }
         for fragment in seal.fragments {
             let url = folder.appendingPathComponent(fragment.filename)
-            guard try Disk.hash(url) == fragment.sha256 else { throw ScribeError.message("Изменился фрагмент записи") }
+            if revalidateFragmentHashes {
+                guard try Disk.hash(url) == fragment.sha256 else { throw ScribeError.message("Изменился фрагмент записи") }
+            }
             let input = try AVAudioFile(forReading: url)
             guard input.length == fragment.frames, input.processingFormat == source.processingFormat,
                   let left = AVAudioPCMBuffer(pcmFormat: input.processingFormat, frameCapacity: 8192),

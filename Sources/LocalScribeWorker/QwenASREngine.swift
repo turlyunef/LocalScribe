@@ -84,18 +84,29 @@ final class QwenASREngine: ASREngine {
             throw ScribeError.message("Qwen пока поддерживает только готовые записи")
         }
         try ASRAudioInput.requireFormat(request.audioURL)
+        // One opened reader per request: the planning window and the padded read
+        // window decode through the same AVAudioFile instead of reopening it for
+        // every Media.samples call. The ms-to-frame math (16 samples per ms) is
+        // exact, and clamping to `finalFrame` reproduces Media.samples' tail
+        // clamping, so the available-length guard below keeps its meaning.
+        let pcm = try Media.PCMFrameReader(request.audioURL)
+        let finalFrame = min(pcm.frameCount, (request.availableEndMs - request.originMs) * 16)
+        func window(_ startMs: Int, _ endMs: Int) throws -> [Float] {
+            let lower = (startMs - request.originMs) * 16
+            let upper = min(finalFrame, (endMs - request.originMs) * 16)
+            guard lower < upper else { return [] }
+            return try pcm.read(lower..<upper)
+        }
         var result: [Segment] = []
         var start = request.coreRange.lowerBound
         while start < request.coreRange.upperBound {
             try Task.checkCancellation()
             let maximumEnd = min(start + 28_000, request.coreRange.upperBound)
-            let planning = try Media.samples(request.audioURL, start: Double(start - request.originMs) / 1000,
-                                              duration: Double(maximumEnd - start) / 1000)
+            let planning = try window(start, maximumEnd)
             let end = min(maximumEnd, start + Self.windowLengthMs(planning))
             let readStart = max(request.originMs, start - 250)
             let readEnd = min(request.availableEndMs, end + 250)
-            let samples = try Media.samples(request.audioURL, start: Double(readStart - request.originMs) / 1000,
-                                            duration: Double(readEnd - readStart) / 1000)
+            let samples = try window(readStart, readEnd)
             guard abs(samples.count - (readEnd - readStart) * 16) <= 16 else {
                 throw ScribeError.message("Аудио Qwen короче заявленного доступного диапазона")
             }

@@ -99,6 +99,18 @@ final class WhisperASREngine: ASREngine {
         guard !policy.reviewContext || contextReview != nil else {
             throw ScribeError.message("Для технического повтора нужен отдельный приёмник вариантов расшифровки")
         }
+        // One opened reader per request: planning and read windows decode through the
+        // same AVAudioFile instead of reopening it for every Media.samples call. The
+        // ms-to-frame math (16 samples per ms) is exact, and clamping to `finalFrame`
+        // reproduces Media.samples' tail clamping for every window and retry below.
+        let pcm = try Media.PCMFrameReader(wave)
+        let finalFrame = min(pcm.frameCount, (durationMs - originMs) * 16)
+        func window(_ startMs: Int, _ endMs: Int) throws -> [Float] {
+            let lower = (startMs - originMs) * 16
+            let upper = min(finalFrame, (endMs - originMs) * 16)
+            guard lower < upper else { return [] }
+            return try pcm.read(lower..<upper)
+        }
         var segments: [Segment] = []
         var offset = coreStart
         // Leave room for the transcript, timestamps and both seconds of PCM
@@ -108,11 +120,11 @@ final class WhisperASREngine: ASREngine {
         let checkDictionaryQuality = options.promptTokens != nil && !policy.reviewContext
         while offset < coreEnd {
             try Task.checkCancellation()
-            let planning = try Media.samples(wave, start: Double(offset-originMs)/1000, duration: Double(min(coreEnd-offset, maximumCoreMs))/1000)
+            let planning = try window(offset, min(coreEnd, offset + maximumCoreMs))
             let length = max(1, WhisperASRWindowing.nextASRWindowLength(planning, policy: policy.window) / 16)
             let end = min(coreEnd, offset + length)
             let readStart = max(originMs, offset - 1000), readEnd = min(durationMs, end + 1000)
-            let samples = try Media.samples(wave, start: Double(readStart-originMs)/1000, duration: Double(readEnd-readStart)/1000)
+            let samples = try window(readStart, readEnd)
             let energy = samples.reduce(0.0) { $0 + Double($1 * $1) } / Double(max(1, samples.count))
             metrics?.window(milliseconds: end - offset, silent: energy <= 1e-12)
             if energy > 1e-12 {
@@ -126,7 +138,7 @@ final class WhisperASREngine: ASREngine {
                     // of real context, retaining ownership of the missing prefix.
                     let retryEnd = min(durationMs, readStart + maximumInputMs)
                     let retryStart = max(originMs, retryEnd - maximumInputMs)
-                    let context = try Media.samples(wave, start: Double(retryStart-originMs)/1000, duration: Double(retryEnd-retryStart)/1000)
+                    let context = try window(retryStart, retryEnd)
                     let retried = try await decode(context, options: options, phase: .prefixRecovery)
                     if policy.reviewContext { recoveryContexts.append(retryStart..<retryEnd) }
                     let recovered = mappedSegments(retried, readStart: retryStart, start: offset, end: missingEnd, durationMs: durationMs)
@@ -151,7 +163,7 @@ final class WhisperASREngine: ASREngine {
                         // Restore the exact asr6 250 ms context heuristic so the
                         // matrix varies only window planning and gap recovery.
                         let gapStart = max(originMs, gap.lowerBound - 250), gapEnd = min(durationMs, gap.upperBound + 250)
-                        let context = try Media.samples(wave, start: Double(gapStart-originMs)/1000, duration: Double(gapEnd-gapStart)/1000)
+                        let context = try window(gapStart, gapEnd)
                         let retried = try await decode(context, options: options, phase: .gapRecovery)
                         if policy.reviewContext { recoveryContexts.append(gapStart..<gapEnd) }
                         let recovered = mappedSegments(retried, readStart: gapStart, start: gap.lowerBound, end: gap.upperBound, durationMs: durationMs)
@@ -178,8 +190,7 @@ final class WhisperASREngine: ASREngine {
                         if let cachedReview, cachedReview.range == range {
                             retried = cachedReview.results
                         } else {
-                            let context = try Media.samples(wave, start: Double(request.contextStartMs-originMs)/1000,
-                                duration: Double(request.contextEndMs-request.contextStartMs)/1000)
+                            let context = try window(request.contextStartMs, request.contextEndMs)
                             retried = try await decode(context, options: options, phase: .contextReview)
                             try Task.checkCancellation()
                             cachedReview = (range, retried)

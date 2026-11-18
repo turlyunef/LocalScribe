@@ -18,18 +18,21 @@ private func audioResidentBytes() -> UInt64 {
 }
 
 final class AudioMemoryTests: XCTestCase {
-    func testBoundedPCMReadingPreservesSamplesAndSelectedRange() throws {
+    private func writeSampleFixture(_ expected: [Float]) throws -> URL {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("wav")
-        defer { try? FileManager.default.removeItem(at: url) }
         let format = AVAudioFormat(standardFormatWithSampleRate: 16_000, channels: 1)!
+        let file = try AVAudioFile(forWriting: url, settings: format.settings)
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(expected.count))!
+        buffer.frameLength = buffer.frameCapacity
+        expected.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: $0.count) }
+        try file.write(from: buffer)
+        return url
+    }
+
+    func testBoundedPCMReadingPreservesSamplesAndSelectedRange() throws {
         let expected = (0..<100_003).map { Float($0 % 127) / 127 }
-        do {
-            let file = try AVAudioFile(forWriting: url, settings: format.settings)
-            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(expected.count))!
-            buffer.frameLength = buffer.frameCapacity
-            expected.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: $0.count) }
-            try file.write(from: buffer)
-        }
+        let url = try writeSampleFixture(expected)
+        defer { try? FileManager.default.removeItem(at: url) }
         XCTAssertEqual(try Media.samples(url), expected)
         XCTAssertEqual(try Media.samples(url, start: 1, duration: 2.5), Array(expected[16_000..<56_000]))
         XCTAssertEqual(try Media.samples(url, start: Double(expected.count) / 16_000), [])
@@ -38,6 +41,26 @@ final class AudioMemoryTests: XCTestCase {
         XCTAssertEqual(try reader.read(16_000..<56_000), Array(expected[16_000..<56_000]))
         XCTAssertEqual(try reader.read(56_000..<expected.count), Array(expected[56_000...]))
         XCTAssertThrowsError(try reader.read(0..<(expected.count + 1)))
+    }
+
+    /// The ASR engines convert millisecond windows to exact 16 kHz frame ranges and
+    /// clamp the tail to the available frames. Both readers must return identical
+    /// samples for every such range, including empty and end-of-file clamped ones.
+    func testEngineWindowFrameRangesMatchMediaSamplesClamping() throws {
+        let expected = (0..<100_003).map { Float($0 % 127) / 127 }
+        let url = try writeSampleFixture(expected)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let reader = try Media.PCMFrameReader(url)
+        let finalFrame = reader.frameCount
+        for (startMs, endMs) in [(0, 0), (0, 1_000), (250, 28_250), (6_000, 6_001),
+                                 (6_000, 90_000), (6_250, 6_250), (6_251, 6_251), (0, 6_250)] {
+            let lower = startMs * 16
+            let upper = min(finalFrame, endMs * 16)
+            let clamped: [Float] = lower < upper ? Array(expected[lower..<upper]) : []
+            XCTAssertEqual(try Media.samples(url, start: Double(startMs) / 1000,
+                                             duration: Double(endMs - startMs) / 1000), clamped)
+            XCTAssertEqual(lower < upper ? try reader.read(lower..<upper) : [Float](), clamped)
+        }
     }
 
     @MainActor

@@ -136,6 +136,34 @@ final class LiveCaptureTests: XCTestCase {
         XCTAssertFalse(FileManager.default.fileExists(atPath: capture.path))
         XCTAssertTrue(FileManager.default.fileExists(atPath: repo.run(m.id, info.id).appendingPathComponent("live/part-0.json").path))
     }
+    func testFinalizeFreshDigestVerificationKeepsChecksAndSealBytes() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, m, info, _) = try fixture(root)
+        let folder = repo.folder(m.id).appendingPathComponent("capture")
+        let original = repo.folder(m.id).appendingPathComponent(m.originalRelativePath)
+        // Replay the finalizeCapture sequence: assemble, hash the original once,
+        // build the seal from freshly read fragments, verify without re-reading
+        // the pinned digests. The seal must stay byte-identical to the one the
+        // fixture persisted through the re-hashing path.
+        let (frames, rate) = try Media.assembleCapture(folder, destination: original)
+        let hash = try Disk.hash(original)
+        let seal = CaptureSeal(info: info, sourceHash: hash, fragments: try CaptureIntegrity.fragments(at: folder))
+        XCTAssertEqual(seal.durationMs, Int(Double(frames) / rate * 1000))
+        try CaptureIntegrity.verify(seal, info: info, folder: folder, original: original, freshlyComputedSourceDigest: hash)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]; encoder.dateEncodingStrategy = .iso8601
+        XCTAssertEqual(try encoder.encode(seal),
+                       try Data(contentsOf: repo.run(m.id, info.id).appendingPathComponent("capture-seal.json")))
+        // A digest from different bytes is rejected even in the fresh-digest form.
+        XCTAssertThrowsError(try CaptureIntegrity.verify(seal, info: info, folder: folder, original: original,
+                                                         freshlyComputedSourceDigest: String(repeating: "0", count: 64)))
+        // Replacing fragment PCM with the same shape is still caught by the
+        // decoded-PCM comparison, which the fresh-digest form always performs.
+        try writeAudio(folder.appendingPathComponent("part-000000.caf"), seconds: 10, value: 0.5)
+        XCTAssertThrowsError(try CaptureIntegrity.verify(seal, info: info, folder: folder, original: original, freshlyComputedSourceDigest: hash))
+    }
+
     func testMalformedSealAndDifferentSessionAreRejected() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
