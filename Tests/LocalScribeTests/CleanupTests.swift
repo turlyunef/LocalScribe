@@ -185,6 +185,28 @@ final class CleanupTests: XCTestCase {
         XCTAssertTrue(try link.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink == true)
     }
 
+    func testCleanupIgnoresNonUUIDPendingRunIDOutsideArchive() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        var manifest = Manifest(sourceType: "microphone", title: "Keep", filename: "original.caf")
+        let original = repo.folder(manifest.id).appendingPathComponent(manifest.originalRelativePath)
+        try Disk.directory(original.deletingLastPathComponent()); try Data("original".utf8).write(to: original)
+        manifest.sha256 = try Disk.hash(original); manifest.sourceComplete = true
+        try Disk.directory(repo.folder(manifest.id).appendingPathComponent("runs"))
+        // A crafted manifest points the pending run outside the archive.
+        manifest.pendingRunId = "../../../outside"; try repo.save(manifest)
+        let capture = repo.folder(manifest.id).appendingPathComponent("capture/part-000000.caf")
+        try Disk.directory(capture.deletingLastPathComponent()); try Data("audio".utf8).write(to: capture)
+        try Disk.write(RunInfo(sourceHash: manifest.sha256, profileHash: ""),
+                       to: root.appendingPathComponent("outside/run.json"))
+
+        try repo.cleanupTemporaryFiles(manifest.id)
+
+        // An unreadable identifier keeps capture fragments instead of trusting the escaped run.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: capture.path))
+    }
+
     func testFailedCaptureAssemblyRemovesTemporaryButKeepsFragmentsAndOriginal() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

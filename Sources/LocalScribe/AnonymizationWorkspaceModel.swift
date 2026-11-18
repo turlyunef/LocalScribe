@@ -195,7 +195,9 @@ import LocalScribeCore
         }
         return L10n.text("Предел размера файла станет известен после выбора модели")
     }
-    static func sizeText(_ bytes: UInt) -> String {
+    // Nonisolated: the pre-read size gate of `readImportBytes` formats its
+    // rejection message off the main actor.
+    nonisolated static func sizeText(_ bytes: UInt) -> String {
         Int64(bytes).formatted(.byteCount(style: .file).locale(L10n.locale))
     }
 
@@ -266,7 +268,7 @@ import LocalScribeCore
             guard let format = AnonymizationSourceFormat.importFormat(pathExtension: url.pathExtension) else {
                 throw ScribeError.message("Неподдерживаемый формат файла. Допустимы TXT и Markdown.")
             }
-            let bytes = try await Self.readImportBytes(url)
+            let bytes = try await Self.readImportBytes(url, importLimit: model.anonymizationImportLimitBytes)
             try Task.checkCancellation()
             if let limit = model.anonymizationImportLimitBytes, UInt(bytes.count) > limit {
                 throw ScribeError.message("Файл больше предела для выбранной модели: размер \(Self.sizeText(UInt(bytes.count))) при пределе \(Self.sizeText(limit)).")
@@ -314,7 +316,8 @@ import LocalScribeCore
         catch { model.errorHandler.report(error, operation: .importText) }
     }
 
-    private static func readImportBytes(_ url: URL, forRestoration: Bool = false) async throws -> Data {
+    private static func readImportBytes(_ url: URL, forRestoration: Bool = false,
+                                        importLimit: UInt? = nil) async throws -> Data {
         do {
             return try await Task.detached(priority: .userInitiated) {
                 let accessed = url.startAccessingSecurityScopedResource()
@@ -323,6 +326,21 @@ import LocalScribeCore
                 defer { source.close() }
                 if forRestoration, source.size > AnonymizationRestoration.maximumImportFileBytes {
                     throw ScribeError.message("Текст для обратного преобразования слишком большой для карточки")
+                }
+                // Import checks the pinned size before reading: a file above
+                // the card ceiling — and the profile limit, when one is
+                // assigned — can never be committed, so it must not be fully
+                // loaded into memory first.
+                if !forRestoration {
+                    let size = source.size
+                    let ceiling = max(Int64(clamping: importLimit ?? 0),
+                                      Int64(clamping: AnonymizationInputLimit.maximumCardBytes))
+                    if size > ceiling {
+                        if let limit = importLimit {
+                            throw ScribeError.message("Файл больше предела для выбранной модели: размер \(Self.sizeText(UInt(clamping: size))) при пределе \(Self.sizeText(limit)).")
+                        }
+                        throw ScribeError.message("Файл слишком большой для хранения карточки: размер \(size) байт при пределе \(AnonymizationInputLimit.maximumCardBytes) байт")
+                    }
                 }
                 return try source.readBytes()
             }.value

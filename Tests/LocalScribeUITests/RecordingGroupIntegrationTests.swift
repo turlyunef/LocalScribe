@@ -227,6 +227,24 @@ final class RecordingGroupIntegrationTests: XCTestCase {
         await model.shutdown()
     }
 
+    func testDeleteSelectedConfirmationSeamCancelsThenDeletes() async throws {
+        let (repo, model) = try fixture()
+        let m = Manifest(sourceType: "import", title: "Row", filename: "a.wav")
+        try repo.save(m)
+        _ = try await model.archive?.refresh(m.id)
+        await model.reload()
+        model.selection = m.id
+        model.presentRecordingDeletionDialog = { false }
+        await model.deleteSelected()
+        XCTAssertEqual(model.recordings.map(\.id), [m.id])
+        model.presentRecordingDeletionDialog = { true }
+        await model.deleteSelected()
+        XCTAssertEqual(model.recordings.count, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: repo.folder(m.id).path))
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        await model.shutdown()
+    }
+
     func testImportBatchAndDelayedProvidersKeepDestinationAcrossDefaultChangesAndDuplicates() async throws {
         let (repo, model) = try fixture()
         try await model.saveGroupName("First")

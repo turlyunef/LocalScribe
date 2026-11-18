@@ -112,6 +112,17 @@ final class LiveCaptureTests: XCTestCase {
         var part = try Disk.read(LiveASRPart.self, at: tail); part.part.fingerprint = "wrong"; try Disk.write(part, to: tail)
         XCTAssertThrowsError(try repo.bindLiveTranscript(m.id, info: info))
     }
+    func testForgedRunIDIsRejectedBeforeAnyPathUse() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let (repo, m, info, seal) = try fixture(root, seconds: 1)
+        try writeParts(repo: repo, m: m, info: info, seal: seal)
+        var forged = info; forged.id = "../../outside"
+        XCTAssertThrowsError(try repo.bindLiveTranscript(m.id, info: forged)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("Некорректное незавершённое задание"))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("recordings").appendingPathComponent("outside").path))
+    }
     func testRecoveryRetainsLiveInputsUntilVerifiedBinding() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

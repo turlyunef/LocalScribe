@@ -60,9 +60,11 @@ import LocalScribeCore
         }
     }
     func cancel() {
-        (connection?.remoteObjectProxy as? ModelDownloadServiceProtocol)?.cancel()
+        // Error-handled proxy: plain remoteObjectProxy raises on a connection that died before invalidation cleared it.
+        (connection?.remoteObjectProxyWithErrorHandler({ _ in }) as? ModelDownloadServiceProtocol)?.cancel()
         finish(error: CancellationError()); connection?.invalidate(); connection = nil
     }
-    func releaseDownload() { (connection?.remoteObjectProxy as? ModelDownloadServiceProtocol)?.releaseDownload() }
+    // Both sends are best-effort; send errors (dead service) are safely ignored.
+    func releaseDownload() { (connection?.remoteObjectProxyWithErrorHandler({ _ in }) as? ModelDownloadServiceProtocol)?.releaseDownload() }
     func close() { cancel() }
 }

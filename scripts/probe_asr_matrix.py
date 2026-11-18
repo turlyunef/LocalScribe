@@ -258,10 +258,13 @@ def report(output, reference_path=None):
             "reviewedScore": total, "intervalScores": scores})
     for segment in reference["segments"]:
         clip = interval_audio(output, segment["startMs"], segment["endMs"])
-        reviews += [f"## {segment['id']} · {timecode(segment['startMs'])}–{timecode(segment['endMs'])}", "",
+        # Human-edited reference fields are untrusted Markdown: collapse line
+        # breaks so they cannot escape the heading/paragraph and add blocks.
+        identifier = " ".join(str(segment["id"]).split())
+        reviews += [f"## {identifier} · {timecode(segment['startMs'])}–{timecode(segment['endMs'])}", "",
                     f"![Аудио]({clip})", ""]
         if segment.get("verified") is True:
-            reviews += ["**Проверенный текст:** " + (segment["text"] or "[нет речи]"), ""]
+            reviews += ["**Проверенный текст:** " + (" ".join(segment["text"].split()) or "[нет речи]"), ""]
             if segment.get("wordBoundaryTruncated"):
                 reviews += ["Слово обрезано границей фрагмента; интервал исключён из суммарного WER.", ""]
         for label, transcript in transcripts.items():

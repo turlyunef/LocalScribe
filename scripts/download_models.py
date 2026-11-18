@@ -49,7 +49,15 @@ def download(dest, item):
             req = urllib.request.Request(url, headers={'Range': f'bytes={n}-'} if n else {})
             with urllib.request.urlopen(req, timeout=120) as response, path.open(
                     'ab' if n and response.status == 206 else 'wb') as fp:
+                received = n if n and response.status == 206 else 0
                 while data := response.read(8 * 1024 * 1024):
+                    # Cap the stream: a false or missing length from the source
+                    # must not fill the disk before valid_file runs after EOF.
+                    received += len(data)
+                    if received > file['size']:
+                        path.unlink()
+                        raise ValueError(
+                            f"{model['id']}/{file['localPath']}: stream exceeded catalog size")
                     fp.write(data)
             if not valid_file(path, file):
                 path.unlink()

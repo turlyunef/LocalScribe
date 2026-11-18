@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 import LocalScribeCore
 
 enum DiagnosticOperation: String, Codable, Sendable {
@@ -170,6 +171,7 @@ final class DiagnosticsJournal: @unchecked Sendable {
         var events: [DiagnosticEvent] = []
     }
 
+    private static let logger = Logger(subsystem: "local.localscribe.mac", category: "diagnostics")
     private let queue = DispatchQueue(label: "local.localscribe.mac.diagnostics")
     private let file: URL?
     private var history = History()
@@ -193,7 +195,12 @@ final class DiagnosticsJournal: @unchecked Sendable {
                 self.history.reports = Array(self.history.reports.suffix(30))
             }
             guard let file = self.file else { return }
-            try? Disk.write(self.history, to: file)
+            do {
+                try Disk.write(self.history, to: file)
+            } catch {
+                // Best-effort persistence: log the failure, never drop the in-memory history.
+                Self.logger.error("Could not persist diagnostic history: \(error.localizedDescription, privacy: .private)")
+            }
         }
     }
 

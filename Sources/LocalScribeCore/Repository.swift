@@ -97,8 +97,8 @@ public struct RecordingRepository: Sendable {
             guard catalog.models.first(where: { $0.purpose == .asr })?.supportsClosedFragments == true else {
                 throw ScribeError.message("Выбранная модель поддерживает только обработку готовой записи")
             }
-            guard !summaryOnly, !manifest.sourceComplete, manifest.state == .recording, manifest.sourceType == "microphone" else {
-                throw ScribeError.message("Фоновое распознавание требует незавершённой записи микрофона")
+            guard !summaryOnly, !manifest.sourceComplete, manifest.state == .recording, manifest.isCaptureRecording else {
+                throw ScribeError.message("Фоновое распознавание требует незавершённой записи")
             }
         }
         var info = RunInfo(sourceHash: manifest.sha256, profileHash: catalog.fingerprint, summaryLanguage: summaryLanguage)
@@ -183,6 +183,8 @@ public struct RecordingRepository: Sendable {
     /// Publish a final fingerprint only after proving the streamed PCM belongs to
     /// the completed, hashed original. Re-running this transaction is safe after a crash.
     public func bindLiveTranscript(_ id: String, info: RunInfo) throws -> RunInfo {
+        // Check before constructing a path from the persisted identifier.
+        guard UUID(uuidString: info.id) != nil else { throw ScribeError.message("Некорректное незавершённое задание") }
         let manifest = try load(id), path = run(id, info.id)
         let captureInfo = try Disk.read(RunInfo.self, at: path.appendingPathComponent("capture-run.json"))
         let seal = try Disk.read(CaptureSeal.self, at: path.appendingPathComponent("capture-seal.json"))
@@ -246,7 +248,11 @@ public struct RecordingRepository: Sendable {
         let original = recording.appendingPathComponent(manifest.originalRelativePath)
         // Live fragments are the verifiable input of unfinished checkpoints. A crash,
         // failure or cancellation must not remove them before the final ASR is bound.
-        let pending = manifest.pendingRunId.flatMap { try? Disk.read(RunInfo.self, at: run(id, $0).appendingPathComponent("run.json")) }
+        let pending = manifest.pendingRunId.flatMap { pendingRunId -> RunInfo? in
+            // Check before constructing a path from the persisted identifier.
+            guard UUID(uuidString: pendingRunId) != nil else { return nil }
+            return try? Disk.read(RunInfo.self, at: run(id, pendingRunId).appendingPathComponent("run.json"))
+        }
         var needsCapture = manifest.pendingRunId != nil && pending == nil
         if let pending, pending.liveCapture == true {
             let transcript = try? Disk.read(Transcript.self, at: run(id, pending.id).appendingPathComponent("asr-transcript.json"))

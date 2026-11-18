@@ -113,6 +113,23 @@ class ASRMatrixScoringTests(unittest.TestCase):
             probe.report(output)
             self.assertEqual(probe.read(output / "comparison.json")["qualityStatus"], "awaiting-reviewed-reference")
 
+    def test_reference_line_breaks_cannot_inject_block_markup_into_review_markdown(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = pathlib.Path(directory)
+            with probe.wave.open(str(output / "input.wav"), "wb") as audio:
+                audio.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                audio.writeframes(b"\x00\x00" * 16000)
+            probe.write(output / "input.json", {"sourceHash": "sha", "waveHash": probe.digest(output / "input.wav")})
+            probe.write(output / "reference.template.json", {"schemaVersion": 1, "sourceHash": "sha", "segments": [
+                {"id": "payment\n# Подделка", "startMs": 0, "endMs": 1000,
+                 "text": "речь\n\n# инъекция", "verified": True, "verifiedBy": "user"}]})
+            probe.report(output)
+            text = (output / "review.md").read_text(encoding="utf-8")
+            self.assertIn("## payment # Подделка · 00:00:00.000–00:00:01.000", text)
+            self.assertIn("**Проверенный текст:** речь # инъекция", text)
+            self.assertNotIn("\n# Подделка", text)
+            self.assertNotIn("\n# инъекция", text)
+
     def test_context_candidates_get_audio_and_separate_report_without_becoming_reference(self):
         with tempfile.TemporaryDirectory() as directory:
             output = pathlib.Path(directory)

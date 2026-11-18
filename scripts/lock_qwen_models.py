@@ -31,7 +31,7 @@ def lock_files(repository, revision, metadata, names):
         if digest is None:
             if size > 10_000_000:
                 raise ValueError('Missing published SHA-256 for large model file')
-            content = get(f'https://huggingface.co/{repository}/resolve/{revision}/{path}')
+            content = get(f'https://huggingface.co/{repository}/resolve/{revision}/{path}', immutable=True)
             if len(content) != size:
                 raise ValueError('Metadata size mismatch')
             digest = hashlib.sha256(content).hexdigest()

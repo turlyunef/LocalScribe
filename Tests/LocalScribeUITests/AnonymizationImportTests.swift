@@ -270,6 +270,23 @@ final class AnonymizationImportTests: XCTestCase {
         XCTAssertTrue(directories.pending.isEmpty, "журнал намерений в pending/ не пишется")
     }
 
+    /// Pre-read size gate (audit P2): without an assignment the pinned
+    /// `ImportSource.size` is checked against the card ceiling before
+    /// `readBytes()`, so a file that can never be committed is rejected
+    /// without being fully loaded into memory.
+    func testOversizedImportRejectedBeforeReadingWithoutAssignment() async throws {
+        let (_, model) = try makeModel()
+        let workspace = makeWorkspace(model)
+        let huge = try writeFile("huge.txt", Data(repeating: 0x41,
+                                                  count: Int(AnonymizationInputLimit.maximumCardBytes) + 1))
+        let reported = model.errorHandler.messages.count
+        workspace.importURLs([huge])
+        await model.importQueue.waitUntilIdle()
+        XCTAssertTrue(model.textCards.isEmpty)
+        XCTAssertEqual(Array(model.errorHandler.messages.dropFirst(reported)),
+                       ["Файл слишком большой для хранения карточки: размер \(AnonymizationInputLimit.maximumCardBytes + 1) байт при пределе \(AnonymizationInputLimit.maximumCardBytes) байт"])
+    }
+
     // MARK: - Duplicates (criterion 35)
 
     func testDuplicateResolutionOpenCopyCancelAndPreviousSurvivor() async throws {

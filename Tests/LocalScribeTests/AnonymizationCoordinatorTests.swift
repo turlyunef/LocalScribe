@@ -460,4 +460,40 @@ final class AnonymizationCoordinatorTests: XCTestCase {
         try await archive.rename(card.id, to: " Новое название ")
         XCTAssertEqual(try repo.loadCard(card.id).displayName, "Новое название")
     }
+
+    // MARK: - Editing during a live attempt
+
+    /// A live QUEUED/RUNNING attempt freezes its run input, and publication
+    /// validates the artifact against the current source: a source edit would
+    /// fail or misalign that attempt. The editor locks the panels (AC-38);
+    /// the coordinator enforces the same rule for direct callers and stale
+    /// UI snapshots. A restart interrupts the attempt and frees the editor.
+    func testEditSourceRejectedWhileAttemptIsQueuedOrRunning() async throws {
+        let repo = try makeRepository()
+        let archive = AnonymizationCoordinator(repository: repo)
+        let card = try await importCard(archive, name: "отчёт")
+        let original = try repo.loadCard(card.id)
+        try await archive.updateCard(card.id) { $0.latestAttempt.state = .queued }
+        do {
+            _ = try await archive.editSource(card.id, ScalarEdit(start: 0, end: 1, replacement: "X"))
+            XCTFail("Правка исходника при живой QUEUED-попытке обязана быть отклонена")
+        } catch {}
+        try await archive.updateCard(card.id) { card in
+            card.latestAttempt.state = .running
+            card.latestAttempt.input = RunInput(source: card.source, profileID: "profile",
+                                                packageID: "package", dataTypes: ["Имена и фамилии"])
+        }
+        do {
+            _ = try await archive.editSource(card.id, ScalarEdit(start: 0, end: 1, replacement: "X"))
+            XCTFail("Правка исходника при живой RUNNING-попытке обязана быть отклонена")
+        } catch {}
+        XCTAssertEqual(try repo.loadCard(card.id).source, original.source, "отклонённые правки не меняют документ")
+        // After a restart the live attempt is interrupted and the source is
+        // editable again, like after any finished outcome.
+        let restarted = AnonymizationCoordinator(repository: repo)
+        _ = try await restarted.recover()
+        XCTAssertEqual(try repo.loadCard(card.id).latestAttempt.state, .interrupted)
+        _ = try await restarted.editSource(card.id, ScalarEdit(start: 0, end: 1, replacement: "X"))
+        XCTAssertEqual(try repo.loadCard(card.id).source.text, "Xтчёт команды")
+    }
 }

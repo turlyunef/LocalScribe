@@ -156,6 +156,20 @@ class DownloadModelsTests(unittest.TestCase):
                 self.assertEqual({p.relative_to(final): p.read_bytes()
                                   for p in final.rglob('*') if p.is_file()}, before)
 
+    def test_oversized_stream_aborts_and_leaves_no_partial_files(self):
+        final = self.prepare_final('empty')
+        oversized = b'x' * (self.model['files'][0]['size'] + 1024)
+        self.source.side_effect = lambda *a, **kw: io.BytesIO(oversized)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), self.assertRaises(SystemExit) as caught:
+            self.run_cli()
+        self.assertEqual(caught.exception.code, 1)
+        self.assertIn('stream exceeded catalog size', errors.getvalue())
+        partial = self.dest / (self.model['id'] + '.partial')
+        self.assertFalse([p for p in partial.rglob('*') if p.is_file()])
+        self.assertFalse((self.dest / 'catalog.json').exists())
+        self.assertEqual(list(final.iterdir()), [])
+
     def test_network_failure_keeps_existing_catalog_and_verified_partial(self):
         self.prepare_final('empty')
         catalog_path = self.dest / 'catalog.json'

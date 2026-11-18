@@ -20,7 +20,8 @@ public enum Disk {
     }
     public static func read<T: Decodable>(_ type: T.Type, at url: URL) throws -> T {
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize
-        guard size.map({ $0 <= maximumJSONBytes }) == true else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
+        // Unknown size (missing or unavailable metadata) falls through to the data.count check below.
+        if let size, size > maximumJSONBytes { throw ScribeError.message("Файл JSON превышает допустимый размер") }
         let data = try Data(contentsOf: url, options: .mappedIfSafe)
         guard data.count <= maximumJSONBytes else { throw ScribeError.message("Файл JSON превышает допустимый размер") }
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
@@ -48,7 +49,10 @@ public enum Disk {
     public static func fingerprint(_ text: String) -> String { SHA256.hash(data: Data(text.utf8)).map { String(format: "%02x", $0) }.joined() }
     public static func requireSpace(_ bytes: Int64, at url: URL) throws {
         let values = try url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-        guard (values.volumeAvailableCapacityForImportantUsage ?? 0) > bytes else { throw ScribeError.message("Недостаточно свободного места. Требуется ещё \(bytes / 1_000_000) МБ.") }
+        // An unavailable capacity metric must not block the import; real exhaustion surfaces from the write itself.
+        if let available = values.volumeAvailableCapacityForImportantUsage, available <= bytes {
+            throw ScribeError.message("Недостаточно свободного места. Требуется ещё \(bytes / 1_000_000) МБ.")
+        }
     }
 }
 public enum Stage: String, Codable, Sendable { case preparingAudio, transcribing, diarizing, summarizing }
@@ -94,9 +98,18 @@ public struct Manifest: Codable, Identifiable, Sendable {
     public var captureProcessing: JobState?
     public var warnings: [String] = []
     public var lastError: String?
+    /// True for manifests created by in-app capture regardless of the enabled
+    /// source combination; imports and technical fixtures are not live recordings.
+    public var isCaptureRecording: Bool { Self.isCaptureSourceType(sourceType) }
+    private static func isCaptureSourceType(_ sourceType: String) -> Bool {
+        switch sourceType {
+        case "microphone", "systemAudio", "microphone+systemAudio": return true
+        default: return false
+        }
+    }
     public init(sourceType: String, title: String, filename: String) {
         id = UUID().uuidString; self.sourceType = sourceType; displayTitle = title; createdAt = Date()
-        recordedAt = sourceType == "microphone" ? createdAt : nil
+        recordedAt = Self.isCaptureSourceType(sourceType) ? createdAt : nil
         originalFilename = filename; originalRelativePath = "source/original.\((filename as NSString).pathExtension.lowercased())"
     }
 }

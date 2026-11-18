@@ -460,8 +460,11 @@ actor AnonymizationEngine {
                 } else {
                     for range in answer.unanchoredLineRanges {
                         let span = (window.lowerBound + range.lowerBound)..<(window.lowerBound + range.upperBound)
-                        // Context padding belongs to the neighbouring core;
-                        // a line wholly inside it is reported by that window.
+                        // Context padding belongs to the neighbouring core; a line wholly inside
+                        // it is reported by that window. The empty intersection is skipped before
+                        // the clamp: max..<min of disjoint ranges would build an inverted Range
+                        // and trap the worker.
+                        guard span.lowerBound < core.upperBound, span.upperBound > core.lowerBound else { continue }
                         let clamped = Swift.max(core.lowerBound, span.lowerBound)..<Swift.min(core.upperBound, span.upperBound)
                         if !clamped.isEmpty { unverifiedSpans.append(clamped) }
                     }

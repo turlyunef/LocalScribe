@@ -1030,7 +1030,12 @@ struct QueueJobID: Hashable, Sendable {
             } else {
                 microphone = nil
             }
-            let manifest = Manifest(sourceType: "microphone", title: L10n.text("Запись %1$@", Date().formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale))), filename: "original.caf")
+            // The manifest reflects the reserved source configuration; later capture
+            // degradation (e.g. mic failure) is recorded as a warning instead.
+            let sourceType = microphone != nil
+                ? (preferences.systemAudioEnabled ? "microphone+systemAudio" : "microphone")
+                : "systemAudio"
+            let manifest = Manifest(sourceType: sourceType, title: L10n.text("Запись %1$@", Date().formatted(Date.FormatStyle(date: .abbreviated, time: .shortened, locale: L10n.locale))), filename: "original.caf")
             startingGroupID = destination
             startingRecordingID = manifest.id
             startingRecording = true
@@ -2038,11 +2043,22 @@ struct QueueJobID: Hashable, Sendable {
         }
         await reload()
     }
+    /// Deletion confirmation of the selected recording. Presented
+    /// synchronously; tests override this seam.
+    var presentRecordingDeletionDialog: () -> Bool = { AppModel.runRecordingDeletionAlert() }
+
+    private static func runRecordingDeletionAlert() -> Bool {
+        let alert = NSAlert()
+        alert.messageText = L10n.text("Удалить запись и результаты?")
+        alert.informativeText = L10n.text("Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся.")
+        alert.addButton(withTitle: L10n.text("Удалить запись"))
+        alert.addButton(withTitle: L10n.text("Отмена"))
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
     func deleteSelected() async {
         guard let selected, archive != nil, canDeleteSidebarRecordings([selected.id]), !finalizingRecording else { return }
-        let alert = NSAlert(); alert.messageText = L10n.text("Удалить запись и результаты?"); alert.informativeText = L10n.text("Будут удалены только копия аудио и результаты в LocalScribe. Внешний оригинал и ваши экспорты сохранятся.")
-        alert.addButton(withTitle: L10n.text("Удалить запись")); alert.addButton(withTitle: L10n.text("Отмена"))
-        guard alert.runModal() == .alertFirstButtonReturn, !finalizingRecording else { return }
+        guard presentRecordingDeletionDialog(), !finalizingRecording else { return }
         await deleteSidebarRecordings([selected.id])
     }
     var sidebarRecordingOrder: [String] {
@@ -2945,6 +2961,7 @@ struct QueueJobID: Hashable, Sendable {
         do { card = try await textArchive.loadCard(cardID) }
         catch { errorHandler.report(error); return }
         guard ![AnonymizationAttemptState.queued, .running].contains(card.latestAttempt.state) else { return }
+        let attemptID = card.latestAttempt.id
         let expected: String?
         if let result = card.publishedResult {
             guard result.text.id == result.generatedText.id || confirmingResultRevisionID == result.text.id else {
@@ -2958,6 +2975,11 @@ struct QueueJobID: Hashable, Sendable {
             settings: effectiveAnonymizationSettings, catalog: catalog, hardware: hardware)
         do {
             _ = try await textArchive.updateCard(cardID) { card in
+                // The readiness await above can admit the same attempt through
+                // a parallel wake; a queued/running or replaced attempt must
+                // not be overwritten by a fresh waiting one.
+                guard card.latestAttempt.id == attemptID,
+                      ![AnonymizationAttemptState.queued, .running].contains(card.latestAttempt.state) else { return }
                 card.latestAttempt = AnonymizationAttempt(
                     state: .waitingModel,
                     // The snapshot survives only in a retry that never waits.
@@ -3075,6 +3097,8 @@ struct QueueJobID: Hashable, Sendable {
         _ = await errorHandler.journal.snapshot()
     }
     /// Explicit developer mode: short real input test, no models/archive, audio deleted.
+    /// Main-actor file I/O is intentional: unattended CLI probe with bounded work
+    /// (small JSON reports, assembling 12 s of PCM) that terminates the process.
     private func microphoneSelfCheck() async {
         guard let repository else { return }
         let base = repository.root.appendingPathComponent("diagnostics")
@@ -3121,6 +3145,9 @@ struct QueueJobID: Hashable, Sendable {
     }
     /// Developer diagnostic. Exercises the actual signed parent -> worker -> ffmpeg chain.
     /// Synthetic silence lives under diagnostics, never in the user's archive.
+    /// Main-actor I/O is intentional and bounded (small JSON reports, ffprobe/SHA over
+    /// a bundled probe); heavy model copies run on the ModelInstaller actor, and the
+    /// probe terminates the app, so UI impact is moot.
     private func sandboxSelfCheck() async {
         guard let repository, let catalog else { NSApplication.shared.terminate(nil); return }
         let diagnostics = repository.root.appendingPathComponent("diagnostics")

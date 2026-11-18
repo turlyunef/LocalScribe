@@ -30,16 +30,19 @@ def write_catalog(path, catalog):
     atomic_write(path, (json.dumps(catalog, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
 
 
-def get(url):
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
+
+def get(url, *, immutable=False, max_bytes=MAX_RESPONSE_BYTES):
+    """Fetch url, caching it forever only when the caller pins an immutable revision."""
     cache = CACHE / hashlib.sha256(url.encode()).hexdigest()
-    immutable = "/resolve/" in url
     if immutable and cache.is_file():
         return cache.read_bytes()
 
     for attempt in range(4):
         try:
             with urllib.request.urlopen(url, timeout=60) as response:
-                data = response.read()
+                data = _read_bounded(response, url, max_bytes)
             break
         except (urllib.error.URLError, TimeoutError):
             if attempt == 3:
@@ -49,3 +52,16 @@ def get(url):
         CACHE.mkdir(parents=True, exist_ok=True)
         atomic_write(cache, data)
     return data
+
+
+def _read_bounded(response, url, max_bytes):
+    chunks = []
+    received = 0
+    while True:
+        chunk = response.read(65536)
+        if not chunk:
+            return b''.join(chunks)
+        received += len(chunk)
+        if received > max_bytes:
+            raise ValueError(f'{url}: response exceeds the {max_bytes}-byte read limit')
+        chunks.append(chunk)

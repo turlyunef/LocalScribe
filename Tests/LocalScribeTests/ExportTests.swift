@@ -65,6 +65,15 @@ final class ExportTests: XCTestCase {
         XCTAssertEqual(segment.endMs, 77_000)
     }
 
+    func testMarkdownCollapsesSegmentLineBreaksAndEscapesBackticks() {
+        let segment = Segment(id: "multiline", startMs: 1000, endMs: 2000,
+                              text: "Строка\n- пункт\n1. `код`", language: "ru")
+        XCTAssertEqual(ExportService.renderSegment(segment, markdown: false),
+                       "[00:00:01] Спикер не определён\nСтрока\n- пункт\n1. `код`\n\n")
+        XCTAssertEqual(ExportService.renderSegment(segment, markdown: true),
+                       "[00:00:01] Спикер не определён\nСтрока - пункт 1. \\`код\\`\n\n")
+    }
+
     func testSummaryEvidenceKeepsStartTimeWithoutIncludingTranscript() {
         let manifest = Manifest(sourceType: "import", title: "Встреча", filename: "meeting.wav")
         let transcript = Transcript(fingerprint: "f", diarized: true, segments: [

@@ -63,7 +63,7 @@ for key, role, name, repo, prefix, license, ram, working, tokenizer in profiles:
             digest = lfs.get('sha256')
             if not digest:
                 print('metadata', key, path, flush=True)
-                data = get(f'https://huggingface.co/{repo}/resolve/{revision}/{path}')
+                data = get(f'https://huggingface.co/{repo}/resolve/{revision}/{path}', immutable=True)
                 if len(data) != item['size']: raise ValueError(f'Wrong size: {path}')
                 digest = hashlib.sha256(data).hexdigest()
             return {'path': path, 'localPath': path[len(prefix):] if prefix else path,

@@ -111,7 +111,7 @@ actor SummaryEngine {
         while topics.count > 10 {
             var batches: [[Finding]] = [], batch: [Finding] = [], size = 0
             for finding in topics {
-                let text = String(data: try encoder.encode(finding), encoding: .utf8)!
+                let text = String(decoding: try encoder.encode(finding), as: UTF8.self)
                 let count = await container.perform { $0.tokenizer.encode(text: text).count }
                 if size + count > 3200 && !batch.isEmpty { batches.append(batch); batch = []; size = 0 }
                 batch.append(finding); size += count
@@ -119,7 +119,7 @@ actor SummaryEngine {
             if !batch.isEmpty { batches.append(batch) }
             var reduced: [Finding] = []
             for (index, findings) in batches.enumerated() {
-                let content = String(data: try encoder.encode(findings), encoding: .utf8)!
+                let content = String(decoding: try encoder.encode(findings), as: UTF8.self)
                 let fingerprint = Disk.fingerprint(sourceHash + content + "reduce\(level)")
                 let path = run.appendingPathComponent("summary-parts/reduce-\(level)-\(index).json")
                 if let saved = try? Disk.read(SummaryCheckpoint.self, at: path), saved.fingerprint == fingerprint, (try? saved.summary.validate(against: transcript)) != nil {
@@ -137,7 +137,7 @@ actor SummaryEngine {
         ledger.tasks = try await verify(ledger.tasks, kind: "task", source: source, container: container, language: language, sourceHash: sourceHash)
         let questionModel = reviewModel(container, kind: "question")
         ledger.openQuestions = try await SummaryQuestionResolution.unresolved(ledger.openQuestions, transcript: transcript, tokenCounts: source.tokenCounts) { pass in
-            let candidate = String(data: try encoder.encode(pass.question), encoding: .utf8)!
+            let candidate = String(decoding: try encoder.encode(pass.question), as: UTF8.self)
             let original = try source.context(pass.original)
             let later = try source.context(pass.later)
             let fingerprint = Disk.fingerprint(sourceHash + candidate + original + later + "question-resolution-v2")
@@ -190,7 +190,7 @@ actor SummaryEngine {
             emit("progress", "Проверяем основания: \(kind == "task" ? "задачи" : "решения") \(index+1) из \(findings.count)", nil)
             let evidence = source.evidenceContext(for: finding)
             let context = try source.context(evidence)
-            let encoded = String(data: try encoder.encode(finding), encoding: .utf8)!
+            let encoded = String(decoding: try encoder.encode(finding), as: UTF8.self)
             let fingerprint = Disk.fingerprint(sourceHash + encoded + context + kind)
             let path = run.appendingPathComponent("summary-parts/verify-\(kind)-\(index).json")
             let result: Summary
@@ -214,7 +214,7 @@ actor SummaryEngine {
             // may silently omit the end of a long meeting. Checkpoints bound repeated work.
             let laterGroups = source.laterGroups(after: acceptedFinding)
             for (partIndex, laterGroup) in laterGroups.enumerated() where !accepted.isEmpty {
-                let candidateText = String(data: try encoder.encode(accepted), encoding: .utf8)!
+                let candidateText = String(decoding: try encoder.encode(accepted), as: UTF8.self)
                 let laterText = try source.context(laterGroup)
                 let reviewEvidence = source.evidenceContext(for: accepted[0])
                 let reviewContext = try source.context(reviewEvidence)
@@ -384,7 +384,7 @@ actor SummaryEngine {
             shape = "ALL FOUR sections, including overview, MUST be arrays of finding objects, never strings."
         }
         let schemaObject: [String:Any] = ["type":"object","additionalProperties":false, "required":required, "properties":properties]
-        let schemaJSON = String(data: try JSONSerialization.data(withJSONObject:schemaObject,options:[.sortedKeys]),encoding:.utf8)!
+        let schemaJSON = String(decoding: try JSONSerialization.data(withJSONObject: schemaObject, options: [.sortedKeys]), as: UTF8.self)
         let schema = """
         You extract meeting facts. \(shape) Return one JSON object conforming exactly to this JSON Schema:
         \(schemaJSON)

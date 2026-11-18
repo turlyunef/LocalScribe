@@ -551,6 +551,31 @@ final class AnonymizationEngineTests: XCTestCase {
                        "без пригодной строки сомнительно всё окно целиком")
     }
 
+    /// A reported unanchored line may lie wholly inside the 96-scalar context
+    /// padding outside the core: clamping disjoint ranges used to construct an
+    /// inverted Range and trap the worker. Such a line belongs to the
+    /// neighbouring core window, and that window still doubts exactly it.
+    func testUnanchoredLineWhollyInContextPaddingIsSkippedNotTrapped() async throws {
+        // 1400-scalar headless line, then a short line, then a tail: the first
+        // core window ends right before the tail, so the short line sits
+        // entirely in the second window's left padding.
+        let head = String(repeating: "данные ", count: 200)
+        let shortLine = "Короткая строка"
+        let text = head + "\n\n" + shortLine + "\n\n" + String(repeating: "продолжение ", count: 30)
+        let recognizer = ScriptedRecognizer(markers: [])
+        recognizer.unanchoredReport = (Names.personType, 3)
+        let (engine, _) = try makeEngine(text: text, dataTypes: [Names.personType], recognizer: recognizer)
+        let outcome = try await engine.run()
+        let result = outcome.artifact.result
+        XCTAssertEqual(result.bodyReplacementCount, 0, "непривязанное значение не подставляется")
+        let doubtful = result.warnings.filter { $0.kind == .doubtfulFragment && $0.target == .body }
+        XCTAssertEqual(doubtful.count, 1, "строка из паддинга не добавляет отдельное сомнение")
+        let start = head.unicodeScalars.count + 2
+        XCTAssertEqual(doubtful.first?.inputRange,
+                       TextRange(start: UInt(start), end: UInt(start + shortLine.unicodeScalars.count)),
+                       "сомнительной остаётся строка из core-окна, которому она принадлежит")
+    }
+
     func testOuterDoubtPartialOverlapAndTypeConflictPreservedWithWarnings() async throws {
         let text = """
         Пишите на ivan.ivanov@example.org.

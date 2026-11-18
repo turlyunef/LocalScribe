@@ -105,6 +105,24 @@ final class SpeechRecognizerTests: XCTestCase {
         ])
     }
 
+    func testWhisperNonFiniteTimestampsAreDroppedInsteadOfTrapping() {
+        let engine = WhisperASREngine { _, _ in [] }
+        let raw = result([("keep", 1.3, 1.5)])
+        // Non-finite word time with finite segment bounds drops only the word;
+        // a wordless segment with non-finite bounds is dropped whole. Both
+        // previously trapped the worker in Int().
+        raw[0].segments.append(contentsOf: [
+            TranscriptionSegment(id: 1, start: 0.6, end: 0.8, text: "nan",
+                words: [WordTiming(word: "nan", tokens: [], start: .nan, end: 0.8, probability: 1)]),
+            TranscriptionSegment(id: 2, start: .infinity, end: .infinity, text: "inf", words: nil)
+        ])
+        let mapped = engine.mappedSegments(raw, readStart: 60000, start: 60000, end: 62000, durationMs: 62000)
+        XCTAssertEqual(mapped, [
+            Segment(id: "tmp", startMs: 61300, endMs: 61500, text: "keep", language: "en",
+                words: [Word(text: "keep", startMs: 61300, endMs: 61500)])
+        ])
+    }
+
     func testWindowMetricsIncludeContextAndSDKInferenceButNoTranscript() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

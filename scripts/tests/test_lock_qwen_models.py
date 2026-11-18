@@ -10,7 +10,7 @@ spec.loader.exec_module(lock)
 class LockQwenModelsTests(unittest.TestCase):
     def test_lfs_digest_does_not_download_weights(self):
         original = lock.get
-        lock.get = lambda _: self.fail('Weights must never be fetched by the catalog generator')
+        lock.get = lambda *_args, **_kwargs: self.fail('Weights must never be fetched by the catalog generator')
         try:
             files = lock.lock_files('fixture/local', 'fixed', {'siblings': [
                 dict(rfilename='model.safetensors', size=42, lfs={'sha256': 'a' * 64})]}, {'model.safetensors'})

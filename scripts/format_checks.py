@@ -88,7 +88,9 @@ def main():
         results = [check(pathlib.Path(temporary), *case) for case in CASES]
     report = ROOT / 'TestResults/format-checks.json'
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(json.dumps(results, indent=2, ensure_ascii=False))
+    temporary = report.with_name(report.name + '.tmp')
+    temporary.write_text(json.dumps(results, indent=2, ensure_ascii=False))
+    temporary.replace(report)
     print(json.dumps(results, indent=2, ensure_ascii=False))
     return 0 if all(row['passed'] for row in results) else 1
 

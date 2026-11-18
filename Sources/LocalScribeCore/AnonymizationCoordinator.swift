@@ -141,8 +141,14 @@ public actor AnonymizationCoordinator {
     /// Text edit of the left panel: the pure pair transformation and the new
     /// source revision commit as one atomic document write. Warnings and the
     /// substitution history stay untouched; an edit never starts an attempt.
+    /// Rejected while the latest attempt is queued or running: its run input
+    /// is frozen, and publication validates the artifact against the current
+    /// source, so an edit would fail that attempt (AC-38).
     @discardableResult public func editSource(_ id: String, _ edit: ScalarEdit) throws -> AnonymizationCardDocument {
         try updateCard(id) { card in
+            guard card.latestAttempt.state != .queued, card.latestAttempt.state != .running else {
+                throw ScribeError.message("Дождитесь завершения обезличивания")
+            }
             card = try AnonymizationEditing.editSource(card, edit)
         }
     }

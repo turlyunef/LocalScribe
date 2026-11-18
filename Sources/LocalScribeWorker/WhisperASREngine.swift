@@ -236,9 +236,12 @@ final class WhisperASREngine: ASREngine {
                 if s.noSpeechProb > 0.6 && s.avgLogprob < -1 { continue }
                 let uncertain = s.avgLogprob < -1 || s.compressionRatio > 2.4 || s.noSpeechProb > 0.6
                 let hadWords = !(s.words ?? []).isEmpty
-                var words = (s.words ?? []).map { Word(text: $0.word, startMs: max(0, min(durationMs, readStart + Int($0.start * 1000))), endMs: max(0, min(durationMs, readStart + Int($0.end * 1000)))) }
+                // DTW alignment can emit NaN/Infinity on degenerate audio;
+                // non-finite timestamps are dropped instead of trapping Int().
+                var words = (s.words ?? []).filter { $0.start.isFinite && $0.end.isFinite }.map { Word(text: $0.word, startMs: max(0, min(durationMs, readStart + Int($0.start * 1000))), endMs: max(0, min(durationMs, readStart + Int($0.end * 1000)))) }
                 words = words.filter { let mid = ($0.startMs + $0.endMs) / 2; return mid >= offset && mid < end }
                 if hadWords && words.isEmpty { continue }
+                guard s.start.isFinite, s.end.isFinite else { continue }
                 if !hadWords {
                     let midpoint = readStart + Int((s.start + s.end) * 500)
                     if midpoint < offset || midpoint >= end { continue }

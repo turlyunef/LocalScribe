@@ -43,7 +43,7 @@ extension RecordingRepository {
         let live = info.liveCapture == true && info.sourceHash == "capture:" + selected
         if live {
             guard manifest.activeRunId == nil, manifest.pendingRunId == selected,
-                  manifest.sourceType == "microphone" else { throw invalidResult() }
+                  manifest.isCaptureRecording else { throw invalidResult() }
             let capture = try Disk.read(RunInfo.self, at: path.appendingPathComponent("capture-run.json"))
             try validateResultRun(capture, id: selected)
             guard capture.liveCapture == true, capture.sourceHash == info.sourceHash,

@@ -38,9 +38,9 @@ else:
      sampleRate=float(audio['sample_rate']), channels=audio['channels'], sourceComplete=True, state='queued', pendingRunId=runid, warnings=[])
     (folder/'manifest.json').write_text(json.dumps(manifest))
     run = folder/'runs'/runid; run.mkdir(parents=True)
-    catalog = json.loads(pathlib.Path('Resources/models.lock.json').read_text())
+    catalog = json.loads((ROOT / 'Resources/models.lock.json').read_text())
     profile = hashlib.sha256(':'.join(m['revision'] for m in catalog['models']).encode()).hexdigest()
-    pipeline_version = re.search(r'public var pipelineVersion = "([^"]+)"', pathlib.Path('Sources/LocalScribeCore/Contracts.swift').read_text()).group(1)
+    pipeline_version = re.search(r'public var pipelineVersion = "([^"]+)"', (ROOT / 'Sources/LocalScribeCore/Contracts.swift').read_text()).group(1)
     (run/'run.json').write_text(json.dumps(dict(schemaVersion=1,id=runid,sourceHash=digest,profileHash=profile,pipelineVersion=pipeline_version,createdAt=now)))
 results = []
 for stage in args.stages.split(','):

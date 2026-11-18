@@ -20,15 +20,29 @@ public struct RenderedExport: Sendable, Equatable {
 }
 
 public enum ExportService {
+    /// Untrusted text must stay on one rendered line: embedded line breaks
+    /// would otherwise forge markdown structure (lists, code blocks). Same
+    /// policy as DiagramExport.singleLine.
+    private static func singleLine(_ text: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars { scalars.append(isControl(scalar) ? " " : scalar) }
+        return String(scalars)
+    }
+
+    private static func isControl(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.value < 0x20 || (0x7f...0x9f).contains(scalar.value)
+            || scalar.value == 0x2028 || scalar.value == 0x2029
+    }
+
     private static func clean(_ text: String, markdown: Bool) -> String {
         guard markdown else { return text }
-        return text.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "*", with: "\\*").replacingOccurrences(of: "_", with: "\\_").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "#", with: "\\#").replacingOccurrences(of: "|", with: "\\|")
+        return singleLine(text).replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "`", with: "\\`").replacingOccurrences(of: "*", with: "\\*").replacingOccurrences(of: "_", with: "\\_").replacingOccurrences(of: "[", with: "\\[").replacingOccurrences(of: "]", with: "\\]").replacingOccurrences(of: "<", with: "&lt;").replacingOccurrences(of: ">", with: "&gt;").replacingOccurrences(of: "#", with: "\\#").replacingOccurrences(of: "|", with: "\\|")
     }
 
     public static func renderSegment(_ segment: Segment, markdown: Bool) -> String {
         let speaker = segment.overlap ? L10n.text("Несколько голосов") : speakerName(segment.speakerId)
         let uncertainty = segment.uncertain ? L10n.text(" — сомнительный участок") : ""
-        return "[\(timecode(segment.startMs))] \(speaker)\(uncertainty)\n\(clean(segment.text.trimmingCharacters(in: .whitespacesAndNewlines), markdown: markdown))\n\n"
+        return "[\(timecode(segment.startMs))] \(clean(speaker, markdown: markdown))\(uncertainty)\n\(clean(segment.text.trimmingCharacters(in: .whitespacesAndNewlines), markdown: markdown))\n\n"
     }
 
     public static func render(manifest m: Manifest, transcript t: Transcript?, summary s: Summary?, part: ExportPart = .all, markdown: Bool) -> String {

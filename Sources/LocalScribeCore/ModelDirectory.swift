@@ -50,7 +50,8 @@ final class ModelDirectory {
             guard let child = try directory.child(name, create: create) else { return nil }
             directory = child
         }
-        return (directory, parts.last!)
+        guard let name = parts.last else { throw Self.unsafePath }
+        return (directory, name)
     }
 
     func read(_ name: String) throws -> FileHandle? {
