@@ -25,6 +25,8 @@ import LocalScribeCore
         case idle, loading, ready, failed(String)
     }
 
+    private static let maximumSeekError = 0.05
+
     @Published private(set) var state = State.idle
     @Published private(set) var position: Double?
     @Published private(set) var duration = 0.0
@@ -48,6 +50,7 @@ import LocalScribeCore
     private var notificationObservers: [NSObjectProtocol] = []
     private var timeObserver: Any?
     private var seekID: UUID?
+    private var lastCompletedSeekTarget: Double?
     private var openID: UUID?
     private var fileTasks: [UUID: Task<Void, Never>] = [:]
     private var visibleCards: Set<UUID> = []
@@ -215,6 +218,7 @@ import LocalScribeCore
         guard let player, let item = player.currentItem else { return }
         let request = UUID()
         seekID = request
+        lastCompletedSeekTarget = nil
         player.pause()
         item.cancelPendingSeeks()
         let seconds = position ?? 0
@@ -224,10 +228,11 @@ import LocalScribeCore
                 guard let self, self.seekID == request else { return }
                 self.seekID = nil
                 let time = player.currentTime().seconds
-                guard finished, time.isFinite, abs(time - seconds) < 0.05 else {
+                guard finished, time.isFinite, abs(time - seconds) < Self.maximumSeekError else {
                     self.recover()
                     return
                 }
+                self.lastCompletedSeekTarget = seconds
                 if !self.skipCurrentPause(), self.isPlaying { player.rate = self.speed }
             }
         }
@@ -237,6 +242,11 @@ import LocalScribeCore
     private func skipCurrentPause() -> Bool {
         guard skipsPauses, isPlaying, state == .ready, seekID == nil,
               let position, let next = pauseIndex.nextSpeech(at: position), next < duration else { return false }
+        // A successful precise seek may leave the clock just before its target.
+        // Let playback cross that boundary instead of seeking there every tick.
+        if next == lastCompletedSeekTarget, next - position < Self.maximumSeekError {
+            return false
+        }
         seek(to: next)
         return true
     }
@@ -261,6 +271,7 @@ import LocalScribeCore
 
     private func releasePlayer() {
         seekID = nil
+        lastCompletedSeekTarget = nil
         statusObserver?.invalidate()
         statusObserver = nil
         notificationObservers.forEach(NotificationCenter.default.removeObserver)

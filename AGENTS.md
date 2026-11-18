@@ -25,10 +25,10 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 | Задача | Точная команда | Статус |
 | --- | --- | --- |
 | Release executable targets | `swift build -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 в составе упаковки 2.20.0 со статическим runtime GigaAM |
-| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 17.11.2026 — 959 XCTest (341 Core, 353 UI/service, 265 worker/диаризация), 0 ошибок, 19 опциональных пропусков |
-| Один тест | `swift test -c release -j 4 --force-resolved-versions --filter RecordingPlaybackTests/testSummaryStartsPlaybackAndTranscriptClickPreservesPause` | проверено 17.11.2026 — 1 тест, 0 ошибок. Формат фильтра — `Suite/test` без имени target |
-| Python-проверки скриптов | `python3 -m unittest discover -s scripts/tests -v` | проверено 17.11.2026 в составе статической проверки — 78 тестов, 0 ошибок, локальные фикстуры без весов и сети |
-| Статические проверки CI | `bash scripts/verify.sh --static` | проверено 17.11.2026 — оба plist валидны, 78 Python-тестов, включая согласованность версии |
+| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 18.11.2026 — 961 XCTest (341 Core, 355 UI/service, 265 worker/диаризация), 0 ошибок, 19 опциональных пропусков |
+| Один тест | `swift test -c release -j 4 --force-resolved-versions --filter RecordingPlaybackTests/testSummaryStartsPlaybackAndTranscriptClickPreservesPause` | проверено 18.11.2026 — 1 тест, 0 ошибок. Формат фильтра — `Suite/test` без имени target |
+| Python-проверки скриптов | `python3 -m unittest discover -s scripts/tests -v` | проверено 18.11.2026 в составе статической проверки — 78 тестов, 0 ошибок, локальные фикстуры без весов и сети |
+| Статические проверки CI | `bash scripts/verify.sh --static` | проверено 18.11.2026 — оба plist валидны, 78 Python-тестов, включая согласованность версии |
 | Проверка аудиокодеков | `python3 scripts/format_checks.py` | (не проверено) — отсутствует `Assets/probe/mixed.wav`. В прогоне 26.10.2026 прошло 8/8 вариантов, включая AAC ADTS, см. [ASRModels](docs/ASRModels.md) |
 | Путь к executable | `swift build -c release --show-bin-path` | проверено — `.build/out/Products/Release` в этой среде |
 | FFmpeg/ffprobe | `bash scripts/build_ffmpeg.sh` | (не проверено) — пересборка C-инструментов и возможная загрузка исходников не выполнялись |
@@ -112,6 +112,7 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 - Ручные итоги без evidence разрешены только для проверенной ручной версии; автоматические требуют основания.
 - При изменении плеера и переходов по репликам сверять [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей). Частые обновления позиции наблюдают плеер и текст расшифровки напрямую через [RecordingPlayback](Sources/LocalScribe/RecordingPlayback.swift).
 - «Пропускать паузы» по умолчанию выключено: при воспроизведении пропускать начальную тишину до первой реплики и промежутки ≥ 1000 мс между концом реплики-абзаца и следующим началом, объединяя перекрытия. В паузе воспроизведения позицию не менять; индекс обновлять при замене расшифровки и сбрасывать при смене источника. Подробности — [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей).
+- Границы пропускаемых пауз сравнивать в секундах: начало включено, конец исключён. После успешной точной перемотки подавлять повторный автопереход к той же цели в пределах допуска 50 мс, иначе AVPlayer может зациклиться; подробности и сброс маркера — в [контрактах воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей).
 - Кнопки по краям шаговой перемотки переходят к началам реплик, сохраняя паузу/воспроизведение; шаги — 5, 10, 15, 30 и 60 секунд. Модель после статуса расшифровки брать из исходного ASR-run через `transcriptSourceRunID`, а не из текущего выбора моделей. См. [контракты воспроизведения](docs/agents/ProjectReference.md#воспроизведение-записей).
 
 ## Локальные конвенции и ловушки

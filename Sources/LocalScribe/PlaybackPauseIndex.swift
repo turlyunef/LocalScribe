@@ -45,15 +45,17 @@ struct PlaybackPauseIndex: Sendable {
 
     func nextSpeech(at seconds: Double) -> Double? {
         guard seconds.isFinite else { return nil }
-        let milliseconds = seconds * 1000
+        // Use the same seconds scale as the returned destination. Converting
+        // it back to milliseconds can round a speech start into the preceding
+        // pause (for example, 1.001 * 1000 < 1001), causing endless seeks.
         var lower = 0
         var upper = pauses.count
         while lower < upper {
             let middle = lower + (upper - lower) / 2
-            if Double(pauses[middle].endMs) <= milliseconds { lower = middle + 1 }
+            if Double(pauses[middle].endMs) / 1000 <= seconds { lower = middle + 1 }
             else { upper = middle }
         }
-        guard lower < pauses.count, Double(pauses[lower].startMs) <= milliseconds else { return nil }
+        guard lower < pauses.count, Double(pauses[lower].startMs) / 1000 <= seconds else { return nil }
         return Double(pauses[lower].endMs) / 1000
     }
 }

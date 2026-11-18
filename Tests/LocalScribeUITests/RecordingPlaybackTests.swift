@@ -78,6 +78,25 @@ final class RecordingPlaybackTests: XCTestCase {
         XCTAssertNil(PlaybackPauseIndex([segments[0]]).nextSpeech(at: 3))
     }
 
+    func testPauseBoundariesRemainHalfOpenAtEveryMillisecond() {
+        // Includes boundaries whose seconds -> milliseconds round trip lands
+        // just before the original timestamp (for example, 1001 and 8123 ms).
+        for start in Array(1...10_000) + [3_600_001, 10_798_003] {
+            let index = PlaybackPauseIndex([paragraph("speech", start, start + 100)])
+            let target = Double(start) / 1000
+            XCTAssertEqual(index.nextSpeech(at: target - 0.000_001), target, "At \(start) ms")
+            XCTAssertNil(index.nextSpeech(at: target), "At \(start) ms")
+
+            let internalIndex = PlaybackPauseIndex([
+                paragraph("before", 0, start), paragraph("after", start + 1000, start + 1100),
+            ])
+            let next = Double(start + 1000) / 1000
+            XCTAssertNil(internalIndex.nextSpeech(at: target - 0.000_001), "Before \(start) ms")
+            XCTAssertEqual(internalIndex.nextSpeech(at: target), next, "At \(start) ms")
+            XCTAssertNil(internalIndex.nextSpeech(at: next), "At \(start + 1000) ms")
+        }
+    }
+
     func testSegmentNavigationHandlesOverlapsBoundariesAndMissingTranscript() async throws {
         let repository = try temporaryRepository()
         let manifest = try saveWAV(in: repository, seconds: 10)
@@ -212,6 +231,41 @@ final class RecordingPlaybackTests: XCTestCase {
         await waitUntil { (playback.position ?? 0) >= 6.2 }
         playback.toggle()
         XCTAssertFalse(playback.isPlaying)
+        await playback.shutdown()
+    }
+
+    func testSkipPausesWithMillisecondBoundariesKeepsClockAdvancing() async throws {
+        let repository = try temporaryRepository()
+        let manifest = try saveWAV(in: repository, seconds: 10)
+        let playback = RecordingPlayback()
+        defer { playback.select(nil) }
+        select(manifest, in: repository, playback)
+        playback.updateTranscript(transcript([
+            paragraph("first", 1001, 1500), paragraph("next", 8123, 9000),
+        ]))
+        await playback.transcriptTask?.value
+        playback.skipsPauses = true
+        playback.speed = 1.5
+        playback.toggle()
+        XCTAssertEqual(playback.position, 1.001)
+        await waitUntil { (playback.position ?? 0) > 1.2 }
+        await waitUntil { (playback.position ?? 0) > 8.3 }
+        XCTAssertEqual(playback.state, .ready)
+        XCTAssertTrue(playback.isPlaying)
+        XCTAssertTrue(playback.skipsPauses)
+        XCTAssertEqual(playback.speed, 1.5)
+        // A subsequent explicit seek into the same gap still skips it, while
+        // a paused seek remains exact and resumes normally.
+        playback.seek(to: 3)
+        XCTAssertEqual(playback.position, 8.123)
+        await waitUntil { (playback.position ?? 0) > 8.3 }
+        playback.toggle()
+        playback.seek(to: 3)
+        XCTAssertEqual(playback.position, 3)
+        XCTAssertFalse(playback.isPlaying)
+        playback.toggle()
+        XCTAssertEqual(playback.position, 8.123)
+        await waitUntil { (playback.position ?? 0) > 8.3 }
         await playback.shutdown()
     }
 

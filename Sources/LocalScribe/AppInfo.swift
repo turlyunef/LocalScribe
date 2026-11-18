@@ -2,9 +2,9 @@ import Foundation
 
 enum AppInfo {
     static var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.20.0"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "2.20.1"
     }
     static var build: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "38"
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "39"
     }
 }
