@@ -123,6 +123,12 @@ struct ContentView: View {
         switch shortcut {
         case .command(let command):
             return handleCommand(command)
+        case .togglePlayback:
+            // Space drives the player of the open recording card only; other
+            // sections and cards without audio pass the key through.
+            guard mode == .recordings, model.playbackSource != nil else { return false }
+            model.playback.toggle()
+            return true
         case .selectAdjacent(let down):
             // Arrows drive the visible list of the open section only.
             switch mode {

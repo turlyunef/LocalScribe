@@ -43,7 +43,7 @@ enum WorkspaceCommand: CaseIterable {
 
 /// Window-level shortcuts that let sheets and text editors handle their own keys.
 struct WorkspaceKeyboardShortcut: NSViewRepresentable {
-    enum Action { case closeSelection, deleteSelection, selectAdjacent(down: Bool), command(WorkspaceCommand) }
+    enum Action { case closeSelection, deleteSelection, selectAdjacent(down: Bool), togglePlayback, command(WorkspaceCommand) }
     @Environment(\.isEnabled) private var isEnabled
     let handle: (Action) -> Bool
 
@@ -89,6 +89,15 @@ struct WorkspaceKeyboardShortcut: NSViewRepresentable {
                        !(text.isFieldEditor && text.string.isEmpty) { return event }
                     let down = Int(event.keyCode) == kVK_DownArrow
                     return self.handle?(.selectAdjacent(down: down)) == true ? nil : event
+                case kVK_Space where modifiers.isEmpty && !event.isARepeat:
+                    // Space types into any live text input and presses focused
+                    // buttons (keyboard access, checkboxes, pop-ups). Sliders
+                    // and segmented controls ignore the key, so unlike arrows
+                    // they don't reserve it and the player keeps working
+                    // right after a timeline drag.
+                    if window.firstResponder is NSButton { return event }
+                    if let text, text.isEditable || text.isFieldEditor || text.hasMarkedText() { return event }
+                    return self.handle?(.togglePlayback) == true ? nil : event
                 default:
                     guard !event.isARepeat, !self.isHiddenOrHasHiddenAncestor, text?.hasMarkedText() != true,
                           let command = WorkspaceCommand.matching(keyCode: Int(event.keyCode), modifiers: modifiers)

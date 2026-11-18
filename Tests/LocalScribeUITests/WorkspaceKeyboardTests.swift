@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Carbon.HIToolbox
 import Combine
 import SwiftUI
@@ -97,6 +98,16 @@ final class WorkspaceKeyboardTests: XCTestCase {
 
     private func escape(_ window: NSWindow) throws { try key(kVK_Escape, "\u{1b}", in: window) }
     private func enter(_ window: NSWindow) throws { try key(kVK_Return, "\r", in: window) }
+
+    private func writeSilentWAV(to destination: URL, seconds: Int) throws {
+        try Disk.directory(destination.deletingLastPathComponent())
+        let format = try XCTUnwrap(AVAudioFormat(commonFormat: .pcmFormatInt16, sampleRate: 16_000, channels: 1, interleaved: false))
+        let buffer = try XCTUnwrap(AVAudioPCMBuffer(pcmFormat: format, frameCapacity: AVAudioFrameCount(16_000 * seconds)))
+        buffer.frameLength = buffer.frameCapacity
+        buffer.int16ChannelData?[0].initialize(repeating: 0, count: Int(buffer.frameLength))
+        let file = try AVAudioFile(forWriting: destination, settings: format.settings, commonFormat: .pcmFormatInt16, interleaved: false)
+        try file.write(from: buffer)
+    }
 
     private func commandDelete(_ window: NSWindow, modifiers: NSEvent.ModifierFlags = .command,
                                repeatKey: Bool = false) throws {
@@ -573,6 +584,70 @@ final class WorkspaceKeyboardTests: XCTestCase {
             try await Task.sleep(for: .milliseconds(50))
         }
         XCTAssertEqual(model.diagrams.map(\.id), [diagrams[0].id])
+        await model.shutdown()
+    }
+
+    func testSpaceTogglesPlaybackOfOpenRecordingOnlyWithFreeResponder() async throws {
+        let (model, rows) = try await fixture()
+        // The fixture row points at a missing file; give it real audio so the
+        // player can actually open, pause and resume it.
+        let repository = try XCTUnwrap(model.repository)
+        try writeSilentWAV(to: repository.folder(rows[0].id).appendingPathComponent(rows[0].originalRelativePath),
+                           seconds: 2)
+        let window = host(model)
+        defer { window.close() }
+        try await settle(window)
+        model.selection = rows[0].id
+        for _ in 0..<20 where model.transcript == nil { try await settle(window) }
+        XCTAssertNotNil(model.transcript)
+        window.makeFirstResponder(window)
+
+        try key(kVK_Space, " ", in: window)
+        XCTAssertTrue(model.playback.isPlaying)
+        for _ in 0..<40 where model.playback.state != .ready { try await settle(window) }
+        XCTAssertEqual(model.playback.state, .ready)
+        // A held-down repeat must not pause again.
+        try key(kVK_Space, " ", repeatKey: true, in: window)
+        XCTAssertTrue(model.playback.isPlaying)
+        try key(kVK_Space, " ", in: window)
+        XCTAssertFalse(model.playback.isPlaying)
+        try key(kVK_Space, " ", in: window)
+        XCTAssertTrue(model.playback.isPlaying)
+
+        // Focused segmented controls (and sliders) don't press with space the
+        // way buttons do, so unlike arrows they don't reserve the key.
+        let segmented = try XCTUnwrap(window.contentView?.descendants(of: NSSegmentedControl.self).first)
+        XCTAssertTrue(window.makeFirstResponder(segmented))
+        try key(kVK_Space, " ", in: window)
+        XCTAssertFalse(model.playback.isPlaying)
+
+        // While the search field edits, space types into the query and leaves
+        // the paused player alone.
+        try key(kVK_ANSI_F, "f", modifiers: .command, in: window)
+        try await settle(window)
+        try key(kVK_Space, " ", in: window)
+        XCTAssertEqual(model.recordingSearch.query, " ")
+        XCTAssertFalse(model.playback.isPlaying)
+        model.recordingSearch.query = ""
+        window.makeFirstResponder(window)
+        try key(kVK_Space, " ", in: window)
+        XCTAssertTrue(model.playback.isPlaying)
+
+        // Other sections do not own the player key: the card closes and the
+        // playback resets without a stray toggle.
+        window.makeFirstResponder(window)
+        try key(kVK_ANSI_2, "2", modifiers: .command, in: window)
+        try await settle(window)
+        try key(kVK_Space, " ", in: window)
+        XCTAssertFalse(model.playback.isPlaying)
+        XCTAssertNil(model.playback.position)
+
+        // Back in the recordings section the key works again.
+        try key(kVK_ANSI_1, "1", modifiers: .command, in: window)
+        try await settle(window)
+        window.makeFirstResponder(window)
+        try key(kVK_Space, " ", in: window)
+        XCTAssertTrue(model.playback.isPlaying)
         await model.shutdown()
     }
 
