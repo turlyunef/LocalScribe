@@ -15,4 +15,4 @@
 - [Эксперименты ASR](ASRExperimentStatus.md), [матрица](ASRMatrix.md), [оконный алгоритм](ASRWindowing.md) и [передача работы между сессиями](ASRContinuation.md)
 - [Начало записи в ASR](ASRPrefixFix.md), [хвост диаризации](DiarizationTailFix.md) и [ограничение очереди диаризации](DiarizationBackpressure.md)
 - [Измерения памяти](MemoryAudit-2026-10-19.md), [проверка моделей](StartupHashMemory.md), [репозиторий](RepositoryPerformance.md), [буферы захвата](CaptureWriterAllocations.md) и [итоги](SummaryPerformance.md)
-- [Ревью 18.10](ProjectReview-2026-10-18.md), [ревью 24.10](../ProjectReview-2026-10-24.md), [исправления 24.10](ProjectReviewFixes-2026-10-24.md) и [ревью 09.11](../ProjectReview-2026-11-09.md)
+- [Архив ревью 18.10–11.11](ReviewArchive.md) и [текущее ревью 18.11](../ProjectReview-2026-11-18.md)
