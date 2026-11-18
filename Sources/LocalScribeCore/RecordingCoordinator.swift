@@ -11,6 +11,9 @@ public actor RecordingCoordinator {
         public let groups: RecordingGroups
         public let groupsError: String?
         public let unreadableRecordingIDs: [String]
+        /// Non-nil when the recordings directory exists but cannot be read: the
+        /// archive is not empty on disk and the previous index stays untouched.
+        public let archiveError: String?
     }
     private let repository: RecordingRepository
     private var manifests: [Manifest] = []
@@ -20,6 +23,7 @@ public actor RecordingCoordinator {
     private var groups = RecordingGroups()
     private var groupsError: String?
     private var unreadableRecordingIDs: [String] = []
+    private var archiveError: String?
     private var deletingGroups: Set<String> = []
     private let removeRecording: @Sendable (RecordingRepository, Manifest) throws -> Void
     private var revision: UInt64 = 0
@@ -39,22 +43,27 @@ public actor RecordingCoordinator {
 
     public func snapshot() -> Snapshot {
         initialize()
-        return Snapshot(revision: revision, manifests: manifests, groups: groups, groupsError: groupsError, unreadableRecordingIDs: unreadableRecordingIDs)
+        return Snapshot(revision: revision, manifests: manifests, groups: groups, groupsError: groupsError,
+                        unreadableRecordingIDs: unreadableRecordingIDs, archiveError: archiveError)
     }
     public func recover() throws -> Snapshot {
         initializeGroups()
         cancelIndexTask()
         do {
             var invalid: [String] = []
-            let recovered = try repository.recover(reportInvalid: { invalid.append($0) })
+            var unreadable: Error?
+            let recovered = try repository.recover(reportInvalid: { invalid.append($0) },
+                                                   reportUnreadable: { unreadable = $0 })
             unreadableRecordingIDs = invalid.sorted()
+            archiveError = unreadable.map(Self.listingFailureMessage)
             replace(recovered)
-            try pruneDeletedMembership()
+            // Membership pruning relies on a complete listing.
+            if archiveError == nil { try pruneDeletedMembership() }
         }
         catch {
             // A failed batch may already have committed some manifests.
             replace(readListing())
-            scheduleIndex()
+            if archiveError == nil { scheduleIndex() }
             throw error
         }
         indexDirty = false
@@ -66,9 +75,16 @@ public actor RecordingCoordinator {
     }
     private func readListing() -> [Manifest] {
         var invalid: [String] = []
-        let values = repository.list(reportInvalid: { invalid.append($0) })
+        var unreadable: Error?
+        let values = repository.list(reportInvalid: { invalid.append($0) }, reportUnreadable: { unreadable = $0 })
         unreadableRecordingIDs = invalid.sorted()
+        archiveError = unreadable.map(Self.listingFailureMessage)
         return values
+    }
+    /// The user-facing explanation for an existing but unreadable recordings
+    /// directory, mirroring the groups error reporting.
+    private static func listingFailureMessage(_ error: Error) -> String {
+        "Не удалось прочитать каталог записей: \(error.localizedDescription). Архив не изменялся; проверьте права доступа к папке recordings."
     }
     private func initializeGroups() {
         guard !groupsInitialized else { return }
@@ -114,7 +130,9 @@ public actor RecordingCoordinator {
     /// Also used as a barrier during shutdown and by deterministic callers/tests.
     public func flushIndex() {
         cancelIndexTask()
-        guard indexDirty else { return }
+        // Never overwrite the derived index with the empty listing of an
+        // unreadable archive; the previous index stays until it is readable.
+        guard indexDirty, archiveError == nil else { return }
         do { try repository.writeIndex(manifests); indexDirty = false }
         catch {
             // The index stays dirty and is rewritten on the next flush.
@@ -192,7 +210,7 @@ public actor RecordingCoordinator {
             // Removal may have made progress before failing. Re-read the source
             // of truth instead of publishing an already removed manifest again.
             replace(readListing())
-            scheduleIndex()
+            if archiveError == nil { scheduleIndex() }
             throw error
         }
         replace(manifests.filter { $0.id != manifest.id })

@@ -30,9 +30,23 @@ public struct RecordingRepository: Sendable {
         guard manifest.id == id else { throw ScribeError.message("Идентификатор записи не совпадает с её каталогом") }
         return manifest
     }
-    public func list(reportInvalid: (String) -> Void = { _ in }) -> [Manifest] {
+    /// - Parameter reportUnreadable: receives the error when the recordings
+    ///   directory exists but cannot be read. A missing directory is an honest
+    ///   empty archive; an unreadable one must not silently look like «no
+    ///   recordings».
+    public func list(reportInvalid: (String) -> Void = { _ in },
+                     reportUnreadable: (Error) -> Void = { _ in }) -> [Manifest] {
         observeIO?(.archiveScan)
-        let dirs = (try? FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("recordings"), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])) ?? []
+        let dirs: [URL]
+        do {
+            dirs = try FileManager.default.contentsOfDirectory(at: root.appendingPathComponent("recordings"), includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            // A missing directory is a fresh install, not a damaged archive.
+            dirs = []
+        } catch {
+            reportUnreadable(error)
+            dirs = []
+        }
         return dirs.compactMap { url -> Manifest? in
             let id = url.lastPathComponent
             guard UUID(uuidString: id) != nil,
@@ -276,8 +290,13 @@ public struct RecordingRepository: Sendable {
         guard try Disk.hash(original) == manifest.sha256 else { return }
         for url in disposable { try fm.removeItem(at: url) }
     }
-    @discardableResult public func recover(reportInvalid: (String) -> Void = { _ in }) throws -> [Manifest] {
-        var manifests = list(reportInvalid: reportInvalid)
+    @discardableResult public func recover(reportInvalid: (String) -> Void = { _ in },
+                                           reportUnreadable: (Error) -> Void = { _ in }) throws -> [Manifest] {
+        var archiveUnreadable = false
+        var manifests = list(reportInvalid: reportInvalid, reportUnreadable: { error in
+            archiveUnreadable = true
+            reportUnreadable(error)
+        })
         for index in manifests.indices {
             var m = manifests[index]
             guard m.schemaVersion == 1 else { continue }
@@ -293,7 +312,10 @@ public struct RecordingRepository: Sendable {
             // Best effort: a cleanup failure must not make the archive unavailable.
             try? cleanupTemporaryFiles(m)
         }
-        try? writeIndex(manifests)
+        // The derived index is rewritten only from a complete listing: when the
+        // recordings directory is unreadable the previous index stays on disk
+        // instead of being replaced with an empty one.
+        if !archiveUnreadable { try? writeIndex(manifests) }
         return manifests
     }
 }

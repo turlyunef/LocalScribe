@@ -64,9 +64,21 @@ public struct DiagramRepository: Sendable {
 
     /// Only UUID directories without symlinks that contain a manifest are items.
     /// Unrelated folders are ignored; a recognizable damaged item is reported,
-    /// never hidden and never deleted.
-    public func list(reportInvalid: (String) -> Void = { _ in }) -> [DiagramManifest] {
-        let dirs = (try? FileManager.default.contentsOfDirectory(at: itemsURL, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])) ?? []
+    /// never hidden and never deleted. A missing items directory is an honest
+    /// empty archive; an existing but unreadable one is reported upward instead
+    /// of silently looking like «no diagrams».
+    public func list(reportInvalid: (String) -> Void = { _ in },
+                     reportUnreadable: (Error) -> Void = { _ in }) -> [DiagramManifest] {
+        let dirs: [URL]
+        do {
+            dirs = try FileManager.default.contentsOfDirectory(at: itemsURL, includingPropertiesForKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+        } catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+            // A missing directory is a fresh install, not a damaged archive.
+            dirs = []
+        } catch {
+            reportUnreadable(error)
+            dirs = []
+        }
         return dirs.compactMap { url -> DiagramManifest? in
             let id = url.lastPathComponent
             guard UUID(uuidString: id) != nil,
@@ -95,8 +107,9 @@ public struct DiagramRepository: Sendable {
     /// A restart interrupts jobs that were queued or recognizing. Warnings are
     /// never touched here; the caller receives the resulting snapshot.
     @discardableResult
-    public func recover(reportInvalid: (String) -> Void = { _ in }) throws -> [DiagramManifest] {
-        var manifests = list(reportInvalid: reportInvalid)
+    public func recover(reportInvalid: (String) -> Void = { _ in },
+                        reportUnreadable: (Error) -> Void = { _ in }) throws -> [DiagramManifest] {
+        var manifests = list(reportInvalid: reportInvalid, reportUnreadable: reportUnreadable)
         for index in manifests.indices {
             var m = manifests[index]
             guard m.schemaVersion == 1 else { continue }

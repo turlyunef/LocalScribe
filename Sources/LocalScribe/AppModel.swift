@@ -7,6 +7,14 @@ import LocalScribeCore
 /// keeps identical UUIDs in the recording, diagram and text archives from
 /// colliding. Cancelling or deleting one kind never touches the others.
 enum QueueJobKind: Hashable, Sendable { case recording, diagram, text }
+/// The outcome of listing a recording's capture fragment directory. An
+/// unreadable directory proves nothing about saved audio and must never be
+/// presented as «no sound»; only an honestly read listing may. A missing
+/// directory is an honest «no fragments».
+enum CaptureFragmentListing: Sendable {
+    case read(hasFragments: Bool)
+    case unreadable(description: String, system: DiagnosticSystemCode?)
+}
 struct QueueJobID: Hashable, Sendable {
     let kind: QueueJobKind
     let id: String
@@ -43,6 +51,7 @@ struct QueueJobID: Hashable, Sendable {
     private var diagramArchiveRevision: UInt64 = 0
     private var reportedDiagramGroupsError: String?
     private var reportedUnreadableDiagramIDs: [String] = []
+    private var reportedDiagramArchiveError: String?
     @Published private(set) var deletingDiagramJobs = false
     @Published private(set) var deletingGroupID: String?
     // Text-anonymization archive state (work 5): a third independent snapshot
@@ -78,6 +87,7 @@ struct QueueJobID: Hashable, Sendable {
     @Published private(set) var deletingSidebarRecordings = false
     private var reportedGroupsError: String?
     private var reportedUnreadableRecordingIDs: [String] = []
+    private var reportedArchiveError: String?
     private var deletingJobIDs: Set<QueueJobID> = []
     private var jobAdmission: [QueueJobID: UInt64] = [:]
     private var finalizingRecordingID: String?
@@ -330,6 +340,7 @@ struct QueueJobID: Hashable, Sendable {
     init(repository providedRepository: RecordingRepository? = nil, startServices: Bool = true, workerExecutable: URL? = nil,
          userDefaults: UserDefaults = .standard, catalog providedCatalog: ModelCatalog? = nil, hardware: ModelHardware = .current,
          microphoneDevices suppliedMicrophoneDevices: MicrophoneDevices? = nil,
+         loadCatalog: (URL) throws -> ModelCatalog = { try Disk.read(ModelCatalog.self, at: $0.appendingPathComponent("models.lock.json")) },
          requestMicrophoneAccess: @escaping @MainActor () async -> Bool = { await AVCaptureDevice.requestAccess(for: .audio) },
          makeRecordingCapture: @escaping @MainActor (MicrophoneDevices) -> any RecordingCapture = { MicrophoneRecorder(devices: $0) },
          recognizeLiveCaptions: @escaping LiveCaptionRecognition.Recognizer = LiveCaptionRecognition.recognize,
@@ -356,7 +367,21 @@ struct QueueJobID: Hashable, Sendable {
         workerOverride = workerExecutable
         let bundled = Bundle.main.resourceURL ?? Bundle.main.bundleURL
         resources = FileManager.default.fileExists(atPath: bundled.appendingPathComponent("models.lock.json").path) ? bundled : URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("Resources")
-        catalog = providedCatalog ?? (try? Disk.read(ModelCatalog.self, at: resources.appendingPathComponent("models.lock.json")))
+        // A test-provided catalog keeps bootstrap silent; only the on-disk load
+        // can fail, and that failure must never look like eternal checking.
+        if let providedCatalog {
+            catalog = providedCatalog
+        } else {
+            do { catalog = try loadCatalog(resources) }
+            catch {
+                catalog = nil
+                modelsReady = false
+                modelsStatus = Self.unreadableModelCatalogStatus(error)
+                errorHandler.report(error, operation: .modelVerification,
+                                    failure: DiagnosticFailure(.modelValidation, phase: .modelValidation, error: error),
+                                    message: Self.unreadableModelCatalogStatus(error))
+            }
+        }
         let diagnosticRoot = providedRepository?.root ?? FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)
             .first?.appendingPathComponent("LocalScribe", isDirectory: true)
         errorHandler.startJournal(at: diagnosticRoot)
@@ -445,6 +470,13 @@ struct QueueJobID: Hashable, Sendable {
         if CommandLine.arguments.contains("--self-check") { Task { await sandboxSelfCheck() } }
         if CommandLine.arguments.contains("--self-check-microphone") { Task { await microphoneSelfCheck() } }
     }
+    /// The user-visible explanation for an unreadable pinned model catalog:
+    /// processing cannot start until models.lock.json becomes readable again,
+    /// so the status must say so instead of eternal «Проверяем модели…».
+    private static func unreadableModelCatalogStatus(_ error: Error) -> String {
+        L10n.text("Закреплённый каталог моделей не читается: %1$@. Обработка записей не начнётся, пока файл models.lock.json не станет читаемым; проверьте его и перезапустите приложение.",
+                  L10n.message(error.localizedDescription))
+    }
     func reload() async {
         guard let archive else { return }
         applySnapshot(await archive.snapshot())
@@ -473,6 +505,11 @@ struct QueueJobID: Hashable, Sendable {
             }
             if let error = snapshot.groupsError, error != reportedGroupsError {
                 reportedGroupsError = error; errorHandler.report(message: error)
+            }
+            // An existing but unreadable recordings directory is reported once;
+            // the archive on disk keeps its manifests and the previous index.
+            if let error = snapshot.archiveError, error != reportedArchiveError {
+                reportedArchiveError = error; errorHandler.report(message: error)
             }
         }
         loadResult()
@@ -1400,15 +1437,36 @@ struct QueueJobID: Hashable, Sendable {
                                 failure: DiagnosticFailure(.operationFailed, phase: .captureStop, error: error))
             queued.removeAll { $0 == .recording(id) }
             if activeJob == .recording(id) { activeJob = nil; await supervisor.cancel() }
-            let recoverable = await archive.perform { repository in
-                let parts = (try? FileManager.default.contentsOfDirectory(at: repository.folder(id).appendingPathComponent("capture"), includingPropertiesForKeys: nil)) ?? []
-                return parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }
+            // Reading the fragment directory distinguishes an honestly absent
+            // or empty capture from an unreadable directory: the latter must
+            // never be reported as «no saved audio» while fragments may exist.
+            let savedFragments = await archive.perform { repository -> CaptureFragmentListing in
+                let capture = repository.folder(id).appendingPathComponent("capture")
+                let parts: [URL]
+                do { parts = try FileManager.default.contentsOfDirectory(at: capture, includingPropertiesForKeys: nil) }
+                catch let error as CocoaError where error.code == .fileReadNoSuchFile { return .read(hasFragments: false) }
+                catch { return .unreadable(description: error.localizedDescription, system: DiagnosticSystemCode(error)) }
+                return .read(hasFragments: parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") })
             }
             do {
-                try await archive.update(id) { m in
-                    for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
-                    m.state = recoverable ? .interrupted : .failed
-                    m.lastError = recoverable ? "Фрагменты сохранены. Нажмите «Продолжить» для сборки." : "Нет сохранённого звука. Начните новую запись."
+                switch savedFragments {
+                case .read(let recoverable):
+                    try await archive.update(id) { m in
+                        for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
+                        m.state = recoverable ? .interrupted : .failed
+                        m.lastError = recoverable ? "Фрагменты сохранены. Нажмите «Продолжить» для сборки." : "Нет сохранённого звука. Начните новую запись."
+                    }
+                case .unreadable(let description, let system):
+                    try await archive.update(id) { m in
+                        for warning in warnings where !m.warnings.contains(warning) { m.warnings.append(warning) }
+                        m.state = .interrupted
+                        m.lastError = "Каталог фрагментов записи не читается. Фрагменты могут быть целы; проверьте доступ и повторите остановку."
+                    }
+                    errorHandler.report(message: L10n.text("Каталог фрагментов записи не читается: %1$@. Фрагменты могут быть целы; проверьте доступ и повторите остановку.",
+                                                           L10n.message(description)),
+                                        operation: .capture,
+                                        job: DiagnosticJob(reference: DiagnosticJobReference(.recording, item: id, run: recordingsByID[id]?.pendingRunId)),
+                                        failure: DiagnosticFailure(.operationFailed, phase: .captureStop, system: system))
                 }
             } catch is CancellationError { }
             catch {
@@ -1465,24 +1523,52 @@ struct QueueJobID: Hashable, Sendable {
             defer { finalizingRecording = false; finalizingRecordingID = nil }
             do {
                 if let archive {
-                    let (needsAssembly, hasParts) = try await archive.perform { repository in
+                    let (needsAssembly, fragments) = try await archive.perform { repository -> (Bool, CaptureFragmentListing) in
                         let m = try repository.load(id)
                         let needsSeal = m.pendingRunId.map {
                             let run = repository.run(id, $0)
                             return FileManager.default.fileExists(atPath: run.appendingPathComponent("capture-run.json").path)
                                 && !FileManager.default.fileExists(atPath: run.appendingPathComponent("capture-seal.json").path)
                         } ?? false
-                        let parts = (try? FileManager.default.contentsOfDirectory(at: repository.folder(id).appendingPathComponent("capture"), includingPropertiesForKeys: nil)) ?? []
-                        return (!m.sourceComplete || needsSeal, parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") })
+                        // An unreadable fragment directory is not evidence that
+                        // no audio exists; only an honestly read listing is.
+                        let capture = repository.folder(id).appendingPathComponent("capture")
+                        let parts: [URL]
+                        do { parts = try FileManager.default.contentsOfDirectory(at: capture, includingPropertiesForKeys: nil) }
+                        catch let error as CocoaError where error.code == .fileReadNoSuchFile {
+                            return (!m.sourceComplete || needsSeal, .read(hasFragments: false))
+                        }
+                        catch {
+                            return (!m.sourceComplete || needsSeal,
+                                    .unreadable(description: error.localizedDescription, system: DiagnosticSystemCode(error)))
+                        }
+                        return (!m.sourceComplete || needsSeal,
+                                .read(hasFragments: parts.contains { $0.pathExtension == "caf" && !$0.lastPathComponent.contains(".partial.") }))
                     }
                     guard generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0], !deletingJobIDs.contains(.recording(id)), !shuttingDown else { return }
                     if needsAssembly {
-                        guard hasParts else {
+                        switch fragments {
+                        case .unreadable(let description, let system):
+                            // Never conclude «no saved audio» from a directory
+                            // that could not be read: keep the interrupted state
+                            // with an explanation and report the failure.
+                            try await archive.update(id) { m in
+                                m.lastError = "Каталог фрагментов записи не читается. Фрагменты могут быть целы; проверьте доступ и повторите."
+                            }
+                            await reload()
+                            errorHandler.report(message: L10n.text("Каталог фрагментов записи не читается: %1$@. Фрагменты могут быть целы; проверьте доступ и повторите.",
+                                                                   L10n.message(description)),
+                                                operation: .capture,
+                                                job: DiagnosticJob(reference: DiagnosticJobReference(.recording, item: id)),
+                                                failure: DiagnosticFailure(.operationFailed, phase: .captureStop, system: system))
+                            return
+                        case .read(hasFragments: true):
+                            try await finalizeCapture(id)
+                        case .read(hasFragments: false):
                             let message = "В этой записи нет сохранённого звука. Начните новую запись."
                             try await archive.update(id) { m in m.state = .failed; m.lastError = message }
                             await reload(); errorHandler.report(message: message); return
                         }
-                        try await finalizeCapture(id)
                     }
                 }
                 guard generation == queueGeneration, admission == jobAdmission[.recording(id), default: 0], !deletingJobIDs.contains(.recording(id)), !shuttingDown else { return }
@@ -2269,6 +2355,11 @@ struct QueueJobID: Hashable, Sendable {
         }
         if let error = snapshot.groupsError, error != reportedDiagramGroupsError {
             reportedDiagramGroupsError = error; errorHandler.report(message: error)
+        }
+        // An existing but unreadable items directory is reported once; the
+        // diagrams on disk stay untouched and are never replaced.
+        if let error = snapshot.archiveError, error != reportedDiagramArchiveError {
+            reportedDiagramArchiveError = error; errorHandler.report(message: error)
         }
     }
     /// Import publishes the manifest first; auto-queueing happens only when the

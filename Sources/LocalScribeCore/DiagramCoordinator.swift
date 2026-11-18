@@ -11,6 +11,9 @@ public actor DiagramCoordinator {
         public let groups: RecordingGroups
         public let groupsError: String?
         public let unreadableDiagramIDs: [String]
+        /// Non-nil when the items directory exists but cannot be read: the
+        /// archive is not empty on disk and nothing was changed.
+        public let archiveError: String?
     }
     private let repository: DiagramRepository
     private let removeItem: @Sendable (DiagramRepository, String) throws -> Void
@@ -22,6 +25,7 @@ public actor DiagramCoordinator {
     private var groupsError: String?
     private var groupDeletion: (id: String, members: Set<String>)?
     private var unreadableDiagramIDs: [String] = []
+    private var archiveError: String?
     private var revision: UInt64 = 0
 
     public init(repository: DiagramRepository,
@@ -33,7 +37,8 @@ public actor DiagramCoordinator {
     public func snapshot() -> Snapshot {
         initialize()
         return Snapshot(revision: revision, manifests: manifests, groups: groups,
-                        groupsError: groupsError, unreadableDiagramIDs: unreadableDiagramIDs)
+                        groupsError: groupsError, unreadableDiagramIDs: unreadableDiagramIDs,
+                        archiveError: archiveError)
     }
 
     /// One pass over the archive: groups through the neutral URL reader, then
@@ -43,10 +48,14 @@ public actor DiagramCoordinator {
         initializeGroups()
         do {
             var invalid: [String] = []
-            let recovered = try repository.recover(reportInvalid: { invalid.append($0) })
+            var unreadable: Error?
+            let recovered = try repository.recover(reportInvalid: { invalid.append($0) },
+                                                   reportUnreadable: { unreadable = $0 })
             unreadableDiagramIDs = invalid.sorted()
+            archiveError = unreadable.map(Self.listingFailureMessage)
             replace(recovered)
-            try pruneDeletedMembership()
+            // Membership pruning relies on a complete listing.
+            if archiveError == nil { try pruneDeletedMembership() }
         } catch {
             // A failed batch may already have committed some manifests.
             replace(readListing())
@@ -264,9 +273,16 @@ public actor DiagramCoordinator {
     }
     private func readListing() -> [DiagramManifest] {
         var invalid: [String] = []
-        let values = repository.list(reportInvalid: { invalid.append($0) })
+        var unreadable: Error?
+        let values = repository.list(reportInvalid: { invalid.append($0) }, reportUnreadable: { unreadable = $0 })
         unreadableDiagramIDs = invalid.sorted()
+        archiveError = unreadable.map(Self.listingFailureMessage)
         return values
+    }
+    /// The user-facing explanation for an existing but unreadable items
+    /// directory, mirroring the groups error reporting.
+    private static func listingFailureMessage(_ error: Error) -> String {
+        "Не удалось прочитать каталог схем: \(error.localizedDescription). Архив не изменялся; проверьте права доступа к папке diagrams/items."
     }
     private func initializeGroups() {
         guard !groupsInitialized else { return }
