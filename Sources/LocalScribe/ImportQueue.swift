@@ -28,6 +28,11 @@ import LocalScribeCore
         }
     }
 
+    /// True while entries are still waiting for the single import slot. The
+    /// import path uses this to publish one archive snapshot at the end of a
+    /// batch instead of one snapshot per file.
+    var hasPendingWork: Bool { !pending.isEmpty }
+
     func cancel() {
         for entry in pending { entry.onDiscard() }
         pending.removeAll()

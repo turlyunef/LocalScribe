@@ -298,4 +298,125 @@ final class ResultReadingTests: XCTestCase {
             XCTAssertEqual(repo.list().count, 2)
         }
     }
+
+    // MARK: - Incremental checkpoint reading
+
+    /// Pending offline preview with several immutable parts; reading with the
+    /// cache must equal the uncached full read, reuse unchanged parts (an old
+    /// part made unreadable must not surface), read only the new tail, and
+    /// surface a part that actually changed on disk exactly like a full read.
+    func testCheckpointCacheReusesImmutablePartsReadsNewTailAndSurfacesChangedParts() throws {
+        try fixture { repo, original, info, _, _ in
+            var manifest = original
+            manifest.activeRunId = nil; manifest.pendingRunId = info.id; manifest.durationMs = 900_000
+            let path = repo.run(manifest.id, info.id)
+            try FileManager.default.removeItem(at: path.appendingPathComponent("transcript.json"))
+            try FileManager.default.removeItem(at: path.appendingPathComponent("summary.json"))
+            let parts = path.appendingPathComponent("asr")
+            func writePart(_ index: Int, text: String) throws {
+                let part = ASRPart(fingerprint: info.fingerprint, index: index,
+                                   startMs: index * 300_000, endMs: (index + 1) * 300_000,
+                                   segments: [Segment(id: "s\(index)", startMs: index * 300_000,
+                                                      endMs: index * 300_000 + 1000, text: text, language: "ru")])
+                try Disk.write(part, to: parts.appendingPathComponent("part-\(index).json"))
+            }
+            try writePart(0, text: "ноль")
+            try writePart(1, text: "один")
+            let cache = ResultCheckpointCache()
+            let expected = try repo.results(manifest).0
+            XCTAssertEqual(try repo.results(manifest, reusing: cache).0, expected)
+            // An already decoded part is not opened again: making it unreadable
+            // must not break the cached read (size/mtime stay unchanged).
+            try FileManager.default.setAttributes([.posixPermissions: 0o000],
+                                                  ofItemAtPath: parts.appendingPathComponent("part-0.json").path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644],
+                                                           ofItemAtPath: parts.appendingPathComponent("part-0.json").path) }
+            XCTAssertEqual(try repo.results(manifest, reusing: cache).0, expected)
+            try FileManager.default.setAttributes([.posixPermissions: 0o644],
+                                                  ofItemAtPath: parts.appendingPathComponent("part-0.json").path)
+            // A new checkpoint only reads the new tail and merges everything.
+            try writePart(2, text: "два")
+            let grown = try repo.results(manifest).0
+            XCTAssertEqual(try repo.results(manifest, reusing: cache).0, grown)
+            XCTAssertEqual(grown?.segments.map(\.text), ["ноль", "один", "два"])
+            // A part that actually changed on disk is re-read and its damage
+            // surfaces with the same message as an uncached read.
+            try Data("broken JSON".utf8).write(to: parts.appendingPathComponent("part-1.json"))
+            XCTAssertThrowsError(try repo.results(manifest, reusing: cache)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Файлы сохранены для восстановления"))
+            }
+            XCTAssertThrowsError(try repo.results(manifest)) { error in
+                XCTAssertTrue(error.localizedDescription.contains("Файлы сохранены для восстановления"))
+            }
+            try writePart(1, text: "один")
+            XCTAssertEqual(try repo.results(manifest, reusing: cache).0, grown)
+        }
+    }
+
+    /// The cache keeps only the parts of the latest read: after switching to
+    /// another run, the previous run's parts are gone and must be read again.
+    func testCheckpointCacheDropsPartsOfPreviousRun() throws {
+        try fixture { repo, original, info, _, _ in
+            var manifest = original
+            manifest.activeRunId = nil; manifest.pendingRunId = info.id; manifest.durationMs = 600_000
+            let path = repo.run(manifest.id, info.id)
+            try FileManager.default.removeItem(at: path.appendingPathComponent("transcript.json"))
+            try FileManager.default.removeItem(at: path.appendingPathComponent("summary.json"))
+            let part = ASRPart(fingerprint: info.fingerprint, index: 0, startMs: 0, endMs: 300_000,
+                               segments: [Segment(id: "s", startMs: 0, endMs: 1000, text: "Фраза", language: "ru")])
+            try Disk.write(part, to: path.appendingPathComponent("asr/part-0.json"))
+            let other = RunInfo(sourceHash: manifest.sha256, profileHash: "other")
+            try Disk.write(other, to: repo.run(manifest.id, other.id).appendingPathComponent("run.json"))
+            try Disk.write(ASRPart(fingerprint: other.fingerprint, index: 0, startMs: 0, endMs: 300_000, segments: []),
+                           to: repo.run(manifest.id, other.id).appendingPathComponent("asr/part-0.json"))
+
+            let cache = ResultCheckpointCache()
+            XCTAssertNotNil(try repo.results(manifest, reusing: cache).0)
+            var switched = manifest; switched.pendingRunId = other.id
+            XCTAssertEqual(try repo.results(switched, reusing: cache).0?.segments.isEmpty, true)
+            // The first run's part was pruned by the switch: reading it again
+            // must touch the file and therefore fail on an unreadable part.
+            let firstPart = path.appendingPathComponent("asr/part-0.json")
+            try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: firstPart.path)
+            defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: firstPart.path) }
+            XCTAssertThrowsError(try repo.results(manifest, reusing: cache))
+        }
+    }
+
+    /// Live previews use the same incremental path: an immutable live part is
+    /// not re-decoded, a new part extends the transcript identically to a
+    /// full read.
+    func testLivePreviewCheckpointCacheReusesImmutableParts() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root)
+        var manifest = Manifest(sourceType: "microphone", title: "Live", filename: "original.caf")
+        manifest.state = .recording
+        let info = try repo.beginRun(&manifest, catalog: Self.liveCatalog, liveCapture: true)
+        let path = repo.run(manifest.id, info.id)
+        func writeLivePart(_ index: Int) throws -> URL {
+            let start = index * 30_000
+            let part = ASRPart(fingerprint: info.fingerprint, index: index, startMs: start, endMs: start + 1000,
+                               segments: [Segment(id: "l\(index)", startMs: start, endMs: start + 1000,
+                                                  text: "фраза \(index)", language: "ru")])
+            let saved = LiveASRPart(part: part, readStartMs: max(0, start - 1000), readEndMs: start + 1000,
+                                    fragments: [CaptureFragment(index: index, frames: 16000, sampleRate: 16000,
+                                                                sha256: String(repeating: index % 2 == 0 ? "a" : "b", count: 64))])
+            let url = path.appendingPathComponent("live/part-\(index).json")
+            try Disk.write(saved, to: url)
+            return url
+        }
+        let cache = ResultCheckpointCache()
+        let zero = try writeLivePart(0)
+        XCTAssertEqual(try repo.results(manifest, reusing: cache).0?.segments.map(\.text), ["фраза 0"])
+        // The fresh part-1 is read and merged with the cached part-0; the
+        // result equals an uncached full read of both parts.
+        _ = try writeLivePart(1)
+        XCTAssertEqual(try repo.results(manifest, reusing: cache).0?.segments.map(\.text), ["фраза 0", "фраза 1"])
+        XCTAssertEqual(try repo.results(manifest).0?.segments.map(\.text), ["фраза 0", "фраза 1"])
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: zero.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: zero.path) }
+        // A decoded live part is not opened again.
+        XCTAssertEqual(try repo.results(manifest, reusing: cache).0?.segments.map(\.text), ["фраза 0", "фраза 1"])
+    }
 }

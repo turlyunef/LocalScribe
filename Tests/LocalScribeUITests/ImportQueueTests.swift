@@ -259,4 +259,56 @@ final class ImportQueueTests: XCTestCase {
             XCTAssertTrue(model.errorHandler.messages.isEmpty)
         }
     }
+
+    func testBatchImportPublishesFewSnapshotsAndSameFinalState() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root.appendingPathComponent("archive"))
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults(), importProbe: { _, _ in
+            AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le")
+        })
+        var urls: [URL] = []
+        for index in 0..<12 { urls.append(try source(root, "batch-\(index)")) }
+        let corpusBefore = model.recordingSearch.corpusRevision
+        model.importURLs(urls)
+        await model.importQueue.waitUntilIdle()
+        // The batch applied a bounded number of corpus updates (one per file
+        // would be 12+); the final state is identical either way. The exact
+        // order is not compared against the on-disk listing: manifest dates
+        // round-trip through ISO 8601 without sub-second precision, so a
+        // same-second import pair legitimately orders by id on reload.
+        XCTAssertLessThanOrEqual(model.recordingSearch.corpusRevision - corpusBefore, 4)
+        XCTAssertEqual(model.recordings.count, 12)
+        XCTAssertEqual(Set(model.recordings.map(\.id)), Set(repo.list().map(\.id)))
+        XCTAssertTrue(model.errorHandler.messages.isEmpty)
+        for manifest in repo.list() {
+            XCTAssertEqual(manifest.state, .waitingForModels)
+        }
+        await model.shutdown()
+    }
+
+    func testBatchImportFlushesSnapshotWhenLastFileFailsOrIsCancelled() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root.appendingPathComponent("archive"))
+        let model = AppModel(repository: repo, startServices: false, userDefaults: defaults(), importProbe: { url, _ in
+            if url.lastPathComponent == "bad.wav" { throw ScribeError.message("Тестовая ошибка probe") }
+            return AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_s16le")
+        })
+        // Earlier files must stay published even when the batch's final entry
+        // fails after them.
+        model.importURLs([try source(root, "good-a"), try source(root, "good-b"), try source(root, "bad")])
+        await model.importQueue.waitUntilIdle()
+        XCTAssertEqual(Set(model.recordings.map(\.displayTitle)), ["good-a", "good-b"])
+        XCTAssertEqual(model.recordings.count, repo.list().count)
+        // A non-importing last entry (a cancelled duplicate) ends the batch
+        // and must still publish the file imported before it.
+        model.resolveDuplicateImport = { _ in .cancel }
+        model.importURLs([try source(root, "good-c"), try source(root, "good-a")])
+        await model.importQueue.waitUntilIdle()
+        XCTAssertEqual(Set(model.recordings.map(\.displayTitle)), ["good-a", "good-b", "good-c"])
+        XCTAssertEqual(model.recordings.count, repo.list().count)
+        XCTAssertEqual(model.errorHandler.messages.count, 1)
+        await model.shutdown()
+    }
 }

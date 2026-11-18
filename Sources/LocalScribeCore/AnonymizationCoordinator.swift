@@ -53,6 +53,15 @@ public actor AnonymizationCoordinator {
     /// Duplicate index: byte length -> (SHA-256, card id, import position).
     /// The SHA is only a hint; equality is decided by the archived bytes.
     private var identities: [UInt: [(sha256: String, cardID: String, importOrder: UInt)]] = [:]
+    /// Decoded document of the most recently accessed card, keyed by the
+    /// document file's size and modification date: an unchanged stamp means
+    /// the file still holds exactly the bytes decoded (and fully validated)
+    /// before, so consecutive operations on the active card skip the full
+    /// JSON decode. Any change — including a rewrite by another process —
+    /// misses and falls back to disk. A single entry bounds the retained
+    /// document to the card the UI is working with.
+    private struct CardCacheEntry { var size: Int?; var modified: Date?; var document: AnonymizationCardDocument }
+    private var cardCache: (id: String, entry: CardCacheEntry)?
     private var initialized = false
     private var catalogInitialized = false
     private var catalog = AnonymizationArchiveCatalog()
@@ -96,11 +105,14 @@ public actor AnonymizationCoordinator {
         for var document in scan.documents {
             if document.latestAttempt.state == .queued || document.latestAttempt.state == .running {
                 document.latestAttempt.state = .interrupted
-                do { try repository.saveCard(document) }
+                // The document was fully validated while listing; the state
+                // mutation does not touch the byte identity.
+                do { try repository.saveCard(document, reusingVerifiedBytesOf: document) }
                 catch { unreadable.append(document.id); continue }
             }
             documents.append(document)
         }
+        cardCache = nil
         rebuild(ScanResult(documents: documents, unreadableIDs: unreadable.sorted()))
         return snapshot()
     }
@@ -109,16 +121,19 @@ public actor AnonymizationCoordinator {
 
     public func loadCard(_ id: String) throws -> AnonymizationCardDocument {
         initialize()
-        return try repository.loadCard(id)
+        return try cachedCard(id)
     }
 
     /// Read-modify-write of one card document: text revisions, attempt
     /// transitions and result publication all commit as a single atomic
-    /// document write. Identity fields cannot be changed.
+    /// document write. Identity fields cannot be changed. The load reuses the
+    /// cached decoded document when the file is unchanged, and the save skips
+    /// re-hashing the import bytes of an identity that this transaction
+    /// already verified and did not touch.
     @discardableResult public func updateCard(_ id: String,
                                               _ change: @Sendable (inout AnonymizationCardDocument) throws -> Void) throws -> AnonymizationCardDocument {
         initialize()
-        var card = try repository.loadCard(id)
+        var card = try cachedCard(id)
         let original = card
         try change(&card)
         guard card.id == id, card.importOrder == original.importOrder,
@@ -127,7 +142,8 @@ public actor AnonymizationCoordinator {
               card.importContentIdentity == original.importContentIdentity else {
             throw ScribeError.message("Нельзя изменить идентичность карточки обезличивания")
         }
-        try repository.saveCard(card)
+        try repository.saveCard(card, reusingVerifiedBytesOf: original)
+        cache(card, afterWritingTo: id)
         publish(card)
         return card
     }
@@ -242,7 +258,9 @@ public actor AnonymizationCoordinator {
         var committed = false
         try repository.writeImportIntention(.init(cardID: cardID, targetGroupID: groupID))
         do {
-            try repository.saveCard(card)
+            // The identity was just built in memory from the exact import
+            // bytes (SHA included), so the save does not re-hash them.
+            try repository.saveCard(card, reusingVerifiedBytesOf: card)
             var next = catalog
             try next.assign(cardID, to: resolvedImportTarget(groupID))
             next.consumeImportPosition()
@@ -400,6 +418,38 @@ public actor AnonymizationCoordinator {
 
     // MARK: - Private
 
+    /// Stamp taken before a read: a file replaced while it is being decoded
+    /// no longer matches the stored stamp and the next access re-reads it.
+    private static func cardStamp(_ url: URL) -> (Int?, Date?) {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        return (values?.fileSize, values?.contentModificationDate)
+    }
+
+    private func cachedCard(_ id: String) throws -> AnonymizationCardDocument {
+        if let cached = cardCache, cached.id == id,
+           let size = cached.entry.size, let modified = cached.entry.modified {
+            let stamp = Self.cardStamp(repository.cardURL(id))
+            if stamp.0 == size, stamp.1 == modified {
+                return cached.entry.document
+            }
+        }
+        let document = try repository.loadCard(id)
+        cache(document, afterWritingTo: id)
+        return document
+    }
+
+    /// Caches a freshly decoded (or just written) document with the stamp the
+    /// file had after the operation.
+    private func cache(_ document: AnonymizationCardDocument, afterWritingTo id: String) {
+        let stamp = Self.cardStamp(repository.cardURL(id))
+        guard let size = stamp.0, let modified = stamp.1 else {
+            // An unreadable stamp must never be trusted as a hit.
+            cardCache = nil
+            return
+        }
+        cardCache = (id, CardCacheEntry(size: size, modified: modified, document: document))
+    }
+
     private var groupDeletionID: String? {
         if case .group(let groupID, _) = deletion { return groupID }
         return nil
@@ -476,6 +526,7 @@ public actor AnonymizationCoordinator {
     /// Drops summaries and duplicate-index entries of removed cards; the
     /// catalog itself was committed by the caller.
     private func dropCards(_ removed: Set<String>) {
+        if let cached = cardCache, removed.contains(cached.id) { cardCache = nil }
         unreadableCardIDs.removeAll { removed.contains($0) }
         summaries.removeAll { removed.contains($0.id) }
         positions = Dictionary(uniqueKeysWithValues: summaries.enumerated().map { ($0.element.id, $0.offset) })

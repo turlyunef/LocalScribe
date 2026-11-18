@@ -259,11 +259,44 @@ enum LiveCaptionRecognition {
                     try converter?.convert(pcm.buffer) ?? AnalyzerInput(buffer: pcm.buffer)
                 })
             } else {
-                for await pcm in input {
-                    try Task.checkCancellation()
-                    pauses?.consume(pcm.buffer)
-                    let converted = try converter?.convert(pcm.buffer) ?? AnalyzerInput(buffer: pcm.buffer)
-                    last = try await feedBuffer(converted, to: analyzers)
+                // Long-lived analyzeSequence sessions, one per analyzer, fed
+                // through rendezvous channels: the same per-buffer handoff
+                // invariant as the previous per-buffer task groups without
+                // building a task group and two streams for every buffer.
+                let channels = analyzers.map { _ in AnalyzerInputChannel() }
+                last = try await withThrowingTaskGroup(of: CMTime?.self) { group in
+                    for (analyzer, channel) in zip(analyzers, channels) {
+                        group.addTask {
+                            // A session that ends first must never leave the
+                            // feeder parked on a handoff nobody will pull.
+                            defer { channel.terminate() }
+                            return try await analyzer.analyzeSequence(channel.sequence)
+                        }
+                    }
+                    group.addTask {
+                        defer { channels.forEach { $0.finish() } }
+                        try await Self.feedMixed(input, to: channels,
+                                                 convert: { try converter?.convert($0.buffer) ?? AnalyzerInput(buffer: $0.buffer) },
+                                                 consumePauses: { pauses?.consume($0) })
+                        return nil
+                    }
+                    var last: CMTime?
+                    do {
+                        for try await result in group {
+                            if let time = result { last = Self.latest(last, time) }
+                        }
+                    } catch {
+                        channels.forEach { $0.terminate() }
+                        group.cancelAll()
+                        // Speech can cancel one task while another reports the underlying failure.
+                        if error is CancellationError, !Task.isCancelled {
+                            while let next = await group.nextResult() {
+                                if case .failure(let cause) = next, !(cause is CancellationError) { throw cause }
+                            }
+                        }
+                        throw error
+                    }
+                    return last
                 }
             }
             pauses?.finish()
@@ -275,23 +308,27 @@ enum LiveCaptionRecognition {
         }
     }
 
-    /// Both analyzers consume each buffer before pulling another from the
-    /// bounded capture stream. Neither language can drop a different interval.
-    private static func feedBuffer(_ input: AnalyzerInput, to analyzers: [SpeechAnalyzer]) async throws -> CMTime? {
-        try await withThrowingTaskGroup(of: CMTime?.self) { group in
-            for analyzer in analyzers {
-                group.addTask {
-                    let chunk = AsyncStream<AnalyzerInput> { output in
-                        output.yield(input)
-                        output.finish()
-                    }
-                    return try await analyzer.analyzeSequence(chunk)
-                }
-            }
-            var last: CMTime?
-            for try await time in group { last = time }
-            return last
+    /// Feeds every converted capture buffer to each channel in order. A send
+    /// returns only after that channel's consumer has pulled the buffer, so
+    /// the next buffer is pulled from the bounded capture stream strictly
+    /// after both analyzers have consumed the current one; nothing is ever
+    /// buffered in between.
+    static func feedMixed(
+        _ input: AsyncStream<LiveCaptionPCM>, to channels: [AnalyzerInputChannel],
+        convert: @escaping @Sendable (LiveCaptionPCM) throws -> AnalyzerInput,
+        consumePauses: (@Sendable (AVAudioPCMBuffer) -> Void)? = nil
+    ) async throws {
+        for await pcm in input {
+            try Task.checkCancellation()
+            consumePauses?(pcm.buffer)
+            let converted = try convert(pcm)
+            for channel in channels { try await channel.send(converted) }
         }
+    }
+
+    private static func latest(_ first: CMTime?, _ second: CMTime) -> CMTime {
+        guard let first else { return second }
+        return CMTimeCompare(first, second) >= 0 ? first : second
     }
 
     private static func cancel(_ analyzers: [SpeechAnalyzer]) async {
@@ -304,10 +341,138 @@ enum LiveCaptionRecognition {
     }
 }
 
+/// Rendezvous handoff of analyzer input between the feeder and one
+/// long-lived `analyzeSequence` session: `send` returns only after the
+/// consumer has pulled the element, so the feeder never advances to the next
+/// capture buffer before this analyzer has taken the current one. Nothing is
+/// ever buffered; finish, terminate and task cancellation resume both sides.
+final class AnalyzerInputChannel: @unchecked Sendable {
+    private struct State {
+        var value: AnalyzerInput?
+        var sender: CheckedContinuation<Void, any Error>?
+        var receiver: CheckedContinuation<AnalyzerInput?, Never>?
+        var finished = false
+        var terminated = false
+    }
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// The single-consumer sequence handed to `analyzeSequence`.
+    struct InputSequence: AsyncSequence, Sendable {
+        let channel: AnalyzerInputChannel
+        struct Iterator: AsyncIteratorProtocol {
+            let channel: AnalyzerInputChannel
+            mutating func next() async throws -> AnalyzerInput? { await channel.pull() }
+        }
+        func makeAsyncIterator() -> Iterator { Iterator(channel: channel) }
+    }
+    var sequence: InputSequence { InputSequence(channel: self) }
+
+    private enum Staged {
+        case delivered(CheckedContinuation<AnalyzerInput?, Never>, AnalyzerInput)
+        case parked
+        case refused
+    }
+    private enum Claim {
+        case value(AnalyzerInput, CheckedContinuation<Void, any Error>?)
+        case ended
+        case parked
+    }
+
+    func send(_ value: AnalyzerInput) async throws {
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, any Error>) in
+                switch stage(value, sender: continuation) {
+                case .delivered(let receiver, let staged):
+                    receiver.resume(returning: staged)
+                    continuation.resume()
+                case .parked:
+                    break
+                case .refused:
+                    continuation.resume(throwing: CancellationError())
+                }
+            }
+        } onCancel: {
+            let pending = state.withLock { state -> CheckedContinuation<Void, any Error>? in
+                guard let sender = state.sender else { return nil }
+                state.sender = nil; state.value = nil
+                return sender
+            }
+            pending?.resume(throwing: CancellationError())
+        }
+    }
+
+    func pull() async -> AnalyzerInput? {
+        await withCheckedContinuation { (continuation: CheckedContinuation<AnalyzerInput?, Never>) in
+            switch claim(receiver: continuation) {
+            case .value(let value, let sender):
+                sender?.resume()
+                continuation.resume(returning: value)
+            case .ended:
+                continuation.resume(returning: nil)
+            case .parked:
+                break
+            }
+        }
+    }
+
+    /// The feeder will send no more values; the consumer's next pull ends the
+    /// sequence once a staged value (if any) has been taken.
+    func finish() {
+        let parked = state.withLock { state -> CheckedContinuation<AnalyzerInput?, Never>? in
+            state.finished = true
+            let receiver = state.receiver
+            state.receiver = nil
+            return receiver
+        }
+        parked?.resume(returning: nil)
+    }
+
+    /// The session ended (returned, failed or was cancelled): fail a parked
+    /// send and end a parked pull so neither side can hang.
+    func terminate() {
+        let pending = state.withLock { state -> (CheckedContinuation<Void, any Error>?, CheckedContinuation<AnalyzerInput?, Never>?) in
+            state.terminated = true
+            let sender = state.sender; state.sender = nil; state.value = nil
+            let receiver = state.receiver; state.receiver = nil
+            return (sender, receiver)
+        }
+        pending.0?.resume(throwing: CancellationError())
+        pending.1?.resume(returning: nil)
+    }
+
+    private func stage(_ value: AnalyzerInput, sender: CheckedContinuation<Void, any Error>) -> Staged {
+        state.withLock { state in
+            guard !state.finished, !state.terminated, state.value == nil, state.sender == nil,
+                  !Task.isCancelled else { return .refused }
+            if let receiver = state.receiver {
+                // Direct handoff: the waiting consumer takes the value and the
+                // rendezvous completes — nothing stays staged.
+                state.receiver = nil
+                return .delivered(receiver, value)
+            }
+            state.value = value
+            state.sender = sender
+            return .parked
+        }
+    }
+
+    private func claim(receiver: CheckedContinuation<AnalyzerInput?, Never>) -> Claim {
+        state.withLock { state in
+            if let value = state.value {
+                let sender = state.sender
+                state.value = nil; state.sender = nil
+                return .value(value, sender)
+            }
+            guard !state.finished, !state.terminated else { return .ended }
+            state.receiver = receiver
+            return .parked
+        }
+    }
+}
+
 /// The input iterator is the only caller of consume. Only the async stream
 /// crosses over to the task that asks the analyzer to finalize at a pause.
-final class LiveCaptionPauses: @unchecked Sendable {
-    let times: AsyncStream<CMTime>
+final class LiveCaptionPauses: @unchecked Sendable {    let times: AsyncStream<CMTime>
     private let output: AsyncStream<CMTime>.Continuation
     private let blockFrames = 320
     private let pauseBlocks = 20

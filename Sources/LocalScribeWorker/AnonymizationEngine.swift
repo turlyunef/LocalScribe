@@ -205,6 +205,16 @@ actor AnonymizationEngine {
         let namePlan = AnonymizationResolution.resolve(candidates: nameCandidates)
 
         // 3. Substitution assignment over history with deterministic draws.
+        // The body-side standalone check goes through a word-run index built
+        // once per run: every candidate draw previously re-scanned the whole
+        // document, which was quadratic in items × draws × document length.
+        var standaloneBody: StandaloneTextIndex? = nil
+        func standaloneIndex() -> StandaloneTextIndex {
+            if let cached = standaloneBody { return cached }
+            let index = StandaloneTextIndex(scalars: sourceScalars)
+            standaloneBody = index
+            return index
+        }
         var historyByKey: [String: AutomaticSubstitution] = [:]
         var legacyMarkerKeys = Set<String>()
         var occupiedSubstitutes = Set<String>()
@@ -266,7 +276,7 @@ actor AnonymizationEngine {
                                forms.allSatisfy({ form in
                                    let rendered = Self.render(candidate, for: form.name)
                                    return !occupiedSubstitutes.contains(rendered)
-                                       && !Self.containsStandalone(rendered, in: input.source.text)
+                                       && !standaloneIndex().contains(rendered)
                                        && !Self.containsStandalone(rendered, in: input.importedNameStem)
                                }) {
                                 usable = candidate
@@ -395,7 +405,7 @@ actor AnonymizationEngine {
 
     /// Avoid substitutions the reverse transform could mistake for unchanged
     /// source text. Match the restore path's scalar word boundaries.
-    private static func containsStandalone(_ value: String, in text: String) -> Bool {
+    static func containsStandalone(_ value: String, in text: String) -> Bool {
         guard let first = value.unicodeScalars.first, let last = value.unicodeScalars.last else { return false }
         let scalars = text.unicodeScalars
         let word = CharacterSet.alphanumerics.union(.nonBaseCharacters)
@@ -484,5 +494,73 @@ actor AnonymizationEngine {
             if answer.uninterpretedTypes.contains(type) { uninterpreted.insert(type) }
         }
         return (verified, uninterpreted, unverifiedSpans, modelCallCount)
+    }
+}
+
+/// Word-run index answering the same question as
+/// `AnonymizationEngine.containsStandalone(_:in:)` without re-scanning the
+/// whole document for every substitution candidate. A literal occurrence of
+/// a value whose first scalar is a word scalar can only be standalone when it
+/// starts exactly at a maximal word run (and symmetrically at the end), so
+/// the index stores every maximal run of word scalars with its start and
+/// verifies only the occurrences aligned with runs of the value's first word
+/// run — semantics identical to the previous full scan.
+struct StandaloneTextIndex {
+    private static let word = CharacterSet.alphanumerics.union(.nonBaseCharacters)
+    private let scalars: [Unicode.Scalar]
+    private var runs: [String: [Int]] = [:]
+
+    init(scalars: [Unicode.Scalar]) {
+        self.scalars = scalars
+        var index = 0
+        while index < scalars.count {
+            guard Self.word.contains(scalars[index]) else { index += 1; continue }
+            let start = index
+            while index < scalars.count && Self.word.contains(scalars[index]) { index += 1 }
+            runs[String(String.UnicodeScalarView(scalars[start..<index])), default: []].append(start)
+        }
+    }
+
+    /// True when `value` occurs in the indexed text with word boundaries on
+    /// both sides — exactly `containsStandalone(value, in:)` over the same
+    /// scalars.
+    func contains(_ value: String) -> Bool {
+        let needle = Array(value.unicodeScalars)
+        guard let first = needle.first, let last = needle.last else { return false }
+        // The first word run of the value: any standalone occurrence must
+        // align exactly this run with a maximal run of the text.
+        var runStart: Int? = nil
+        for (offset, scalar) in needle.enumerated() where Self.word.contains(scalar) { runStart = offset; break }
+        guard let valueRunStart = runStart else { return literalStandalone(needle, first: first, last: last) }
+        var runEnd = valueRunStart
+        while runEnd < needle.count, Self.word.contains(needle[runEnd]) { runEnd += 1 }
+        let leading = String(String.UnicodeScalarView(needle[valueRunStart..<runEnd]))
+        for start in runs[leading] ?? [] {
+            let occurrence = start - valueRunStart
+            guard occurrence >= 0, occurrence + needle.count <= scalars.count,
+                  (0..<needle.count).allSatisfy({ scalars[occurrence + $0] == needle[$0] }) else { continue }
+            // A word-scalar prefix is aligned with the run start, so the left
+            // side cannot continue a word; a non-word prefix never continues.
+            guard Self.word.contains(last), occurrence + needle.count < scalars.count,
+                  Self.word.contains(scalars[occurrence + needle.count]) else { return true }
+        }
+        return false
+    }
+
+    /// Values without any word scalar are standalone at every occurrence;
+    /// both boundary checks are trivially satisfied for them.
+    private func literalStandalone(_ needle: [Unicode.Scalar], first: Unicode.Scalar, last: Unicode.Scalar) -> Bool {
+        guard !needle.isEmpty, scalars.count >= needle.count else { return false }
+        var start = 0
+        while start + needle.count <= scalars.count {
+            if (0..<needle.count).allSatisfy({ scalars[start + $0] == needle[$0] }) {
+                let continuesLeft = start > 0 && Self.word.contains(first) && Self.word.contains(scalars[start - 1])
+                let continuesRight = start + needle.count < scalars.count
+                    && Self.word.contains(last) && Self.word.contains(scalars[start + needle.count])
+                if !continuesLeft, !continuesRight { return true }
+            }
+            start += 1
+        }
+        return false
     }
 }

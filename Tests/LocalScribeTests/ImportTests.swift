@@ -6,6 +6,38 @@ import XCTest
 final class ImportTests: XCTestCase {
     private let info = AudioInfo(duration: 1, sampleRate: 16000, channels: 1, codec: "pcm_f32le")
 
+    /// Publishing a new manifest must place it exactly where a full sort of
+    /// the listing (createdAt descending, id ascending) places it — the
+    /// binary insertion is only an optimization of that order.
+    func testPublishInsertsNewManifestsExactlyWhereFullSortPlacesThem() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root.appendingPathComponent("archive"))
+        let archive = RecordingCoordinator(repository: repo)
+        let base = Date(timeIntervalSince1970: 1_000_000)
+        func insert(_ offset: TimeInterval) async throws {
+            var value = Manifest(sourceType: "import", title: "m", filename: "original.wav")
+            value.createdAt = base.addingTimeInterval(offset)
+            value.sha256 = String(repeating: "a", count: 64); value.durationMs = 1
+            value.sourceComplete = true
+            try await archive.createRecording(value, groupID: RecordingGroup.ungroupedID)
+            let snapshot = await archive.snapshot()
+            let sorted = snapshot.manifests.sorted {
+                $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt
+            }
+            XCTAssertEqual(snapshot.manifests.map(\.id), sorted.map(\.id))
+        }
+        // Seed the archive in sorted order, as `repository.list()` would.
+        for offset in [0.0, -1.0, -1.0, -2.0, -3.0] { try await insert(offset) }
+        // Insertions at every interesting position: newest, middle, ties on
+        // createdAt (the id breaks them), second-newest and oldest.
+        for offset in [0.0, -1.0, -1.0, -2.0, -3.5] { try await insert(offset) }
+        // The listing itself re-sorts from disk identically after a restart.
+        let snapshot = await archive.snapshot()
+        XCTAssertEqual(snapshot.manifests.map(\.id), repo.list().map(\.id))
+        await archive.flushIndex()
+    }
+
     func testCoordinatorReprobesVerifiedCopyAfterSourceReplacementAndRollsBackProbeFailure() async throws {
         for failVerification in [false, true] {
             let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -461,6 +461,47 @@ final class AnonymizationCoordinatorTests: XCTestCase {
         XCTAssertEqual(try repo.loadCard(card.id).displayName, "Новое название")
     }
 
+    /// The coordinator keeps the decoded document of the active card keyed by
+    /// the file's size and modification date: an unchanged file is not
+    /// decoded again, while any external write misses the cache and is read.
+    func testCoordinatorCachesDecodedActiveCardUntilTheFileChanges() async throws {
+        let repo = try makeRepository()
+        let archive = AnonymizationCoordinator(repository: repo)
+        let card = try await importCard(archive, name: "кэш")
+        let initial = try await archive.loadCard(card.id)
+        XCTAssertEqual(initial.displayName, "кэш")
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: repo.cardURL(card.id).path)
+        // The stamp is unchanged, so the cached document answers without
+        // opening the (now unreadable) file.
+        let cached = try await archive.loadCard(card.id)
+        XCTAssertEqual(cached.displayName, "кэш")
+        try FileManager.default.setAttributes([.posixPermissions: 0o644], ofItemAtPath: repo.cardURL(card.id).path)
+        var external = try repo.loadCard(card.id)
+        external.displayName = "изменён снаружи"
+        try repo.saveCard(external)
+        // The write changed the file: the next load must observe it.
+        let reloaded = try await archive.loadCard(card.id)
+        XCTAssertEqual(reloaded.displayName, "изменён снаружи")
+    }
+
+    /// The redundant byte re-hash skip changes no rule: a transaction whose
+    /// mutation breaks a non-identity field still fails validation and keeps
+    /// the previous document on disk.
+    func testUpdateCardStillValidatesNonIdentityFieldsWhenReusingVerifiedBytes() async throws {
+        let repo = try makeRepository()
+        let archive = AnonymizationCoordinator(repository: repo)
+        let card = try await importCard(archive, name: "отчёт")
+        try await archive.rename(card.id, to: "Новое название")
+        let document = try Data(contentsOf: repo.cardURL(card.id))
+        do {
+            _ = try await archive.updateCard(card.id) { $0.displayName = " \t " }
+            XCTFail("Валидация обязана отклонить пробельное название")
+        } catch {}
+        XCTAssertEqual(try Data(contentsOf: repo.cardURL(card.id)), document)
+        let reloaded = try await archive.loadCard(card.id)
+        XCTAssertEqual(reloaded.displayName, "Новое название")
+    }
+
     // MARK: - Editing during a live attempt
 
     /// A live QUEUED/RUNNING attempt freezes its run input, and publication

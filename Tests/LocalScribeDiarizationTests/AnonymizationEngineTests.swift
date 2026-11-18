@@ -1061,4 +1061,68 @@ final class AnonymizationEngineTests: XCTestCase {
         XCTAssertNotEqual(name, source)
         XCTAssertNotNil(name.range(of: #"^[А-ЯЁ][а-яё]+ [А-ЯЁ]\.[А-ЯЁ]\.$"#, options: .regularExpression))
     }
+
+    // MARK: - Standalone-value scan equivalence
+
+    /// The word-run index must answer exactly what the previous
+    /// whole-document scan answered: adversarial boundaries, quoted and
+    /// hyphenated fragments, wordless values and deterministic randomized
+    /// cross-checks over overlapping candidates.
+    func testStandaloneIndexMatchesDirectScan() throws {
+        let text = """
+        Иван Иванов и Ivan Petrov работают в ООО «Ромашка». Пишите на ivan@mail.ru.
+        pre-John after; «John» x John's Johnson 123-4567 а/я 21, г. Москва.
+        Адрес: North
+        Main Street — n-Joh xXn-John !!!n-John.
+        """
+        let adversarial = ["Иван", "Иванов", "Ivan", "Petrov", "John", "Johnson", "John's",
+                           "«John»", "n-Joh", "xXn-John", "!!!n-John", "pre-John", "123-4567",
+                           "а/я", "«»", "—", "Ромашка", "ООО «Ромашка»", "ivan@mail.ru", "@", ".",
+                           "North\nMain Street", "г. Москва", "x", "xx", " ", "\n", "", "а",
+                           "Иван Иван", "I", "!!!", "Main Street", "Street —", "21,"]
+        let index = StandaloneTextIndex(scalars: Array(text.unicodeScalars))
+        for candidate in adversarial {
+            XCTAssertEqual(index.contains(candidate),
+                           AnonymizationEngine.containsStandalone(candidate, in: text),
+                           "mismatch on \(candidate.debugDescription)")
+        }
+
+        // Deterministic pseudo-random cross-check over a mixed alphabet.
+        var state: UInt64 = 0x9E3779B97F4A7C15
+        func next(_ upper: UInt64) -> UInt64 {
+            state &+= 0x9E3779B97F4A7C15
+            var mixed = state
+            mixed = (mixed ^ (mixed >> 30)) &* 0xBF58476D1CE4E5B9
+            mixed = (mixed ^ (mixed >> 27)) &* 0x94D049BB133111EB
+            mixed ^= mixed >> 31
+            return mixed % upper
+        }
+        let alphabet: [Unicode.Scalar] = Array("abЯ0 -.«»@\n/".unicodeScalars)
+        for _ in 0..<400 {
+            let corpusLength = 20 + Int(next(120))
+            let corpus = String(String.UnicodeScalarView((0..<corpusLength).map { _ in alphabet[Int(next(UInt64(alphabet.count)))] }))
+            let valueLength = 1 + Int(next(9))
+            let value = String(String.UnicodeScalarView((0..<valueLength).map { _ in alphabet[Int(next(UInt64(alphabet.count)))] }))
+            let scalars = Array(corpus.unicodeScalars)
+            XCTAssertEqual(StandaloneTextIndex(scalars: scalars).contains(value),
+                           AnonymizationEngine.containsStandalone(value, in: corpus),
+                           "mismatch on \(value.debugDescription) in \(corpus.debugDescription)")
+        }
+    }
+
+    /// End to end through the engine: a drawn substitute that already appears
+    /// standalone in the source is rejected and the next draw is used, so the
+    /// reverse transform cannot mistake fresh text for the original.
+    func testEngineRejectsSubstituteDrawsThatAppearStandaloneInSource() async throws {
+        let text = "Смирнов позвал Смирнова домой."
+        let recognizer = ScriptedRecognizer(markers: [.init(Names.personType, "Смирнов", occurrence: 1)])
+        let values = ScriptedValueSource(values: ["Смирнова", "Орлов"])
+        let (engine, _) = try makeEngine(text: text, recognizer: recognizer, valueSource: values)
+        let outcome = try await engine.run()
+        let substitution = try XCTUnwrap(outcome.artifact.substitutions.first)
+        XCTAssertEqual(substitution.substituteValue, "Орлов")
+        // The rejected draw («Смирнова» stands alone in the source) never
+        // entered the generated text.
+        XCTAssertEqual(outcome.artifact.result.text.text, "Орлов позвал Смирнова домой.")
+    }
 }

@@ -103,9 +103,22 @@ public actor RecordingCoordinator {
             manifests[position] = manifest
             revision &+= 1
         } else {
-            replace((manifests + [manifest]).sorted {
-                $0.createdAt == $1.createdAt ? $0.id < $1.id : $0.createdAt > $1.createdAt
-            })
+            // The listing keeps the total order of `repository.list()`
+            // (createdAt descending, id ascending); a binary search inserts
+            // a new manifest exactly where the previous full sort placed it,
+            // without re-sorting the whole archive on every imported file.
+            var low = 0, high = manifests.count
+            while low < high {
+                let middle = (low + high) / 2
+                let existing = manifests[middle]
+                let precedes = manifest.createdAt == existing.createdAt
+                    ? manifest.id < existing.id : manifest.createdAt > existing.createdAt
+                if precedes { high = middle } else { low = middle + 1 }
+            }
+            manifests.insert(manifest, at: low)
+            for offset in (low + 1)..<manifests.count { positions[manifests[offset].id] = offset }
+            positions[manifest.id] = low
+            revision &+= 1
         }
         scheduleIndex()
     }

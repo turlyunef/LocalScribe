@@ -75,8 +75,13 @@ public struct AnonymizationRepository: Sendable {
         try card.validate()
         return card
     }
-    public func saveCard(_ card: AnonymizationCardDocument) throws {
-        try card.validate()
+    /// `reusingVerifiedBytesOf` names the version the document was loaded
+    /// from in the same transaction with an unchanged byte identity: the
+    /// save then skips re-hashing the embedded import bytes (see
+    /// `AnonymizationCardDocument.validate(reusingVerifiedBytesOf:)`).
+    public func saveCard(_ card: AnonymizationCardDocument,
+                         reusingVerifiedBytesOf verified: AnonymizationCardDocument? = nil) throws {
+        try card.validate(reusingVerifiedBytesOf: verified)
         try Disk.write(card, to: cardURL(card.id), requireReadableSize: true)
     }
     /// Removes the card document and all working files of its attempts. The

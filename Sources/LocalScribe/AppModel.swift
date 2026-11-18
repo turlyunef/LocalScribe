@@ -323,6 +323,10 @@ struct QueueJobID: Hashable, Sendable {
     }
     private var resultSignature = ""
     private var resultLoadID = UUID()
+    /// Decoded checkpoint parts of the open recording's run. Worker
+    /// checkpoints arrive periodically and parts are immutable once written,
+    /// so unchanged parts are not decoded again on every checkpoint reload.
+    private let resultCheckpoints = ResultCheckpointCache()
     var selected: Manifest? { selection.flatMap { recordingsByID[$0] } }
     var selectedCaptions: RecordingLiveCaptions? {
         if let captureCaptions, captureCaptions.recordingID == selection { return captureCaptions }
@@ -557,8 +561,9 @@ struct QueueJobID: Hashable, Sendable {
         let loadID = UUID(); resultLoadID = loadID
         Task {
             do {
+                let checkpoints = resultCheckpoints
                 let results = try await archive.perform { repository in
-                    let result = try repository.results(selected)
+                    let result = try repository.results(selected, reusing: checkpoints)
                     return (result.0, result.1, repository.transcriptionModelID(selected))
                 }
                 guard self.selection == selected.id, self.resultSignature == signature, self.resultLoadID == loadID else { return }
@@ -1065,30 +1070,9 @@ struct QueueJobID: Hashable, Sendable {
                                _ loadURL: @escaping @MainActor () async throws -> URL?) {
         guard !preparingStorage, !shuttingDown, let archive else { onDiscard(); return }
         do {
+            let archive = archive
             try importQueue.enqueue(onDiscard: onDiscard) { [self] in
-                do {
-                    guard let url = try await loadURL() else { return }
-                    try Task.checkCancellation()
-                    errorHandler.note(.importStarted, operation: .importAudio)
-                    let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-                    let tools = self.tools
-                    do {
-                        let manifest = try await archive.importFile(url, tools: tools, groupID: groupID)
-                        await completeImport(manifest)
-                    } catch let duplicate as DuplicateRecording {
-                        try Task.checkCancellation()
-                        guard !shuttingDown else { return }
-                        switch resolveDuplicateImport(duplicate) {
-                        case .openExisting: selection = duplicate.id
-                        case .importAgain:
-                            try Task.checkCancellation()
-                            let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true, groupID: groupID)
-                            await completeImport(manifest)
-                        case .cancel: break
-                        }
-                    }
-                } catch { errorHandler.report(error, operation: .importAudio,
-                                        failure: DiagnosticFailure(.operationFailed, phase: .sourceOpen, error: error)) }
+                await runImportEntry(archive: archive, groupID: groupID, loadURL: loadURL)
             }
         } catch {
             onDiscard()
@@ -1096,11 +1080,66 @@ struct QueueJobID: Hashable, Sendable {
                                         failure: DiagnosticFailure(.operationFailed, phase: .sourceOpen, error: error))
         }
     }
+    /// One serialized import entry. The tail flush covers every exit path —
+    /// success, a cancelled duplicate dialog, a provider without a URL and
+    /// failures alike — so a batch that stops here still publishes what the
+    /// earlier entries imported.
+    private func runImportEntry(archive: RecordingCoordinator, groupID: String,
+                                loadURL: @escaping @MainActor () async throws -> URL?) async {
+        do {
+            guard let url = try await loadURL() else { return }
+            try Task.checkCancellation()
+            errorHandler.note(.importStarted, operation: .importAudio)
+            let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
+            let tools = self.tools
+            do {
+                let manifest = try await archive.importFile(url, tools: tools, groupID: groupID)
+                await completeImport(manifest)
+            } catch let duplicate as DuplicateRecording {
+                try Task.checkCancellation()
+                guard !shuttingDown else { return }
+                switch resolveDuplicateImport(duplicate) {
+                case .openExisting: selection = duplicate.id
+                case .importAgain:
+                    try Task.checkCancellation()
+                    let manifest = try await archive.importFile(url, tools: tools, allowDuplicate: true, groupID: groupID)
+                    await completeImport(manifest)
+                case .cancel: break
+                }
+            }
+        } catch {
+            errorHandler.report(error, operation: .importAudio,
+                                failure: DiagnosticFailure(.operationFailed, phase: .sourceOpen, error: error))
+        }
+        await flushImportSnapshot()
+    }
     func completeImport(_ manifest: Manifest) async {
         // Import may finish while a result sheet owns an unsaved local draft.
         if resultEdit == nil && !savingResult { selection = manifest.id }
-        await reload(); await enqueue(manifest.id)
+        await reloadAfterImportBatch()
+        await enqueue(manifest.id, coalescingImportReload: true)
     }
+    /// Imports share one serialized slot, so while further entries are
+    /// already waiting the intermediate snapshot applications are skipped and
+    /// the batch's final entry publishes one snapshot instead of one per
+    /// file. Every path that can end the batch applies the snapshot, so a
+    /// later reload observes exactly the same state either way.
+    private func reloadAfterImportBatch() async {
+        if importQueue.hasPendingWork {
+            importSnapshotDeferred = true
+        } else {
+            importSnapshotDeferred = false
+            await reload()
+        }
+    }
+    /// Tail of an import entry that failed or was cancelled: the queue may
+    /// have stopped with successful imports still unpublished.
+    private func flushImportSnapshot() async {
+        guard importSnapshotDeferred, !importQueue.hasPendingWork else { return }
+        importSnapshotDeferred = false
+        await reload()
+    }
+    private var importSnapshotDeferred = false
     /// Both buttons reserve the destination and actual HAL input on this turn
     /// of MainActor, before a permission dialog or any other suspension.
     @discardableResult func requestRecording(groupID: String? = nil) -> Task<Void, Never>? {
@@ -1721,7 +1760,8 @@ struct QueueJobID: Hashable, Sendable {
                                                L10n.message(first.error.localizedDescription)))
     }
 
-    func enqueue(_ id: String, allowCancelled: Bool = false, mode: DiagnosticMode? = nil) async {
+    func enqueue(_ id: String, allowCancelled: Bool = false, mode: DiagnosticMode? = nil,
+                 coalescingImportReload: Bool = false) async {
         guard let archive, !deletingJobIDs.contains(.recording(id)), enqueuing[.recording(id)] == nil else { return }
         let request = UUID(), generation = queueGeneration
         let pauseReason = queuePauses.values.first
@@ -1767,7 +1807,7 @@ struct QueueJobID: Hashable, Sendable {
         catch {
             errorHandler.report(message: L10n.text("Не удалось сохранить статус постановки записи в очередь: %1$@", L10n.message(error.localizedDescription)))
         }
-        await reload()
+        if coalescingImportReload { await reloadAfterImportBatch() } else { await reload() }
     }
     private func requireHardware(for role: ModelRole, info: RunInfo, catalog: ModelCatalog) throws {
         let pinned = try catalog.pinned(to: info)

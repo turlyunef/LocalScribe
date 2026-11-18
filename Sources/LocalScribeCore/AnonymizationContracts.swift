@@ -424,15 +424,22 @@ extension AnonymizationCardDocument {
     /// The whole document is checked at once: schema version, UUIDs, byte
     /// identity consistency, conditional obligation of attempt and result
     /// fields, range bounds and pairwise disjointness, and substitution keys.
-    public func validate() throws {
+    /// `reusingVerifiedBytesOf` names a document whose byte identity was
+    /// already fully verified in this transaction and is unchanged here
+    /// (compared as a whole, base64 payload included): the redundant SHA-256
+    /// re-hash of the embedded import bytes is then skipped. Everything else
+    /// is still validated.
+    public func validate(reusingVerifiedBytesOf verified: AnonymizationCardDocument? = nil) throws {
         guard schemaVersion == 1, UUID(uuidString: id) != nil, UUID(uuidString: source.id) != nil,
               UUID(uuidString: latestAttempt.id) != nil, importOrder >= 1 else {
             throw ScribeError.message("Некорректная версия или идентификаторы карточки обезличивания")
         }
-        guard let bytes = importContentIdentity.bytes, importContentIdentity.byteLength >= 1,
-              UInt(bytes.count) == importContentIdentity.byteLength,
-              importContentIdentity.sha256 == ByteContentIdentity.sha256Hex(bytes) else {
-            throw ScribeError.message("Нарушена целостность исходных байтов карточки обезличивания")
+        if verified?.importContentIdentity != importContentIdentity {
+            guard let bytes = importContentIdentity.bytes, importContentIdentity.byteLength >= 1,
+                  UInt(bytes.count) == importContentIdentity.byteLength,
+                  importContentIdentity.sha256 == ByteContentIdentity.sha256Hex(bytes) else {
+                throw ScribeError.message("Нарушена целостность исходных байтов карточки обезличивания")
+            }
         }
         try Self.validateFileStem(importedNameStem)
         guard !displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
