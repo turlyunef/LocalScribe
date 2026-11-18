@@ -952,6 +952,12 @@ struct QueueJobID: Hashable, Sendable {
             let plan = ModelPackageRegistry.removalPlan(packageID: packageID, settings: effectiveAnonymizationSettings, catalog: catalog)
             let confirmation = Self.removalConfirmation(profile: profile, plan: plan, listChanged: listChanged)
             guard presentRemovalDialog(confirmation) else { return }
+            // The modal session keeps executing MainActor work: the entry
+            // guard state captured before the dialog may be stale at the
+            // confirmation, exactly like queue admissions re-check their
+            // guards after every await. A busy queue or a shutdown drops the
+            // confirmed removal; the package stays installed and ready.
+            guard canManageModels else { return }
             // Re-check the affected tabs after the confirmation: a changed list
             // requires a fresh confirmation of the actual state.
             let current = ModelPackageRegistry.removalPlan(packageID: packageID, settings: effectiveAnonymizationSettings, catalog: catalog)
@@ -963,28 +969,76 @@ struct QueueJobID: Hashable, Sendable {
 
     private func executeConfirmedRemoval(packageID: String, members: [ModelProfile], catalog: ModelCatalog, repository: RecordingRepository) {
         Task {
-            // Readiness for new jobs switches off at once; started jobs keep
-            // their pinned verified files until the workers exit (no leases yet
-            // in this work — the queue integration holds them).
+            // More MainActor work may have run between the confirmed dialog
+            // and this task: re-check the freshness of the guards right before
+            // the removal switches readiness off.
+            guard canManageModels else { return }
+            // Readiness for new jobs switches off at once. Started text jobs
+            // hold the package lease until their workers exit, and no new
+            // lease can open once the removal is confirmed, so the physical
+            // deletion is deferred until the last live lease closes.
             await packageRegistry.confirmRemoval(packageID: packageID)
             readyPackageIDs = await packageRegistry.readyPackageIDs()
+            guard await packageRegistry.waitUntilPhysicallyRemovable(packageID: packageID) else { return }
             do {
                 var updated = modelLibrary
                 for member in members where updated.isInstalled(member) {
                     try updated.remove(member, at: repository.models, catalog: catalog, hardware: hardware)
                 }
-                modelLibrary = updated
                 try await packageRegistry.finishPhysicalRemoval(packageID: packageID)
+                // Published only after the whole removal committed, so the
+                // catch below always sees the pre-removal library.
+                modelLibrary = updated
                 readyPackageIDs = await packageRegistry.readyPackageIDs()
                 updateModelsStatus()
             } catch {
-                // Restore readiness until the physical removal actually runs.
-                await packageRegistry.cancelRemoval(packageID: packageID)
-                readyPackageIDs = await packageRegistry.readyPackageIDs()
+                // The member folders are deleted one by one, so the disk state
+                // is unknown at the failure point: never blindly restore the
+                // readiness of a package whose files may already be gone.
                 errorHandler.report(error)
-                Task { await verifyModels() }
+                await reconcileFailedRemoval(packageID: packageID, members: members, catalog: catalog, repository: repository)
             }
         }
+    }
+
+    /// Honest reconciliation after a failed physical removal. Files that are
+    /// all still on disk honestly restore readiness (the failure preceded
+    /// every deletion); anything else rescans the disk and rebuilds the
+    /// registry state from what actually verifies. Unlike `verifyModels`,
+    /// this path is not gated by `canManageModels` — the queue may be busy
+    /// with the very lease holders that deferred the removal, and the on-disk
+    /// truth must win over the in-memory readiness either way.
+    private func reconcileFailedRemoval(packageID: String, members: [ModelProfile], catalog: ModelCatalog, repository: RecordingRepository) async {
+        let untouched = members.filter { modelLibrary.isInstalled($0) }
+            .allSatisfy { FileManager.default.fileExists(atPath: repository.models.appendingPathComponent($0.id).path) }
+        if untouched {
+            await packageRegistry.cancelRemoval(packageID: packageID)
+        } else {
+            do {
+                let hardware = hardware
+                modelLibrary = try await Task.detached(priority: .utility) {
+                    // A presence-level rescan decides readiness here; the full
+                    // SHA-256 integrity check stays an explicit «Проверить
+                    // модели».
+                    try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware, verifyContents: false)
+                }.value
+            } catch {
+                modelsReady = false
+                modelsStatus = L10n.text("Не удалось проверить модели")
+                errorHandler.report(error, operation: .modelVerification,
+                                    failure: DiagnosticFailure(.modelValidation, phase: .modelValidation, error: error))
+            }
+            await reloadAnonymizationState()
+            // A package that no longer verifies on disk is finalized — its
+            // pending removal must not block a later re-installation; verified
+            // surviving files keep the confirmed removal for an explicit
+            // retry.
+            if await packageRegistry.installation(for: packageID) == nil {
+                _ = try? await packageRegistry.finishPhysicalRemoval(packageID: packageID)
+            }
+        }
+        readyPackageIDs = await packageRegistry.readyPackageIDs()
+        updateModelsStatus()
     }
     func chooseImport() {
         let panel = NSOpenPanel(); panel.allowsMultipleSelection = true; panel.canChooseDirectories = false

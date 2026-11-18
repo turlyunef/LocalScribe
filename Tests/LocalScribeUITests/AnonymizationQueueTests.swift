@@ -644,6 +644,72 @@ final class AnonymizationQueueTests: XCTestCase {
         await model.shutdown()
     }
 
+    // MARK: - Deferred file deletion of a confirmed removal
+
+    /// A confirmed removal switches readiness off at once but must not touch
+    /// the files while a started job holds the package lease; the deferred
+    /// deletion completes exactly when the lease closes (worker exit).
+    func testConfirmedRemovalDefersFileDeletionUntilThePackageLeaseCloses() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await fixture(root)
+        let model = fixture.model
+        let packageID = fixture.anon.effectivePackageID
+        let folder = fixture.repository.models.appendingPathComponent(fixture.anon.id)
+        // The lease stand-in of a started job: the real admission would flip
+        // `busy` and block the removal dialog's entry guard, while the registry
+        // hold is the very thing the deferred deletion must respect.
+        let held = await model.packageRegistry.acquireLeaseIfReady(packageID: packageID, profileID: fixture.anon.id)
+        let lease = try XCTUnwrap(held)
+        model.presentRemovalDialog = { _ in true }
+        model.removeModel(fixture.anon)
+        // Readiness switched off at once; the removal is confirmed and pending.
+        try await waitUntil { [model] in await model.packageRegistry.isRemovalPending(packageID) }
+        XCTAssertFalse(model.packageIsReady(fixture.anon))
+        // The files survive while the lease is alive.
+        try await Task.sleep(for: .milliseconds(300))
+        XCTAssertTrue(model.modelLibrary.isInstalled(fixture.anon), "файлы не удаляются под живым lease")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: folder.path))
+        let heldLeases = await model.packageRegistry.activeLeases(packageID: packageID)
+        XCTAssertEqual(heldLeases.count, 1)
+        // Worker exit releases the hold: the deferred removal completes.
+        await model.packageRegistry.release(lease)
+        try await waitUntil { [model] in !model.modelLibrary.isInstalled(fixture.anon) }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path))
+        let stillPending = await model.packageRegistry.isRemovalPending(packageID)
+        XCTAssertFalse(stillPending)
+        XCTAssertFalse(model.packageIsReady(fixture.anon))
+        await model.shutdown()
+    }
+
+    /// The modal removal dialog keeps executing MainActor work: a queue
+    /// admission that happened while the dialog was open makes the entry-guard
+    /// state stale, and the confirmed removal is dropped instead of deleting
+    /// files under a job the guard never saw.
+    func testRemovalConfirmationIsDroppedWhenTheQueueBecameBusyDuringTheDialog() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let fixture = try await fixture(root)
+        let model = fixture.model
+        let packageID = fixture.anon.effectivePackageID
+        model.presentRemovalDialog = { [model] _ in
+            // What a modal session can produce: a job was admitted while the
+            // dialog was open, so the queue became busy after the entry guard.
+            model.busy = true
+            return true
+        }
+        model.removeModel(fixture.anon)
+        // The confirmation is dropped: no pending removal, nothing deleted,
+        // the package stays ready for the running job.
+        XCTAssertTrue(model.modelLibrary.isInstalled(fixture.anon))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: fixture.repository.models.appendingPathComponent(fixture.anon.id).path))
+        let pending = await model.packageRegistry.isRemovalPending(packageID)
+        XCTAssertFalse(pending)
+        XCTAssertTrue(model.packageIsReady(fixture.anon))
+        model.busy = false
+        await model.shutdown()
+    }
+
     // MARK: - Late completion after cancellation is never published
 
     func testCancelAfterArtifactWrittenKeepsPreviousResultUnpublished() async throws {

@@ -284,6 +284,64 @@ final class ModelPackageTests: XCTestCase {
         XCTAssertTrue(restored)
     }
 
+    /// A cross-task completion flag of the deferred-removal waiter.
+    private final class WaiterFlag: @unchecked Sendable {
+        private let lock = NSLock()
+        private var value = false
+        var isSet: Bool { lock.lock(); defer { lock.unlock() }; return value }
+        func set() { lock.lock(); value = true; lock.unlock() }
+    }
+
+    /// The deferred physical removal of a confirmed removal waits for the last
+    /// lease, wakes exactly when it closes, and a cancellation wakes it with
+    /// `false` instead of deleting anything.
+    func testDeferredPhysicalRemovalWaitsForTheLastLeaseAndWakesOnCancel() async throws {
+        let root = try makeRoot()
+        let modelsRoot = root.appendingPathComponent("models")
+        let profile = try makeProfile(id: "full", role: .summary, modelsRoot: modelsRoot,
+                                       contents: ["a"], tasks: Set(ModelTask.allCases))
+        let packageID = profile.effectivePackageID
+        let registry = ModelPackageRegistry()
+        await registry.replaceInstallations(try ModelPackageRegistry.scanInstallations(
+            catalog: ModelCatalog(models: [profile]), modelsRoot: modelsRoot))
+
+        // A started job holds the package before the removal is confirmed.
+        let held = await registry.acquireLeaseIfReady(packageID: packageID, profileID: profile.id)
+        let lease = try XCTUnwrap(held)
+        await registry.confirmRemoval(packageID: packageID)
+        let completed = WaiterFlag()
+        let deferred = Task { [registry, completed] in
+            let removable = await registry.waitUntilPhysicallyRemovable(packageID: packageID)
+            completed.set()
+            return removable
+        }
+        // While the lease is alive the waiter must stay suspended.
+        try await Task.sleep(for: .milliseconds(150))
+        XCTAssertFalse(completed.isSet)
+        // Worker exit wakes the waiter with a removable package.
+        await registry.release(lease)
+        let afterRelease = await deferred.value
+        XCTAssertTrue(afterRelease)
+        let removable = await registry.canPhysicallyRemove(packageID)
+        XCTAssertTrue(removable)
+        try await registry.finishPhysicalRemoval(packageID: packageID)
+
+        // A cancellation wakes a deferred waiter with `false`; the files stay.
+        await registry.publishInstallation(packageID: packageID, profileID: profile.id)
+        let reacquired = await registry.acquireLeaseIfReady(packageID: packageID, profileID: profile.id)
+        XCTAssertNotNil(reacquired)
+        await registry.confirmRemoval(packageID: packageID)
+        let cancelled = Task { [registry] in
+            await registry.waitUntilPhysicallyRemovable(packageID: packageID)
+        }
+        try await Task.sleep(for: .milliseconds(100))
+        await registry.cancelRemoval(packageID: packageID)
+        let afterCancel = await cancelled.value
+        XCTAssertFalse(afterCancel)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: modelsRoot.appendingPathComponent(profile.id).appendingPathComponent("file-0.bin").path))
+    }
+
     func testCanceledRemovalRestoresReadinessAndPublishIgnoresPendingRemoval() async throws {
         let root = try makeRoot()
         let modelsRoot = root.appendingPathComponent("models")

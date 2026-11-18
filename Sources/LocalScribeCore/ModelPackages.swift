@@ -108,6 +108,8 @@ public actor ModelPackageRegistry {
     private var installations: [String: ModelPackageInstallation] = [:]
     private var removalsPending: Set<String> = []
     private var leases: [UUID: ModelPackageLease] = [:]
+    /// Deferred physical removals waiting for the last lease of their package.
+    private var removalWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
 
     public init() {}
 
@@ -172,9 +174,13 @@ public actor ModelPackageRegistry {
     }
 
     /// Worker exit: idempotent release. Closing the last lease of a package
-    /// with a confirmed removal makes it physically removable.
+    /// with a confirmed removal makes it physically removable and wakes the
+    /// deferred physical removal waiting for it.
     public func release(_ lease: ModelPackageLease) {
         leases[lease.id] = nil
+        if removalsPending.contains(lease.packageID), activeLeases(packageID: lease.packageID).isEmpty {
+            resumeRemovalWaiters(lease.packageID)
+        }
     }
 
     public func activeLeases(packageID: String) -> [ModelPackageLease] {
@@ -198,9 +204,11 @@ public actor ModelPackageRegistry {
         removalsPending.insert(packageID)
     }
 
-    /// Cancellation restores readiness until the physical removal runs.
+    /// Cancellation restores readiness until the physical removal runs. A
+    /// deferred removal waiting for leases wakes up and re-checks.
     public func cancelRemoval(packageID: String) {
         removalsPending.remove(packageID)
+        resumeRemovalWaiters(packageID)
     }
 
     public func isRemovalPending(_ packageID: String) -> Bool {
@@ -208,9 +216,32 @@ public actor ModelPackageRegistry {
     }
 
     /// A confirmed removal may physically delete the files only after the last
-    /// lease of the package has closed.
+    /// lease of the package has closed. Callers check this (or wait through
+    /// `waitUntilPhysicallyRemovable`) before touching any file.
     public func canPhysicallyRemove(_ packageID: String) -> Bool {
         removalsPending.contains(packageID) && activeLeases(packageID: packageID).isEmpty
+    }
+
+    /// Wait until a confirmed removal may physically delete the files: the
+    /// last lease of the package has closed. Readiness is already off after
+    /// `confirmRemoval`, so no new lease can open while the caller waits and
+    /// the package stays removable once the wait returns `true`. Returns
+    /// `false` without waiting when no removal of the package is confirmed;
+    /// a cancellation also wakes the waiter with `false`.
+    public func waitUntilPhysicallyRemovable(packageID: String) async -> Bool {
+        if canPhysicallyRemove(packageID) { return true }
+        guard removalsPending.contains(packageID) else { return false }
+        await withCheckedContinuation { continuation in
+            removalWaiters[packageID, default: []].append(continuation)
+        }
+        return canPhysicallyRemove(packageID)
+    }
+
+    /// Wakes the deferred physical removals of a package (its last lease
+    /// closed or the removal was cancelled); the woken caller re-checks
+    /// `canPhysicallyRemove`.
+    private func resumeRemovalWaiters(_ packageID: String) {
+        for continuation in removalWaiters.removeValue(forKey: packageID) ?? [] { continuation.resume() }
     }
 
     /// Finalize the physical deletion (works 9/11 call it after removing the
@@ -225,6 +256,7 @@ public actor ModelPackageRegistry {
         }
         removalsPending.remove(packageID)
         installations[packageID] = nil
+        resumeRemovalWaiters(packageID)
     }
 
     // MARK: - Resolution on the actor

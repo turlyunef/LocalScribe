@@ -17,6 +17,9 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         let multitask: ModelProfile
         let anonymizationOnly: ModelProfile
         let anonymizationAlias: ModelProfile
+        /// A second installed member of the anonymization package with its own
+        /// folder (only present when the fixture was asked for it).
+        let anonymizationTwin: ModelProfile?
         let heavy: ModelProfile
         let nativeSummary: ModelProfile
 
@@ -31,7 +34,8 @@ final class AnonymizationModelSettingsTests: XCTestCase {
     }
 
     private func makeFixture(root: URL, installMultitaskPackage: Bool = true,
-                             installAnonymizationPackage: Bool = true) throws -> Fixture {
+                             installAnonymizationPackage: Bool = true,
+                             installAnonymizationTwin: Bool = false) throws -> Fixture {
         let repo = try RecordingRepository(root: root)
         var entries: [(profile: ModelProfile, install: Bool)] = []
         func profile(_ id: String, role: ModelRole?, ram: Int = 8, working: Int = 2,
@@ -73,6 +77,13 @@ final class AnonymizationModelSettingsTests: XCTestCase {
                                             contents: anonymizationContents, install: installAnonymizationPackage)
         let anonymizationAlias = try profile("anon-multitask-alias", role: nil, tasks: [.anonymization],
                                              contents: ["sh-1", "sh-2"], install: false)
+        // A second installed member of the anonymization package: identical
+        // pinned files in its own folder, so one shared package id.
+        var anonymizationTwin: ModelProfile?
+        if installAnonymizationTwin {
+            anonymizationTwin = try profile("anon-4b-twin", role: nil, tasks: [.anonymization],
+                                            contents: anonymizationContents, install: true)
+        }
         let heavy = try profile("heavy-multitask", role: .summary, ram: 32, working: 24,
                                 tasks: Set(ModelTask.allCases), contents: ["hv-1"], install: true)
 
@@ -92,13 +103,16 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         let model = AppModel(repository: repo, startServices: false, userDefaults: defaults, catalog: catalog, hardware: hardware)
         return Fixture(repository: repo, model: model, multitask: multitask,
                        anonymizationOnly: anonymizationOnly, anonymizationAlias: anonymizationAlias,
+                       anonymizationTwin: anonymizationTwin,
                        heavy: heavy, nativeSummary: nativeSummary)
     }
 
     private func open(_ root: URL, installMultitaskPackage: Bool = true,
-                      installAnonymizationPackage: Bool = true) async throws -> Fixture {
+                      installAnonymizationPackage: Bool = true,
+                      installAnonymizationTwin: Bool = false) async throws -> Fixture {
         let fixture = try makeFixture(root: root, installMultitaskPackage: installMultitaskPackage,
-                                       installAnonymizationPackage: installAnonymizationPackage)
+                                      installAnonymizationPackage: installAnonymizationPackage,
+                                      installAnonymizationTwin: installAnonymizationTwin)
         await fixture.model.verifyModels(verifyContents: false)
         return fixture
     }
@@ -350,6 +364,62 @@ final class AnonymizationModelSettingsTests: XCTestCase {
         XCTAssertEqual(model.anonymizationSettings.profileID(for: .summary), owner.id)
         XCTAssertEqual(model.anonymizationSettings.profileID(for: .anonymization), alias.id)
         XCTAssertEqual(model.diagramProfile?.id, "diagram")
+        await model.shutdown()
+    }
+
+    /// A removal that fails mid-deletion (the first member folder is gone, the
+    /// second refuses deletion) must not restore the readiness of the
+    /// half-deleted package: the confirmed removal stays pending over the
+    /// surviving files, and an explicit retry after the failure completes it.
+    func testFailedRemovalMidDeletionKeepsReadinessOffUntilTheRetryCompletes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fixture = try await open(root, installAnonymizationTwin: true)
+        let model = fixture.model
+        let twin = try XCTUnwrap(fixture.anonymizationTwin)
+        let ownerFolder = fixture.repository.models.appendingPathComponent(fixture.anonymizationOnly.id)
+        let twinFolder = fixture.repository.models.appendingPathComponent(twin.id)
+        defer {
+            // Restore the permissions before the root cleanup: a locked twin
+            // folder would survive `removeItem` and litter the temp directory.
+            try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: twinFolder.path)
+            try? FileManager.default.removeItem(at: root)
+        }
+        let packageID = fixture.anonymizationOnly.effectivePackageID
+        XCTAssertEqual(packageID, twin.effectivePackageID)
+
+        // The twin folder refuses deletion (no write permission to unlink its
+        // file), while the first member's folder is deleted normally.
+        try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: twinFolder.path)
+        model.presentRemovalDialog = { _ in true }
+        model.removeModel(fixture.anonymizationOnly)
+        let deadline = Date().addingTimeInterval(5)
+        while (model.modelLibrary.isInstalled(fixture.anonymizationOnly) || FileManager.default.fileExists(atPath: ownerFolder.path)) && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(model.modelLibrary.isInstalled(fixture.anonymizationOnly))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: ownerFolder.path))
+        // The half-deleted package never gets its readiness back: the removal
+        // stays pending and the surviving twin keeps its files for the retry.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: twinFolder.path))
+        XCTAssertTrue(model.modelLibrary.isInstalled(twin))
+        let pending = await model.packageRegistry.isRemovalPending(packageID)
+        XCTAssertTrue(pending, "подтверждённое удаление сохраняется для повторной попытки")
+        XCTAssertFalse(model.packageIsReady(fixture.anonymizationOnly), "готовность полуудалённого пакета не восстанавливается")
+        XCTAssertFalse(model.packageIsReady(twin))
+        XCTAssertFalse(model.errorHandler.messages.isEmpty, "ошибка удаления доходит до пользователя")
+
+        // Unlocking and retrying completes the confirmed removal.
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: twinFolder.path)
+        model.removeModel(twin)
+        let retryDeadline = Date().addingTimeInterval(5)
+        while model.modelLibrary.isInstalled(twin) && Date() < retryDeadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertFalse(model.modelLibrary.isInstalled(twin))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: twinFolder.path))
+        let stillPending = await model.packageRegistry.isRemovalPending(packageID)
+        XCTAssertFalse(stillPending)
+        XCTAssertFalse(model.packageIsReady(twin))
         await model.shutdown()
     }
 
