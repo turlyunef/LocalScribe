@@ -25,8 +25,8 @@ ASR использует WhisperKit, MLX или GigaAM на CPU. Диариза�
 | Задача | Точная команда | Статус |
 | --- | --- | --- |
 | Release executable targets | `swift build -c release -j 4 --force-resolved-versions` | проверено 18.11.2026 при подготовке релиза 2.21.0 (обычная SwiftPM-сборка); статический runtime GigaAM — 17.11.2026 в упаковке 2.20.0 |
-| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 18.11.2026 в составе релиза 2.21.0 — 970 XCTest (345 Core, 358 UI/service, 267 worker/диаризация), 0 ошибок, 19 опциональных пропусков |
-| Один тест | `swift test -c release -j 4 --force-resolved-versions --filter RecordingPlaybackTests/testSummaryStartsPlaybackAndTranscriptClickPreservesPause` | проверено 18.11.2026 — 1 тест, 0 ошибок. Формат фильтра — `Suite/test` без имени target |
+| Все XCTest | `swift test -c release -j 4 --force-resolved-versions` | проверено 18.11.2026 в составе релиза 2.21.0 — 970 XCTest, 0 ошибок, 19 опциональных пропусков; 19.11.2026 добавлены 95 тестов в 9 сьютах (фильтрованный release-прогон, 0 ошибок), ожидаемо 1065 XCTest: 369 Core, 375 UI/service, 321 worker/диаризация |
+| Один тест | `swift test -c release -j 4 --force-resolved-versions --filter RecordingPlaybackTests/testSummaryStartsPlaybackAndTranscriptClickPreservesPause` | проверено 18.11.2026 — 1 тест, 0 ошибок; 19.11.2026 — 9 сьютов (95 тестов) одним запуском с повторными `--filter` (объединяются по ИЛИ), 0 ошибок. Формат фильтра — `Suite/test` без имени target |
 | Python-проверки скриптов | `python3 -m unittest discover -s scripts/tests -v` | проверено 18.11.2026 в составе релиза 2.21.0 — 89 тестов, 0 ошибок, локальные фикстуры без весов и сети |
 | Статические проверки CI | `bash scripts/verify.sh --static` | проверено 18.11.2026 в составе релиза 2.21.0 — оба plist валидны, 89 Python-тестов, включая согласованность версии |
 | Проверка аудиокодеков | `python3 scripts/format_checks.py` | (не проверено) — отсутствует `Assets/probe/mixed.wav`. В прогоне 26.10.2026 прошло 8/8 вариантов, включая AAC ADTS, см. [ASRModels](docs/ASRModels.md) |
