@@ -234,6 +234,7 @@
   "Не удалось открыть оригинальное изображение": "Couldn’t open the original image",
   "Не удалось получить файл изображения": "Couldn’t get the image file",
   "Не удалось проверить модели": "Could not verify the models",
+  "Не удалось проверить установленные модели: %1$@. Профили исключены из выбора; их папки сохранены на диске, задания будут ждать модель. Удалите повреждённые модели и загрузите их заново.": "Could not verify the installed models: %1$@. The profiles are excluded from the selection; their folders are kept on disk and jobs will wait for the model. Remove the damaged models and download them again.",
   "Не удалось сохранить диагностику.": "Could not save diagnostics.",
   "Не удалось экспортировать: %1$@": "Could not export: %1$@",
   "Не указан": "None",

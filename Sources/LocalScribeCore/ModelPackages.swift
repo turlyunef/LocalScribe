@@ -117,12 +117,23 @@ public actor ModelPackageRegistry {
     /// first member profile (in catalog order) whose pinned files fully verify
     /// on disk publishes the installation. Existing in-memory state is
     /// replaced with the verified result; heavy I/O belongs off the main
-    /// actor, like `ModelLibrary.load`.
+    /// actor, like `ModelLibrary.load`. A member whose own folder exists but
+    /// fails verification is reported through `reportInvalid` (profile + the
+    /// `validateFiles` reason); members without their own folder stay silent —
+    /// a verified sibling installation of the same package serves them.
     public static func scanInstallations(catalog: ModelCatalog, modelsRoot: URL,
-                                         verifyContents: Bool = true) throws -> [String: ModelPackageInstallation] {
+                                         verifyContents: Bool = true,
+                                         reportInvalid: (@Sendable (ModelProfile, Error) -> Void)? = nil) throws -> [String: ModelPackageInstallation] {
         var verified = [String: ModelPackageInstallation]()
         for profile in catalog.models {
-            guard (try? profile.validateFiles(at: modelsRoot, verifyContents: verifyContents)) != nil else { continue }
+            do {
+                try profile.validateFiles(at: modelsRoot, verifyContents: verifyContents)
+            } catch {
+                if FileManager.default.fileExists(atPath: modelsRoot.appendingPathComponent(profile.id).path) {
+                    reportInvalid?(profile, error)
+                }
+                continue
+            }
             let packageID = profile.effectivePackageID
             if verified[packageID] == nil {
                 verified[packageID] = ModelPackageInstallation(packageID: packageID, installedProfileID: profile.id)

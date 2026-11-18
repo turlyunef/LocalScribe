@@ -9,6 +9,21 @@ private final class ProgressLog: @unchecked Sendable {
     var values: [ModelInstallProgress] { lock.lock(); defer { lock.unlock() }; return events }
 }
 
+/// Collects the `reportInvalid` callbacks of a model scan the same way the app
+/// aggregates them before reporting one message.
+private final class InvalidReportLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [(profile: ModelProfile, reason: String)] = []
+    func append(_ profile: ModelProfile, _ error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append((profile, error.localizedDescription))
+    }
+    var values: [(profile: ModelProfile, reason: String)] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
+    }
+}
+
 final class ModelTests: XCTestCase {
     private func fixture(_ id: String, role: ModelRole, root: URL, contents: [String] = ["weights"]) throws -> (ModelProfile, URL) {
         let source = root.appendingPathComponent("source-" + id); try Disk.directory(source)
@@ -98,6 +113,47 @@ final class ModelTests: XCTestCase {
         try Data("corrupt".utf8).write(to: repo.models.appendingPathComponent("summary-27b/file-0.bin"))
         library = try ModelLibrary.load(at: repo.models, catalog: catalog)
         XCTAssertFalse(library.isInstalled(b)); XCTAssertTrue(library.isSelected(a))
+    }
+    func testLoadReportsPresentDamagedFolderAndStaysSilentForAbsent() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root.appendingPathComponent("data"))
+        let (a, sourceA) = try fixture("summary", role: .summary, root: root)
+        let (b, sourceB) = try fixture("summary-27b", role: .summary, root: root)
+        let (absent, _) = try fixture("summary-vlm", role: .summary, root: root)
+        let catalog = ModelCatalog(models: [a, b, absent])
+        try await ModelInstaller().install(a, root: repo.models, localSource: sourceA) { _ in }
+        try await ModelInstaller().install(b, root: repo.models, localSource: sourceB) { _ in }
+        // Same byte length, different SHA-256: exactly the content check fails.
+        try Data("Weights".utf8).write(to: repo.models.appendingPathComponent("summary-27b/file-0.bin"))
+        // A leftover partial download is not an installed model either.
+        try Disk.directory(repo.models.appendingPathComponent("summary-vlm.partial"))
+
+        let reported = InvalidReportLog()
+        let library = try ModelLibrary.load(at: repo.models, catalog: catalog) { reported.append($0, $1) }
+
+        XCTAssertEqual(reported.values.map(\.profile.id), ["summary-27b"],
+                       "only the present but damaged folder is reported")
+        XCTAssertTrue(reported.values[0].reason.contains("отсутствует или повреждён file-0.bin"),
+                      "the reason names the damaged file: \(reported.values[0].reason)")
+        XCTAssertFalse(library.isInstalled(b), "the damaged profile stays excluded")
+        XCTAssertTrue(library.isInstalled(a))
+        XCTAssertFalse(library.isInstalled(absent))
+        // The scan never deletes the damaged folder from disk.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: repo.models.appendingPathComponent("summary-27b/file-0.bin").path))
+        // The saved selection no longer references the damaged profile.
+        XCTAssertFalse(try Disk.read(ModelLibrary.self, at: repo.models.appendingPathComponent("selection.json")).isInstalled(b))
+    }
+    func testLoadWithoutCallbackKeepsDamagedProfileSilent() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let repo = try RecordingRepository(root: root.appendingPathComponent("data"))
+        let (b, sourceB) = try fixture("summary-27b", role: .summary, root: root)
+        try await ModelInstaller().install(b, root: repo.models, localSource: sourceB) { _ in }
+        try Data("corrupt".utf8).write(to: repo.models.appendingPathComponent("summary-27b/file-0.bin"))
+        // Existing callers without the callback keep the previous behaviour.
+        let library = try ModelLibrary.load(at: repo.models, catalog: ModelCatalog(models: [b]))
+        XCTAssertFalse(library.isInstalled(b))
     }
     func testCancelledInstallDoesNotPublishOrReplaceExistingModel() async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

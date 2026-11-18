@@ -33,7 +33,11 @@ final class DownloadService: NSObject, ModelDownloadServiceProtocol {
                     let file = profile.files[fileIndex]
                     let url = try ModelProfile.downloadURL(repository: profile.repository, revision: profile.revision, path: file.path)
                     let transfer = ModelFileDownload(expectedSize: file.size) { bytes in
-                        (self.connection?.remoteObjectProxy as? ModelDownloadProgressProtocol)?.update(requestID, bytesWritten: bytes)
+                        // Error-handled proxy: the synchronous remoteObjectProxy
+                        // raises an ObjC exception on a connection invalidated
+                        // mid-download. Losing progress updates there is harmless.
+                        let proxy = self.connection?.remoteObjectProxyWithErrorHandler { _ in }
+                        (proxy as? ModelDownloadProgressProtocol)?.update(requestID, bytesWritten: bytes)
                     }
                     let (temporary,response) = try await transfer.download(from:url)
                     self.temporary = temporary

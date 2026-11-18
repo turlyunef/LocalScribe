@@ -6,16 +6,29 @@ public struct ModelLibrary: Codable, Sendable {
     public private(set) var installedAt: [String: Date] = [:]
     public private(set) var selectedByRole: [String: String] = [:]
     public init() {}
+    /// Profiles whose folder exists but fails verification are reported through
+    /// `reportInvalid` (profile + the `validateFiles` reason); the exclusion of a
+    /// damaged profile from the selection itself does not change.
     public static func load(at root: URL, catalog: ModelCatalog, hardware: ModelHardware? = nil,
-                            verifyContents: Bool = true) throws -> ModelLibrary {
+                            verifyContents: Bool = true,
+                            reportInvalid: (@Sendable (ModelProfile, Error) -> Void)? = nil) throws -> ModelLibrary {
         let url = root.appendingPathComponent("selection.json")
         var library = FileManager.default.fileExists(atPath: url.path) ? try Disk.read(Self.self, at: url) : Self()
         var verified: [String: Date] = [:]
         for profile in catalog.models {
-            if (try? profile.validateFiles(at: root, verifyContents: verifyContents)) != nil {
-                let modified = try? root.appendingPathComponent(profile.id).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
-                verified[profile.id] = library.installedAt[profile.id] ?? modified ?? .distantPast
+            do {
+                try profile.validateFiles(at: root, verifyContents: verifyContents)
+            } catch {
+                // A profile without its own folder is simply not installed yet;
+                // only a present folder that fails verification is the silent
+                // library/disk mismatch the callback surfaces.
+                if FileManager.default.fileExists(atPath: root.appendingPathComponent(profile.id).path) {
+                    reportInvalid?(profile, error)
+                }
+                continue
             }
+            let modified = try? root.appendingPathComponent(profile.id).resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            verified[profile.id] = library.installedAt[profile.id] ?? modified ?? .distantPast
         }
         library.installedAt = verified
         library.reconcile(catalog: catalog, hardware: hardware)

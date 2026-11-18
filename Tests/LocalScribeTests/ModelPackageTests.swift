@@ -2,6 +2,21 @@ import Foundation
 import XCTest
 @testable import LocalScribeCore
 
+/// Collects the `reportInvalid` callbacks of an installation scan the same way
+/// the app aggregates them before reporting one message.
+private final class InvalidProfileLog: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [(profile: ModelProfile, reason: String)] = []
+    func append(_ profile: ModelProfile, _ error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append((profile, error.localizedDescription))
+    }
+    var values: [(profile: ModelProfile, reason: String)] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
+    }
+}
+
 /// Task support of profiles, package matching by pinned files, the single
 /// verified installation shared by compatible assignments, readiness with
 /// removal and file-hold leases, and the byte-limit sources.
@@ -136,6 +151,31 @@ final class ModelPackageTests: XCTestCase {
         try Data("tampered".utf8).write(to: modelsRoot.appendingPathComponent("shared-9b/file-0.bin"))
         verified = try ModelPackageRegistry.scanInstallations(catalog: catalog, modelsRoot: modelsRoot, verifyContents: true)
         XCTAssertTrue(verified.isEmpty)
+    }
+
+    func testScanReportsPresentDamagedFolderButNotAbsentMembers() throws {
+        let root = try makeRoot()
+        let modelsRoot = root.appendingPathComponent("models")
+        let installed = try makeProfile(id: "shared-9b", role: .summary, modelsRoot: modelsRoot, contents: ["a"])
+        // A sibling member of the same package with no folder of its own: it
+        // is served by the verified sibling installation, never reported.
+        let sibling = try makeProfile(id: "shared-9b-vlm", role: .diagram, modelsRoot: modelsRoot,
+                                      contents: ["a"], onDisk: false)
+        let absent = try makeProfile(id: "absent", role: .diagram, modelsRoot: modelsRoot, contents: ["c"], onDisk: false)
+        let catalog = ModelCatalog(models: [installed, sibling, absent])
+
+        // Same byte length ("a" → "b"), different SHA-256.
+        try Data("b".utf8).write(to: modelsRoot.appendingPathComponent("shared-9b/file-0.bin"))
+        let reported = InvalidProfileLog()
+        let verified = try ModelPackageRegistry.scanInstallations(catalog: catalog, modelsRoot: modelsRoot,
+                                                                  verifyContents: true) { reported.append($0, $1) }
+        XCTAssertTrue(verified.isEmpty, "the damaged package loses its installation")
+        XCTAssertEqual(reported.values.map(\.profile.id), ["shared-9b"],
+                       "only the present but damaged folder is reported")
+        XCTAssertTrue(reported.values[0].reason.contains("отсутствует или повреждён file-0.bin"),
+                      "the reason names the damaged file: \(reported.values[0].reason)")
+        // The damaged folder itself is never deleted by the scan.
+        XCTAssertTrue(FileManager.default.fileExists(atPath: modelsRoot.appendingPathComponent("shared-9b/file-0.bin").path))
     }
 
     func testOneInstallationServesCompatibleAssignmentsOfTheSamePackage() async throws {

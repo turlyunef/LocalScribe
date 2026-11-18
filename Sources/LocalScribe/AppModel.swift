@@ -32,6 +32,21 @@ struct QueueJobID: Hashable, Sendable {
     }
 }
 
+/// Collects the reasons installed profiles failed model verification while the
+/// scan runs off the main actor; the aggregate is reported once afterwards.
+private final class InvalidModelReports: @unchecked Sendable {
+    private let lock = NSLock()
+    private var entries: [(profile: ModelProfile, reason: String)] = []
+    func add(_ profile: ModelProfile, _ error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        entries.append((profile, error.localizedDescription))
+    }
+    var values: [(profile: ModelProfile, reason: String)] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
+    }
+}
+
 @MainActor final class AppModel: ObservableObject {
     @Published private(set) var recordingGroups = RecordingGroups()
     let recordingSearch = RecordingSearch()
@@ -609,10 +624,17 @@ struct QueueJobID: Hashable, Sendable {
         defer { verifyingModels = false; if !queued.isEmpty { Task { await processQueue() } } }
         do {
             let hardware = hardware
+            // Damaged profiles keep failing verification and stay excluded from
+            // the selection; the reasons leave the scan through one aggregated
+            // report instead of disappearing silently.
+            let invalid = InvalidModelReports()
             modelLibrary = try await Task.detached(priority: .utility) {
                 try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware,
-                                      verifyContents: verifyContents)
+                                      verifyContents: verifyContents) { profile, error in
+                    invalid.add(profile, error)
+                }
             }.value
+            reportInvalidModels(invalid.values)
             await reloadAnonymizationState()
             updateModelsStatus()
         } catch {
@@ -621,6 +643,17 @@ struct QueueJobID: Hashable, Sendable {
             errorHandler.report(error, operation: .modelVerification,
                                 failure: DiagnosticFailure(.modelValidation, phase: .modelValidation, error: error))
         }
+    }
+
+    /// One aggregated report instead of one per profile: each listed profile
+    /// failed verification, is excluded from the selection, and its folder
+    /// stays on disk — new jobs wait for the model until it is reinstalled.
+    private func reportInvalidModels(_ entries: [(profile: ModelProfile, reason: String)]) {
+        guard !entries.isEmpty else { return }
+        let reasons = entries.map { L10n.message($0.reason) }.joined(separator: "; ")
+        errorHandler.report(message: L10n.text("Не удалось проверить установленные модели: %1$@. Профили исключены из выбора; их папки сохранены на диске, задания будут ждать модель. Удалите повреждённые модели и загрузите их заново.", reasons),
+                            operation: .modelVerification,
+                            failure: DiagnosticFailure(.modelValidation, phase: .modelValidation))
     }
 
     /// Load or migrate the anonymization settings record (first open copies the
@@ -1021,12 +1054,18 @@ struct QueueJobID: Hashable, Sendable {
         } else {
             do {
                 let hardware = hardware
+                let invalid = InvalidModelReports()
                 modelLibrary = try await Task.detached(priority: .utility) {
                     // A presence-level rescan decides readiness here; the full
                     // SHA-256 integrity check stays an explicit «Проверить
-                    // модели».
-                    try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware, verifyContents: false)
+                    // модели». A folder that no longer even passes the presence
+                    // level is the honest reason this reconciliation happened.
+                    try ModelLibrary.load(at: repository.models, catalog: catalog, hardware: hardware,
+                                          verifyContents: false) { profile, error in
+                        invalid.add(profile, error)
+                    }
                 }.value
+                reportInvalidModels(invalid.values)
             } catch {
                 modelsReady = false
                 modelsStatus = L10n.text("Не удалось проверить модели")
