@@ -306,7 +306,7 @@ enum LiveCaptionRecognition {
 
 /// The input iterator is the only caller of consume. Only the async stream
 /// crosses over to the task that asks the analyzer to finalize at a pause.
-private final class LiveCaptionPauses: @unchecked Sendable {
+final class LiveCaptionPauses: @unchecked Sendable {
     let times: AsyncStream<CMTime>
     private let output: AsyncStream<CMTime>.Continuation
     private let blockFrames = 320
