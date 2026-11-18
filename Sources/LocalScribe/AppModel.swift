@@ -1302,9 +1302,14 @@ struct QueueJobID: Hashable, Sendable {
                 }
                 if hasFragments {
                     let reason = startInterruption ?? startupStopReason ?? error.localizedDescription
-                    _ = try? await archive.update(id) {
-                        $0.state = .interrupted
-                        $0.lastError = reason
+                    do {
+                        try await archive.update(id) {
+                            $0.state = .interrupted
+                            $0.lastError = reason
+                        }
+                    } catch is CancellationError { }
+                    catch {
+                        reportStatusSaveFailure(error, "Не удалось сохранить статус прерванного запуска записи: %1$@")
                     }
                 } else {
                     do { try await archive.delete(published) }
@@ -1684,6 +1689,33 @@ struct QueueJobID: Hashable, Sendable {
         }
         await reload()
     }
+    /// Reports a failed secondary status save (a failed/interrupted/
+    /// cancelled/queued transition persisted after the primary outcome).
+    /// Swallowing such a write leaves the row in a phantom
+    /// «Распознаём речь»/«В очереди» state with no live worker until a
+    /// restart — the common root is a full disk, which the user must see.
+    /// The status semantics are unchanged: only the visibility of the save
+    /// failure differs. Cancelling the update itself is not a failure.
+    private func reportStatusSaveFailure(_ error: Error, _ template: String) {
+        errorHandler.report(message: L10n.text(template, L10n.message(error.localizedDescription)))
+    }
+
+    /// One aggregated report for a mass pause: N identical per-job reports
+    /// would only spam the handler, so the first failure carries the kind
+    /// counts of every job whose status could not be saved.
+    private func reportPauseSaveFailures(_ failures: [(kind: QueueJobKind, error: Error)]) {
+        guard let first = failures.first else { return }
+        var counts: [QueueJobKind: Int] = [:]
+        for failure in failures { counts[failure.kind, default: 0] += 1 }
+        let labels: [QueueJobKind: String] = [.recording: "записей", .diagram: "схем", .text: "текстов"]
+        let parts = [QueueJobKind.recording, .diagram, .text].compactMap { kind in
+            counts[kind].map { "\(labels[kind] ?? "заданий"): \($0)" }
+        }
+        errorHandler.report(message: L10n.text("Не удалось сохранить статус приостановленных заданий (%1$@): %2$@",
+                                               parts.joined(separator: ", "),
+                                               L10n.message(first.error.localizedDescription)))
+    }
+
     func enqueue(_ id: String, allowCancelled: Bool = false, mode: DiagnosticMode? = nil) async {
         guard let archive, !deletingJobIDs.contains(.recording(id)), enqueuing[.recording(id)] == nil else { return }
         let request = UUID(), generation = queueGeneration
@@ -1790,31 +1822,46 @@ struct QueueJobID: Hashable, Sendable {
                 if activeJob == job, !(error is CancellationError || (resourcesPaused && queued.contains(job))) {
                     if job.isRecording {
                         let isMicrophone = recordingID == job.id
-                        _ = try? await archive.update(job.id) { m in
-                            // A queued job can be cancelled while its previous worker
-                            // is still unwinding a resource pause.
-                            guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
-                            if isMicrophone || !m.sourceComplete && m.state == .recording {
-                                // Processing failure never changes microphone ownership/state.
-                                m.captureProcessing = .failed
-                            } else if m.state.processing || m.state == .queued || m.state == .recorded {
-                                m.state = .failed
+                        do {
+                            try await archive.update(job.id) { m in
+                                // A queued job can be cancelled while its previous worker
+                                // is still unwinding a resource pause.
+                                guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
+                                if isMicrophone || !m.sourceComplete && m.state == .recording {
+                                    // Processing failure never changes microphone ownership/state.
+                                    m.captureProcessing = .failed
+                                } else if m.state.processing || m.state == .queued || m.state == .recorded {
+                                    m.state = .failed
+                                }
+                                m.lastError = message
                             }
-                            m.lastError = message
+                        } catch is CancellationError { }
+                        catch {
+                            reportStatusSaveFailure(error, "Не удалось сохранить статус сбоя обработки записи: %1$@")
                         }
                     } else if job.isText, let textArchive {
                         // A failure records a safe PROCESSING reason on this attempt
                         // and never touches the published result (invariant 6).
-                        _ = try? await textArchive.updateCard(job.id) { card in
-                            guard card.latestAttempt.state == .running || card.latestAttempt.state == .queued else { return }
-                            card.latestAttempt.state = .failed
-                            card.latestAttempt.failure = .processing(message)
+                        do {
+                            try await textArchive.updateCard(job.id) { card in
+                                guard card.latestAttempt.state == .running || card.latestAttempt.state == .queued else { return }
+                                card.latestAttempt.state = .failed
+                                card.latestAttempt.failure = .processing(message)
+                            }
+                        } catch is CancellationError { }
+                        catch {
+                            reportStatusSaveFailure(error, "Не удалось сохранить статус сбоя обезличивания текста: %1$@")
                         }
                     } else if let diagramArchive {
-                        _ = try? await diagramArchive.update(job.id) { m in
-                            guard m.state != .cancelled else { return }
-                            if m.state.processing || m.state == .queued { m.state = .failed }
-                            m.lastError = message
+                        do {
+                            try await diagramArchive.update(job.id) { m in
+                                guard m.state != .cancelled else { return }
+                                if m.state.processing || m.state == .queued { m.state = .failed }
+                                m.lastError = message
+                            }
+                        } catch is CancellationError { }
+                        catch {
+                            reportStatusSaveFailure(error, "Не удалось сохранить статус сбоя распознавания схемы: %1$@")
                         }
                     }
                 }
@@ -2061,23 +2108,38 @@ struct QueueJobID: Hashable, Sendable {
                     setDiagnosticMode(.resume, for: job)
                 }
                 if job.isRecording, let archive {
-                    _ = try? await archive.update(job.id) { m in
-                        if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .queued }
-                        m.lastError = pauseMessage
+                    do {
+                        try await archive.update(job.id) { m in
+                            if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .queued }
+                            m.lastError = pauseMessage
+                        }
+                    } catch is CancellationError { }
+                    catch {
+                        reportStatusSaveFailure(error, "Не удалось сохранить статус записи при паузе очереди: %1$@")
                     }
                 } else if job.isText, let textArchive {
                     // The attempt returns to the FIFO head and keeps its frozen
                     // input (or still-frozen retry snapshot) for the automatic
                     // continuation; the queue banner explains the pause.
-                    _ = try? await textArchive.updateCard(job.id) { card in
-                        if card.latestAttempt.state == .running || card.latestAttempt.state == .queued {
-                            card.latestAttempt.state = .queued
+                    do {
+                        try await textArchive.updateCard(job.id) { card in
+                            if card.latestAttempt.state == .running || card.latestAttempt.state == .queued {
+                                card.latestAttempt.state = .queued
+                            }
                         }
+                    } catch is CancellationError { }
+                    catch {
+                        reportStatusSaveFailure(error, "Не удалось сохранить статус текста при паузе очереди: %1$@")
                     }
                 } else if !job.isRecording, let diagramArchive {
-                    _ = try? await diagramArchive.update(job.id) {
-                        if $0.state == .recognizing || $0.state == .queued { $0.state = .queued }
-                        $0.lastError = pauseMessage
+                    do {
+                        try await diagramArchive.update(job.id) {
+                            if $0.state == .recognizing || $0.state == .queued { $0.state = .queued }
+                            $0.lastError = pauseMessage
+                        }
+                    } catch is CancellationError { }
+                    catch {
+                        reportStatusSaveFailure(error, "Не удалось сохранить статус схемы при паузе очереди: %1$@")
                     }
                 }
                 await supervisor.cancel()
@@ -2133,28 +2195,41 @@ struct QueueJobID: Hashable, Sendable {
         defer { queuePauses.removeValue(forKey: pauseID) }
         let jobs = queued + (activeJob.map { [$0] } ?? [])
         queued.removeAll(); activeJob = nil
+        // A mass pause reports one aggregated save failure instead of N
+        // identical per-job messages.
+        var pauseSaveFailures: [(kind: QueueJobKind, error: Error)] = []
         for job in Set(jobs) {
             if job.isRecording, let archive {
-                _ = try? await archive.update(job.id) { m in
-                    guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
-                    if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
-                    m.lastError = reason
-                }
+                do {
+                    try await archive.update(job.id) { m in
+                        guard m.state != .cancelled, m.captureProcessing != .cancelled else { return }
+                        if m.state == .recording { m.captureProcessing = .interrupted } else { m.state = .interrupted }
+                        m.lastError = reason
+                    }
+                } catch is CancellationError { }
+                catch { pauseSaveFailures.append((job.kind, error)) }
             } else if job.isText, let textArchive {
                 // Sleep/shutdown interrupts the attempt; an explicit retry
                 // continues it later (like the restart recovery).
-                _ = try? await textArchive.updateCard(job.id) { card in
-                    guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
-                    card.latestAttempt.state = .interrupted
-                }
+                do {
+                    try await textArchive.updateCard(job.id) { card in
+                        guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
+                        card.latestAttempt.state = .interrupted
+                    }
+                } catch is CancellationError { }
+                catch { pauseSaveFailures.append((job.kind, error)) }
             } else if !job.isRecording, let diagramArchive {
-                _ = try? await diagramArchive.update(job.id) { m in
-                    guard m.state != .cancelled else { return }
-                    if m.state.processing || m.state == .queued { m.state = .interrupted }
-                    m.lastError = reason
-                }
+                do {
+                    try await diagramArchive.update(job.id) { m in
+                        guard m.state != .cancelled else { return }
+                        if m.state.processing || m.state == .queued { m.state = .interrupted }
+                        m.lastError = reason
+                    }
+                } catch is CancellationError { }
+                catch { pauseSaveFailures.append((job.kind, error)) }
             }
         }
+        reportPauseSaveFailures(pauseSaveFailures)
         await supervisor.cancel()
         await waitUntilQueueIdle()
         await reload()
@@ -2178,8 +2253,13 @@ struct QueueJobID: Hashable, Sendable {
             Task { await processQueue() }
         }
         guard captionsOverrideID != id else { return }
-        _ = try? await archive.update(id) { m in
-            if m.state == .recording { m.captureProcessing = .cancelled } else { m.state = .cancelled }
+        do {
+            try await archive.update(id) { m in
+                if m.state == .recording { m.captureProcessing = .cancelled } else { m.state = .cancelled }
+            }
+        } catch is CancellationError { }
+        catch {
+            reportStatusSaveFailure(error, "Не удалось сохранить статус отменённой записи: %1$@")
         }
         await reload()
     }
@@ -2474,21 +2554,36 @@ struct QueueJobID: Hashable, Sendable {
         guard allowCancelled || m.state != .cancelled, activeJob != job,
               generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
         if shuttingDown {
-            _ = try? await diagramArchive.update(id) {
-                $0.state = .interrupted; $0.lastError = "Приложение закрыто. Можно повторить распознавание."
+            do {
+                try await diagramArchive.update(id) {
+                    $0.state = .interrupted; $0.lastError = "Приложение закрыто. Можно повторить распознавание."
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус схемы перед закрытием приложения: %1$@")
             }
             await reloadDiagrams(); return
         }
         if let reason = queuePauses.values.first ?? pauseReason {
-            _ = try? await diagramArchive.update(id) {
-                if $0.state != .cancelled { $0.state = .interrupted }
-                $0.lastError = reason
+            do {
+                try await diagramArchive.update(id) {
+                    if $0.state != .cancelled { $0.state = .interrupted }
+                    $0.lastError = reason
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус прерванной схемы: %1$@")
             }
             await reloadDiagrams(); return
         }
         guard m.pendingRunId != nil || diagramProfile != nil else {
             // Without a frozen run and a ready model the item stays outside the FIFO.
-            _ = try? await diagramArchive.update(id) { $0.state = .waitingForModels }
+            do {
+                try await diagramArchive.update(id) { $0.state = .waitingForModels }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус ожидания модели для схемы: %1$@")
+            }
             await reloadDiagrams(); return
         }
         if m.pendingRunId == nil, let profile = diagramProfile {
@@ -2500,7 +2595,12 @@ struct QueueJobID: Hashable, Sendable {
         }
         guard generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
         if !queued.contains(job) { queued.append(job) }
-        _ = try? await diagramArchive.update(id) { $0.state = .queued; $0.lastError = nil }
+        do {
+            try await diagramArchive.update(id) { $0.state = .queued; $0.lastError = nil }
+        } catch is CancellationError { }
+        catch {
+            reportStatusSaveFailure(error, "Не удалось сохранить статус постановки схемы в очередь: %1$@")
+        }
         await reloadDiagrams()
     }
     func cancelDiagram(_ id: String, onlyPending: Bool = false) async {
@@ -2515,7 +2615,12 @@ struct QueueJobID: Hashable, Sendable {
             suspendingQueue = false
             Task { await processQueue() }
         }
-        _ = try? await diagramArchive.cancel(id, onlyPending: onlyPending)
+        do {
+            try await diagramArchive.cancel(id, onlyPending: onlyPending)
+        } catch is CancellationError { }
+        catch {
+            reportStatusSaveFailure(error, "Не удалось сохранить статус отменённой схемы: %1$@")
+        }
         await reloadDiagrams()
     }
     /// Deleting first bars re-admission, then waits for exactly its own worker
@@ -2712,9 +2817,14 @@ struct QueueJobID: Hashable, Sendable {
         if (queuePauses.values.first ?? pauseReason) != nil {
             // A sleep/shutdown pause invalidates this admission; the card needs
             // an explicit retry after the pause, exactly like diagram jobs.
-            _ = try? await textArchive.updateCard(id) {
-                guard $0.latestAttempt.state == .waitingModel else { return }
-                $0.latestAttempt.state = .interrupted
+            do {
+                try await textArchive.updateCard(id) {
+                    guard $0.latestAttempt.state == .waitingModel else { return }
+                    $0.latestAttempt.state = .interrupted
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус прерванного текста: %1$@")
             }
             await reloadTexts(); return
         }
@@ -2726,9 +2836,14 @@ struct QueueJobID: Hashable, Sendable {
             // No ready assignment: the card keeps waiting outside the FIFO.
             return
         }
-        _ = try? await textArchive.updateCard(id) {
-            guard $0.latestAttempt.state == .waitingModel else { return }
-            $0.latestAttempt.state = .queued
+        do {
+            try await textArchive.updateCard(id) {
+                guard $0.latestAttempt.state == .waitingModel else { return }
+                $0.latestAttempt.state = .queued
+            }
+        } catch is CancellationError { }
+        catch {
+            reportStatusSaveFailure(error, "Не удалось сохранить статус постановки текста в очередь: %1$@")
         }
         guard generation == queueGeneration, !deletingJobIDs.contains(job), enqueuing[job] == request else { return }
         confirmed = true
@@ -2792,12 +2907,17 @@ struct QueueJobID: Hashable, Sendable {
         guard activeJob == job else { throw CancellationError() }
         guard readiness.isReady, let profile = readiness.profile, let packageID = readiness.packageID,
               let lease = await packageRegistry.acquireLeaseIfReady(packageID: packageID, profileID: profile.id) else {
-            _ = try? await textArchive.updateCard(id) { card in
-                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
-                card.latestAttempt.state = .waitingModel
-                // A retry that returns to waiting loses its frozen snapshot;
-                // the first start after readiness takes the last saved source.
-                card.latestAttempt.requestedSource = nil
+            do {
+                try await textArchive.updateCard(id) { card in
+                    guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
+                    card.latestAttempt.state = .waitingModel
+                    // A retry that returns to waiting loses its frozen snapshot;
+                    // the first start after readiness takes the last saved source.
+                    card.latestAttempt.requestedSource = nil
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус ожидания модели для текста: %1$@")
             }
             await reloadTexts()
             return
@@ -2818,10 +2938,15 @@ struct QueueJobID: Hashable, Sendable {
         errorHandler.note(.jobStarted, job: processingDiagnostic)
         if actualBytes > limit {
             await packageRegistry.release(lease)
-            _ = try? await textArchive.updateCard(id) { card in
-                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
-                card.latestAttempt.state = .failed
-                card.latestAttempt.failure = .sizeLimit(actualBytes: actualBytes, limitBytes: limit)
+            do {
+                try await textArchive.updateCard(id) { card in
+                    guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
+                    card.latestAttempt.state = .failed
+                    card.latestAttempt.failure = .sizeLimit(actualBytes: actualBytes, limitBytes: limit)
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус сбоя обезличивания текста: %1$@")
             }
             errorHandler.report(message: "Размер текста превышает предел модели.", operation: .anonymization,
                                 job: processingDiagnostic, failure: DiagnosticFailure(.sizeLimit, phase: .admission), show: false)
@@ -2845,10 +2970,15 @@ struct QueueJobID: Hashable, Sendable {
             }
         } catch {
             await packageRegistry.release(lease)
-            _ = try? await textArchive.updateCard(id) { card in
-                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
-                card.latestAttempt.state = .failed
-                card.latestAttempt.failure = .processing("Не удалось подготовить задание обезличивания")
+            do {
+                try await textArchive.updateCard(id) { card in
+                    guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .queued else { return }
+                    card.latestAttempt.state = .failed
+                    card.latestAttempt.failure = .processing("Не удалось подготовить задание обезличивания")
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус сбоя обезличивания текста: %1$@")
             }
             if activeJob == job {
                 errorHandler.report(error, operation: .anonymization, job: processingDiagnostic,
@@ -2919,10 +3049,15 @@ struct QueueJobID: Hashable, Sendable {
         // this attempt (AC-17/18).
         let currentRight = card.publishedResult?.text.id
         guard currentRight == card.latestAttempt.expectedResultRevisionID else {
-            _ = try? await textArchive.updateCard(cardID) { card in
-                guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .running else { return }
-                card.latestAttempt.state = .failed
-                card.latestAttempt.failure = .processing("Правая версия результата изменилась. Повторите обезличивание заново.")
+            do {
+                try await textArchive.updateCard(cardID) { card in
+                    guard card.latestAttempt.id == attemptID, card.latestAttempt.state == .running else { return }
+                    card.latestAttempt.state = .failed
+                    card.latestAttempt.failure = .processing("Правая версия результата изменилась. Повторите обезличивание заново.")
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус сбоя обезличивания текста: %1$@")
             }
             if activeJob == .text(cardID) {
                 errorHandler.report(message: "Правая версия результата изменилась. Повторите обезличивание заново.",
@@ -2972,9 +3107,14 @@ struct QueueJobID: Hashable, Sendable {
             suspendingQueue = false
             Task { await processQueue() }
         }
-        _ = try? await textArchive.updateCard(id) { card in
-            guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
-            card.latestAttempt.state = .cancelled
+        do {
+            try await textArchive.updateCard(id) { card in
+                guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
+                card.latestAttempt.state = .cancelled
+            }
+        } catch is CancellationError { }
+        catch {
+            reportStatusSaveFailure(error, "Не удалось сохранить статус отменённого текста: %1$@")
         }
         await reloadTexts()
     }
@@ -3072,9 +3212,14 @@ struct QueueJobID: Hashable, Sendable {
             }
             // A surviving document (a partial failure) must never keep a
             // phantom queued/running attempt after its worker was stopped.
-            _ = try? await textArchive.updateCard(id) { card in
-                guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
-                card.latestAttempt.state = .cancelled
+            do {
+                try await textArchive.updateCard(id) { card in
+                    guard card.latestAttempt.state == .queued || card.latestAttempt.state == .running else { return }
+                    card.latestAttempt.state = .cancelled
+                }
+            } catch is CancellationError { }
+            catch {
+                reportStatusSaveFailure(error, "Не удалось сохранить статус отменённого текста: %1$@")
             }
         }
     }
