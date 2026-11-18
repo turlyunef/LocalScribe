@@ -121,11 +121,12 @@ fingerprint с ID/revision/SHA backend/политики/aligner. Изменен�
 не переписывает уже созданный run. Установка/докачка проверенных частей,
 импорт из папки и XPC download остаются общими для каждого компонента.
 
-Новые задания используют `1.0.0-audio2-asr12-live1-diarization4-summary16`.
+Новые задания используют `1.0.0-audio2-asr14-live1-diarization4-summary17`.
 Готовые старые результаты читаются. Несовместимое продолжение сохраняет
 active/pending/checkpoints и объясняет необходимость «Обработать заново».
-Fingerprint SummaryEngine включает fingerprint Transcript; prompt summary16
-и веса модели итогов не менялись.
+Fingerprint SummaryEngine включает fingerprint Transcript; при переходе
+к summary17 изменился prompt (`prompt-v17-amendment-fallback` вместо
+`prompt-v16-question-pages1`), а веса модели итогов не менялись.
 
 ## Проверка и статус качества
 
